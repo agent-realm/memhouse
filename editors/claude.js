@@ -2,8 +2,41 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+const HOME = os.homedir();
+
+// Discover all Claude Code config roots — ports memory-house agent-sync's
+// discover_roots("claude-code"). Claude sessions don't live only under ~/.claude:
+// every CLAUDE_CONFIG_DIR (e.g. Kommander playbook installs under
+// ~/.claude-playbooks/<name>[/playbook]) has its own projects/ dir. A dir qualifies
+// as a root if it holds a projects/ subdir or a history.jsonl. Deduped by realpath.
+function discoverClaudeRoots() {
+  const cands = [path.join(HOME, '.claude')];
+  const pbBase = path.join(HOME, '.claude-playbooks');
+  try {
+    for (const name of fs.readdirSync(pbBase)) {
+      if (name.startsWith('.')) continue; // match glob('*') — skip dotfiles/backups (.bak)
+      cands.push(path.join(pbBase, name));
+      cands.push(path.join(pbBase, name, 'playbook')); // legacy playbook/ layout
+    }
+  } catch { /* no ~/.claude-playbooks */ }
+
+  const roots = [];
+  const seen = new Set();
+  for (const d of cands) {
+    let isDir = false;
+    try { isDir = fs.statSync(d).isDirectory(); } catch { /* missing */ }
+    if (!isDir) continue;
+    let hasProjects = false;
+    try { hasProjects = fs.statSync(path.join(d, 'projects')).isDirectory(); } catch { /* none */ }
+    const hasHistory = fs.existsSync(path.join(d, 'history.jsonl'));
+    if (!hasProjects && !hasHistory) continue;
+    let rp; try { rp = fs.realpathSync(d); } catch { rp = d; }
+    if (seen.has(rp)) continue;
+    seen.add(rp);
+    roots.push(d);
+  }
+  return roots;
+}
 
 // ============================================================
 // Adapter interface
@@ -13,11 +46,16 @@ const name = 'claude';
 
 function getChats() {
   const chats = [];
-  if (!fs.existsSync(PROJECTS_DIR)) return chats;
 
-  for (const projDir of fs.readdirSync(PROJECTS_DIR)) {
-    const dir = path.join(PROJECTS_DIR, projDir);
-    if (!fs.statSync(dir).isDirectory()) continue;
+  for (const root of discoverClaudeRoots()) {
+    const PROJECTS_DIR = path.join(root, 'projects');
+    if (!fs.existsSync(PROJECTS_DIR)) continue;
+
+    let projDirs;
+    try { projDirs = fs.readdirSync(PROJECTS_DIR); } catch { continue; }
+    for (const projDir of projDirs) {
+      const dir = path.join(PROJECTS_DIR, projDir);
+      try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
 
     // Decode folder path from dir name (e.g. -Users-fka-Code-foo -> /Users/fka/Code/foo)
     const decodedFolder = projDir.replace(/-/g, '/');
@@ -94,6 +132,7 @@ function getChats() {
         bubbleCount: entry.messageCount || 0,
         _fullPath: entry.fullPath,
       });
+    }
     }
   }
 
