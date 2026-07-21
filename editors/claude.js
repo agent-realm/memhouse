@@ -175,12 +175,14 @@ function cleanPrompt(prompt) {
   return clean || null;
 }
 
-function getMessages(chat) {
-  const filePath = chat._fullPath;
-  if (!filePath || !fs.existsSync(filePath)) return [];
-
+// Parse one Claude session .jsonl into the adapter's message shape. When
+// `isSubagent` is set, each message is tagged `[subagent]` so folded subagent turns
+// are clearly attributed in the transcript.
+function parseSessionFile(filePath, isSubagent) {
   const messages = [];
-  const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
+  let lines;
+  try { lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean); } catch { return messages; }
+  const tag = isSubagent ? '[subagent] ' : '';
 
   for (const line of lines) {
     let obj;
@@ -188,21 +190,39 @@ function getMessages(chat) {
 
     if (obj.type === 'user' && obj.message) {
       const content = extractContent(obj.message.content);
-      if (content) messages.push({ role: 'user', content });
+      if (content) messages.push({ role: 'user', content: tag + content });
     } else if (obj.type === 'assistant' && obj.message) {
       const { text, toolCalls } = extractAssistantContent(obj.message.content);
       const usage = obj.message.usage;
       if (text) messages.push({
-        role: 'assistant', content: text, _model: obj.message.model,
+        role: 'assistant', content: tag + text, _model: obj.message.model,
         _inputTokens: usage?.input_tokens, _outputTokens: usage?.output_tokens,
         _cacheRead: usage?.cache_read_input_tokens, _cacheWrite: usage?.cache_creation_input_tokens,
         _toolCalls: toolCalls,
       });
     } else if (obj.type === 'system') {
       const text = typeof obj.message?.content === 'string' ? obj.message.content : '';
-      if (text) messages.push({ role: 'system', content: text });
+      if (text) messages.push({ role: 'system', content: tag + text });
     }
   }
+  return messages;
+}
+
+function getMessages(chat) {
+  const filePath = chat._fullPath;
+  if (!filePath || !fs.existsSync(filePath)) return [];
+
+  const messages = parseSessionFile(filePath, false);
+
+  // Fold in subagent transcripts — projects/<enc>/<uuid>/subagents/agent-*.jsonl.
+  // Their turns + token/tool usage belong to THIS parent session; appended (marked)
+  // after the parent's turns, so nothing is lost and subagents are never
+  // double-counted as standalone sessions.
+  const subagentsDir = path.join(filePath.replace(/\.jsonl$/, ''), 'subagents');
+  try {
+    const files = fs.readdirSync(subagentsDir).filter(f => f.endsWith('.jsonl')).sort();
+    for (const f of files) messages.push(...parseSessionFile(path.join(subagentsDir, f), true));
+  } catch { /* no subagents for this session */ }
 
   return messages;
 }
