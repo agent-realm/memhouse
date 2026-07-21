@@ -29,6 +29,15 @@ async function q(query, params = {}) {
 async function q1(query, params = {}) { return (await q(query, params))[0]; }
 function safeParseJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 
+// Most-frequent model in a chat_stats.models JSON array (null if none).
+function dominantOfModels(modelsJson) {
+  let models; try { models = JSON.parse(modelsJson || '[]'); } catch { return null; }
+  if (!models.length) return null;
+  const freq = {};
+  for (const m of models) freq[m] = (freq[m] || 0) + 1;
+  return Object.entries(freq).sort((a, b) => b[1] - a[1])[0][0];
+}
+
 // ── init / scan (delegate to the ingest layer) ──────────────────────────────────
 const initDb = chIngest.initDb;
 const scanAllAsync = chIngest.scanAllAsync;
@@ -40,6 +49,15 @@ async function resetAndRescanAsync(onProgress) {
   for (const t of DATA_TABLES) await client.command({ query: `TRUNCATE TABLE IF EXISTS ${t}` });
   await initDb();
   return scanAllAsync(onProgress);
+}
+
+// Empty the data tables (keeps the schema + meta.schema_version). Replaces the
+// SQLite `--no-cache` file wipe. Callers should await initDb() first.
+async function clearAll() {
+  const client = getClient();
+  for (const t of ['chats', 'chat_stats', 'messages', 'tool_calls', 'gsd_projects', 'gsd_phases']) {
+    await client.command({ query: `TRUNCATE TABLE IF EXISTS ${t}` });
+  }
 }
 
 // ── shared filter builder (named params) ────────────────────────────────────────
@@ -592,58 +610,113 @@ async function getCostBreakdown(opts = {}) {
   return estimateCosts(sql, params);
 }
 
+// Per-chat cost attribution for a filter, in a FIXED number of bulk queries
+// (3) instead of the former N+1 (~5 per session). Mirrors estimateCosts' logic
+// but keyed per chat; because calculateCost is linear in tokens, the per-chat
+// costs sum to the same overall total as estimateCosts.
+async function computePerChatCosts(filterSql, params) {
+  const aRows = await q(`
+    SELECT m.chat_id AS chat_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
+           sum(m.cache_read) AS cr, sum(m.cache_write) AS cw
+    FROM messages AS m JOIN chats AS c ON m.chat_id = c.id
+    WHERE m.model IS NOT NULL AND (m.input_tokens > 0 OR m.output_tokens > 0 OR m.cache_read > 0 OR m.cache_write > 0)${filterSql}
+    GROUP BY chat_id, model`, params);
+  const byChatModel = {};
+  for (const r of aRows) (byChatModel[r.chat_id] = byChatModel[r.chat_id] || []).push(r);
+
+  const bRows = await q(`
+    SELECT m.chat_id AS chat_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
+           sum(m.cache_read) AS cr, sum(m.cache_write) AS cw
+    FROM messages AS m JOIN chats AS c ON m.chat_id = c.id
+    WHERE m.model IS NULL AND (m.input_tokens > 0 OR m.output_tokens > 0 OR m.cache_read > 0 OR m.cache_write > 0)${filterSql}
+    GROUP BY chat_id`, params);
+  const orphanByChat = {};
+  for (const r of bRows) orphanByChat[r.chat_id] = r;
+
+  const cRows = await q(`
+    SELECT c.id AS id, c.source AS source, c.name AS name, c.folder AS folder,
+           c.last_updated_at AS last_updated_at, c.created_at AS created_at,
+           cs.total_messages AS msgs, cs.models AS models,
+           cs.total_user_chars AS uc, cs.total_assistant_chars AS ac,
+           cs.total_input_tokens AS ti, cs.total_output_tokens AS to_,
+           cs.total_cache_read AS cr, cs.total_cache_write AS cw,
+           formatDateTime(${dt('COALESCE(c.last_updated_at, c.created_at)')}, '%Y-%m', 'UTC') AS month
+    FROM chat_stats AS cs JOIN chats AS c ON cs.chat_id = c.id WHERE 1=1${filterSql}`, params);
+
+  // source → dominant model (over chats that name a model) + global fallback.
+  const sourceModelFreq = {};
+  for (const r of cRows) {
+    if (r.models === '[]') continue;
+    let models; try { models = JSON.parse(r.models || '[]'); } catch { continue; }
+    if (!sourceModelFreq[r.source]) sourceModelFreq[r.source] = {};
+    for (const m of models) sourceModelFreq[r.source][m] = (sourceModelFreq[r.source][m] || 0) + 1;
+  }
+  const globalFreq = {};
+  for (const sf of Object.values(sourceModelFreq)) for (const [m, c] of Object.entries(sf)) globalFreq[m] = (globalFreq[m] || 0) + c;
+  const globalDominant = Object.entries(globalFreq).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const sourceDominant = {};
+  for (const [src, fr] of Object.entries(sourceModelFreq)) sourceDominant[src] = Object.entries(fr).sort((a, b) => b[1] - a[1])[0]?.[0];
+
+  const CHARS_PER_TOKEN = 4;
+  const out = [];
+  for (const c of cRows) {
+    const hasModels = c.models !== '[]';
+    const dominant = dominantOfModels(c.models);
+    const tokenMap = {};
+    const add = (rawModel, i, o, cr, cw) => {
+      if (!rawModel) return;
+      const key = normalizeModelName(rawModel) || rawModel;
+      if (!tokenMap[key]) tokenMap[key] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      tokenMap[key].input += i || 0; tokenMap[key].output += o || 0; tokenMap[key].cacheRead += cr || 0; tokenMap[key].cacheWrite += cw || 0;
+    };
+    for (const r of (byChatModel[c.id] || [])) add(r.model, r.i, r.o, r.cr, r.cw);
+    const orphan = orphanByChat[c.id];
+    if (orphan && dominant) add(dominant, orphan.i, orphan.o, orphan.cr, orphan.cw);
+    if (hasModels && c.ti === 0 && c.to_ === 0 && (c.uc > 0 || c.ac > 0) && dominant)
+      add(dominant, Math.round((c.uc || 0) / CHARS_PER_TOKEN), Math.round((c.ac || 0) / CHARS_PER_TOKEN), 0, 0);
+    if (!hasModels && (c.ti > 0 || c.to_ > 0)) {
+      const srcDom = sourceDominant[c.source] || globalDominant;
+      if (srcDom) add(srcDom, c.ti, c.to_, c.cr, c.cw);
+    }
+    let totalCost = 0; const byModel = [];
+    for (const [model, tok] of Object.entries(tokenMap)) {
+      const cost = calculateCost(model, tok.input, tok.output, tok.cacheRead, tok.cacheWrite);
+      if (cost !== null) { totalCost += cost; byModel.push({ model, cost }); }
+    }
+    byModel.sort((a, b) => b.cost - a.cost);
+    out.push({ id: c.id, source: c.source, name: c.name, folder: c.folder, last_updated_at: c.last_updated_at, created_at: c.created_at, msgs: c.msgs, month: c.month, totalCost, byModel });
+  }
+  return out;
+}
+
 async function getCostAnalytics(opts = {}) {
   const f = filters(opts, 'c', { editorLike: true });
   const overall = await getCostBreakdown(opts);
+  const perChat = await computePerChatCosts(f.and, f.params);
 
-  const sessionRows = await q(`
-    SELECT c.id AS id, c.source AS source, c.name AS name, c.folder AS folder,
-      c.last_updated_at AS last_updated_at, c.created_at AS created_at, cs.total_messages AS msgs,
-      formatDateTime(${dt('COALESCE(c.last_updated_at, c.created_at)')}, '%Y-%m', 'UTC') AS month
-    FROM chats AS c LEFT JOIN chat_stats AS cs ON cs.chat_id = c.id WHERE 1=1${f.and}`, f.params);
-
-  const chatCostCache = new Map();
-  for (const r of sessionRows) chatCostCache.set(r.id, await getCostBreakdown({ ...opts, chatId: r.id }));
-
-  const editorAgg = {};
-  for (const r of sessionRows) {
-    const sc = chatCostCache.get(r.id);
-    if (!sc || sc.totalCost <= 0) continue;
-    if (!editorAgg[r.source]) editorAgg[r.source] = { cost: 0, models: new Set() };
-    editorAgg[r.source].cost += sc.totalCost;
-    for (const m of sc.byModel) editorAgg[r.source].models.add(m.model);
-  }
-  const byEditor = Object.entries(editorAgg).map(([editor, d]) => ({ editor, cost: d.cost, models: d.models.size })).sort((a, b) => b.cost - a.cost);
-
-  const projectAgg = {};
-  for (const r of sessionRows) {
-    if (!r.folder) continue;
-    const sc = chatCostCache.get(r.id);
-    if (!sc || sc.totalCost <= 0) continue;
-    projectAgg[r.folder] = (projectAgg[r.folder] || 0) + sc.totalCost;
-  }
-  const byProject = Object.entries(projectAgg).map(([folder, cost]) => ({ folder, name: folder.split('/').pop(), cost })).sort((a, b) => b.cost - a.cost).slice(0, 20);
-
-  const monthCosts = {};
-  for (const r of sessionRows) {
-    if (!r.month) continue;
-    const sc = chatCostCache.get(r.id);
-    if (!monthCosts[r.month]) monthCosts[r.month] = { cost: 0, sessions: 0 };
-    monthCosts[r.month].cost += sc.totalCost;
-    monthCosts[r.month].sessions++;
-  }
-  const monthly = Object.entries(monthCosts).sort((a, b) => a[0].localeCompare(b[0])).map(([month, d]) => ({ month, cost: Math.round(d.cost * 100) / 100, sessions: d.sessions }));
-
+  const editorAgg = {}, projectAgg = {}, monthCosts = {};
   const sessionCosts = [];
-  for (const r of sessionRows) {
-    const sc = chatCostCache.get(r.id);
-    if (!sc || sc.totalCost <= 0) continue;
+  for (const r of perChat) {
+    // monthly counts every measured session (cost may be 0)
+    if (r.month) {
+      if (!monthCosts[r.month]) monthCosts[r.month] = { cost: 0, sessions: 0 };
+      monthCosts[r.month].cost += r.totalCost;
+      monthCosts[r.month].sessions++;
+    }
+    if (r.totalCost <= 0) continue;
+    if (!editorAgg[r.source]) editorAgg[r.source] = { cost: 0, models: new Set() };
+    editorAgg[r.source].cost += r.totalCost;
+    for (const m of r.byModel) editorAgg[r.source].models.add(m.model);
+    if (r.folder) projectAgg[r.folder] = (projectAgg[r.folder] || 0) + r.totalCost;
     sessionCosts.push({
       id: r.id, source: r.source, name: r.name, folder: r.folder,
-      model: sc.byModel.length > 0 ? sc.byModel[0].model : null,
-      cost: sc.totalCost, messages: r.msgs || 0, lastUpdatedAt: r.last_updated_at || r.created_at,
+      model: r.byModel[0]?.model || null,
+      cost: r.totalCost, messages: r.msgs || 0, lastUpdatedAt: r.last_updated_at || r.created_at,
     });
   }
+  const byEditor = Object.entries(editorAgg).map(([editor, d]) => ({ editor, cost: d.cost, models: d.models.size })).sort((a, b) => b.cost - a.cost);
+  const byProject = Object.entries(projectAgg).map(([folder, cost]) => ({ folder, name: folder.split('/').pop(), cost })).sort((a, b) => b.cost - a.cost).slice(0, 20);
+  const monthly = Object.entries(monthCosts).sort((a, b) => a[0].localeCompare(b[0])).map(([month, d]) => ({ month, cost: Math.round(d.cost * 100) / 100, sessions: d.sessions }));
   sessionCosts.sort((a, b) => b.cost - a.cost);
 
   const totalSessions = sessionCosts.length;
@@ -751,7 +824,7 @@ async function getCachedGSDOverview() {
 }
 
 module.exports = {
-  initDb, scanAll, scanAllAsync, resetAndRescanAsync, cacheGSDProjects,
+  initDb, scanAll, scanAllAsync, resetAndRescanAsync, clearAll, cacheGSDProjects,
   getCachedChats, countCachedChats, getCachedOverview, getCachedDailyActivity,
   getCachedDeepAnalytics, getCachedChat, getCachedProjects, getCachedToolCalls,
   getCachedDashboardStats, getCostBreakdown, getCostAnalytics,
