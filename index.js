@@ -196,56 +196,9 @@ if (!collectOnly && !isUiDev && !fs.existsSync(publicIndex)) {
   process.exit(1);
 }
 
-// ── Ensure better-sqlite3 native bindings exist ─────────────
-try {
-  require('better-sqlite3');
-} catch (e) {
-  if (e.message && e.message.includes('Could not locate the bindings file')) {
-    console.log(chalk.cyan('  ⟳ Native SQLite module not found, downloading prebuilt binary...'));
-    const bsqlDir = path.dirname(require.resolve('better-sqlite3/package.json'));
-    let rebuilt = false;
-    // 1) Use prebuild-install (dep of better-sqlite3) to download a prebuilt binary
-    try {
-      const prebuildBin = require.resolve('prebuild-install/bin.js');
-      execSync(`node "${prebuildBin}" -r napi`, { cwd: bsqlDir, stdio: 'pipe', timeout: 60000 });
-      rebuilt = true;
-    } catch {}
-    // 2) Fallback: compile from source via node-gyp
-    if (!rebuilt) {
-      console.log(chalk.cyan('  ⟳ Prebuilt unavailable, compiling from source...'));
-      try {
-        execSync('npx --yes node-gyp rebuild --release', { cwd: bsqlDir, stdio: 'pipe', timeout: 120000 });
-        rebuilt = true;
-      } catch {}
-    }
-    if (rebuilt) {
-      console.log(chalk.green('  ✓ Native module ready'));
-      // Clear require cache so the freshly built binding is picked up
-      delete require.cache[require.resolve('better-sqlite3')];
-    } else {
-      console.error(chalk.red('  ✗ Failed to build better-sqlite3.'));
-      console.error(chalk.dim('    Ensure build tools are installed (python3, make, g++).'));
-      process.exit(1);
-    }
-  } else {
-    throw e;
-  }
-}
-
+// ── ClickHouse cache (no native module to build) ────────────
 const cache = require('./cache');
-
-// Wipe cache if --no-cache flag is passed
-if (noCache) {
-  const cacheDb = path.join(os.homedir(), '.agentlytics', 'cache.db');
-  if (fs.existsSync(cacheDb)) {
-    fs.unlinkSync(cacheDb);
-    // Remove WAL/SHM journal files to avoid SQLITE_IOERR_SHORT_READ
-    for (const suffix of ['-wal', '-shm']) {
-      if (fs.existsSync(cacheDb + suffix)) fs.unlinkSync(cacheDb + suffix);
-    }
-    console.log(chalk.yellow('  ⟳ Cache cleared (--no-cache)'));
-  }
-}
+// --no-cache is handled in the async flow below (ClickHouse truncate needs await).
 
 // ── Warn about installed-but-not-running Devin variants (macOS only) ─
 if (process.platform === 'darwin') {
@@ -297,8 +250,7 @@ const DEVIN_DESKTOP_VARIANTS = [
 })();
 }
 
-// Initialize cache DB
-cache.initDb();
+// Cache DB is initialized (and optionally cleared) inside the async flow below.
 
 // ── Detect editors & collect sessions ───────────────────────
 const { editors: editorModules, editorLabels } = require('./editors');
@@ -347,6 +299,13 @@ const BOT_STYLES = [
 ];
 
 (async () => {
+  // Initialize the ClickHouse cache (ensure DB + schema); optionally clear it.
+  await cache.initDb();
+  if (noCache) {
+    await cache.clearAll();
+    console.log(chalk.yellow('  ⟳ Cache cleared (--no-cache)'));
+  }
+
   // ── Ask for subscription access permission (first run only) ──
   const CONFIG_DIR = path.join(os.homedir(), '.agentlytics');
   const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -409,8 +368,8 @@ const BOT_STYLES = [
 
   // In collect-only mode, exit after cache is built
   if (collectOnly) {
-    const cacheDbPath = path.join(os.homedir(), '.agentlytics', 'cache.db');
-    console.log(chalk.dim(`  Cache file: ${cacheDbPath}`));
+    const { config } = require('./clickhouse');
+    console.log(chalk.dim(`  Cache: ClickHouse ${config.database} @ ${config.url}`));
     console.log('');
     process.exit(0);
   }

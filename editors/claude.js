@@ -2,8 +2,41 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+const HOME = os.homedir();
+
+// Discover all Claude Code config roots — ports memory-house agent-sync's
+// discover_roots("claude-code"). Claude sessions don't live only under ~/.claude:
+// every CLAUDE_CONFIG_DIR (e.g. Kommander playbook installs under
+// ~/.claude-playbooks/<name>[/playbook]) has its own projects/ dir. A dir qualifies
+// as a root if it holds a projects/ subdir or a history.jsonl. Deduped by realpath.
+function discoverClaudeRoots() {
+  const cands = [path.join(HOME, '.claude')];
+  const pbBase = path.join(HOME, '.claude-playbooks');
+  try {
+    for (const name of fs.readdirSync(pbBase)) {
+      if (name.startsWith('.')) continue; // match glob('*') — skip dotfiles/backups (.bak)
+      cands.push(path.join(pbBase, name));
+      cands.push(path.join(pbBase, name, 'playbook')); // legacy playbook/ layout
+    }
+  } catch { /* no ~/.claude-playbooks */ }
+
+  const roots = [];
+  const seen = new Set();
+  for (const d of cands) {
+    let isDir = false;
+    try { isDir = fs.statSync(d).isDirectory(); } catch { /* missing */ }
+    if (!isDir) continue;
+    let hasProjects = false;
+    try { hasProjects = fs.statSync(path.join(d, 'projects')).isDirectory(); } catch { /* none */ }
+    const hasHistory = fs.existsSync(path.join(d, 'history.jsonl'));
+    if (!hasProjects && !hasHistory) continue;
+    let rp; try { rp = fs.realpathSync(d); } catch { rp = d; }
+    if (seen.has(rp)) continue;
+    seen.add(rp);
+    roots.push(d);
+  }
+  return roots;
+}
 
 // ============================================================
 // Adapter interface
@@ -13,11 +46,16 @@ const name = 'claude';
 
 function getChats() {
   const chats = [];
-  if (!fs.existsSync(PROJECTS_DIR)) return chats;
 
-  for (const projDir of fs.readdirSync(PROJECTS_DIR)) {
-    const dir = path.join(PROJECTS_DIR, projDir);
-    if (!fs.statSync(dir).isDirectory()) continue;
+  for (const root of discoverClaudeRoots()) {
+    const PROJECTS_DIR = path.join(root, 'projects');
+    if (!fs.existsSync(PROJECTS_DIR)) continue;
+
+    let projDirs;
+    try { projDirs = fs.readdirSync(PROJECTS_DIR); } catch { continue; }
+    for (const projDir of projDirs) {
+      const dir = path.join(PROJECTS_DIR, projDir);
+      try { if (!fs.statSync(dir).isDirectory()) continue; } catch { continue; }
 
     // Decode folder path from dir name (e.g. -Users-fka-Code-foo -> /Users/fka/Code/foo)
     const decodedFolder = projDir.replace(/-/g, '/');
@@ -95,6 +133,7 @@ function getChats() {
         _fullPath: entry.fullPath,
       });
     }
+    }
   }
 
   return chats;
@@ -136,12 +175,14 @@ function cleanPrompt(prompt) {
   return clean || null;
 }
 
-function getMessages(chat) {
-  const filePath = chat._fullPath;
-  if (!filePath || !fs.existsSync(filePath)) return [];
-
+// Parse one Claude session .jsonl into the adapter's message shape. When
+// `isSubagent` is set, each message is tagged `[subagent]` so folded subagent turns
+// are clearly attributed in the transcript.
+function parseSessionFile(filePath, isSubagent) {
   const messages = [];
-  const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
+  let lines;
+  try { lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean); } catch { return messages; }
+  const tag = isSubagent ? '[subagent] ' : '';
 
   for (const line of lines) {
     let obj;
@@ -149,21 +190,39 @@ function getMessages(chat) {
 
     if (obj.type === 'user' && obj.message) {
       const content = extractContent(obj.message.content);
-      if (content) messages.push({ role: 'user', content });
+      if (content) messages.push({ role: 'user', content: tag + content });
     } else if (obj.type === 'assistant' && obj.message) {
       const { text, toolCalls } = extractAssistantContent(obj.message.content);
       const usage = obj.message.usage;
       if (text) messages.push({
-        role: 'assistant', content: text, _model: obj.message.model,
+        role: 'assistant', content: tag + text, _model: obj.message.model,
         _inputTokens: usage?.input_tokens, _outputTokens: usage?.output_tokens,
         _cacheRead: usage?.cache_read_input_tokens, _cacheWrite: usage?.cache_creation_input_tokens,
         _toolCalls: toolCalls,
       });
     } else if (obj.type === 'system') {
       const text = typeof obj.message?.content === 'string' ? obj.message.content : '';
-      if (text) messages.push({ role: 'system', content: text });
+      if (text) messages.push({ role: 'system', content: tag + text });
     }
   }
+  return messages;
+}
+
+function getMessages(chat) {
+  const filePath = chat._fullPath;
+  if (!filePath || !fs.existsSync(filePath)) return [];
+
+  const messages = parseSessionFile(filePath, false);
+
+  // Fold in subagent transcripts — projects/<enc>/<uuid>/subagents/agent-*.jsonl.
+  // Their turns + token/tool usage belong to THIS parent session; appended (marked)
+  // after the parent's turns, so nothing is lost and subagents are never
+  // double-counted as standalone sessions.
+  const subagentsDir = path.join(filePath.replace(/\.jsonl$/, ''), 'subagents');
+  try {
+    const files = fs.readdirSync(subagentsDir).filter(f => f.endsWith('.jsonl')).sort();
+    for (const f of files) messages.push(...parseSessionFile(path.join(subagentsDir, f), true));
+  } catch { /* no subagents for this session */ }
 
   return messages;
 }
