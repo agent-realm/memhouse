@@ -41,33 +41,33 @@ function parseDateOpts(query) {
   return opts;
 }
 
-app.get('/api/ping', (req, res) => {
+app.get('/api/ping', async (req, res) => {
   res.json({ app: 'agentlytics', pid: process.pid });
 });
 
-app.get('/api/mode', (req, res) => {
+app.get('/api/mode', async (req, res) => {
   res.json({ mode: 'local' });
 });
 
-app.get('/api/overview', (req, res) => {
+app.get('/api/overview', async (req, res) => {
   try {
     const opts = { editor: req.query.editor || null, ...parseDateOpts(req.query), hiddenFolders: getHiddenFolders() };
-    res.json(cache.getCachedOverview(opts));
+    res.json(await cache.getCachedOverview(opts));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/daily-activity', (req, res) => {
+app.get('/api/daily-activity', async (req, res) => {
   try {
     const opts = { editor: req.query.editor || null, ...parseDateOpts(req.query), hiddenFolders: getHiddenFolders() };
-    res.json(cache.getCachedDailyActivity(opts));
+    res.json(await cache.getCachedDailyActivity(opts));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/chats', (req, res) => {
+app.get('/api/chats', async (req, res) => {
   try {
     const opts = {
       editor: req.query.editor || null,
@@ -78,8 +78,8 @@ app.get('/api/chats', (req, res) => {
       ...parseDateOpts(req.query),
       hiddenFolders: getHiddenFolders(),
     };
-    const total = cache.countCachedChats(opts);
-    const rows = cache.getCachedChats(opts);
+    const total = await cache.countCachedChats(opts);
+    const rows = await cache.getCachedChats(opts);
     res.json({
       total,
       chats: rows.map(c => ({
@@ -101,9 +101,9 @@ app.get('/api/chats', (req, res) => {
   }
 });
 
-app.get('/api/chats/:id', (req, res) => {
+app.get('/api/chats/:id', async (req, res) => {
   try {
-    const result = cache.getCachedChat(req.params.id);
+    const result = await cache.getCachedChat(req.params.id);
     if (!result) return res.status(404).json({ error: 'Chat not found' });
     res.json(result);
   } catch (err) {
@@ -111,9 +111,9 @@ app.get('/api/chats/:id', (req, res) => {
   }
 });
 
-app.get('/api/chats/:id/markdown', (req, res) => {
+app.get('/api/chats/:id/markdown', async (req, res) => {
   try {
-    const result = cache.getCachedChat(req.params.id);
+    const result = await cache.getCachedChat(req.params.id);
     if (!result) return res.status(404).json({ error: 'Chat not found' });
 
     const lines = [];
@@ -156,15 +156,15 @@ app.get('/api/chats/:id/markdown', (req, res) => {
   }
 });
 
-app.get('/api/projects', (req, res) => {
+app.get('/api/projects', async (req, res) => {
   try {
-    res.json(cache.getCachedProjects({ ...parseDateOpts(req.query), hiddenFolders: getHiddenFolders() }));
+    res.json(await cache.getCachedProjects({ ...parseDateOpts(req.query), hiddenFolders: getHiddenFolders() }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/deep-analytics', (req, res) => {
+app.get('/api/deep-analytics', async (req, res) => {
   try {
     const opts = {
       editor: req.query.editor || null,
@@ -173,35 +173,35 @@ app.get('/api/deep-analytics', (req, res) => {
       ...parseDateOpts(req.query),
       hiddenFolders: getHiddenFolders(),
     };
-    res.json(cache.getCachedDeepAnalytics(opts));
+    res.json(await cache.getCachedDeepAnalytics(opts));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/dashboard-stats', (req, res) => {
+app.get('/api/dashboard-stats', async (req, res) => {
   try {
     const opts = { editor: req.query.editor || null, ...parseDateOpts(req.query), hiddenFolders: getHiddenFolders() };
-    res.json(cache.getCachedDashboardStats(opts));
+    res.json(await cache.getCachedDashboardStats(opts));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/cost-analytics', (req, res) => {
+app.get('/api/cost-analytics', async (req, res) => {
   try {
     const opts = {
       editor: req.query.editor || null,
       ...parseDateOpts(req.query),
       hiddenFolders: getHiddenFolders(),
     };
-    res.json(cache.getCostAnalytics(opts));
+    res.json(await cache.getCostAnalytics(opts));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/costs', (req, res) => {
+app.get('/api/costs', async (req, res) => {
   try {
     const opts = {
       editor: req.query.editor || null,
@@ -210,13 +210,13 @@ app.get('/api/costs', (req, res) => {
       ...parseDateOpts(req.query),
       hiddenFolders: getHiddenFolders(),
     };
-    res.json(cache.getCostBreakdown(opts));
+    res.json(await cache.getCostBreakdown(opts));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/tool-calls', (req, res) => {
+app.get('/api/tool-calls', async (req, res) => {
   try {
     const name = req.query.name;
     if (!name) return res.status(400).json({ error: 'name query param required' });
@@ -224,13 +224,13 @@ app.get('/api/tool-calls', (req, res) => {
       limit: Math.min(parseInt(req.query.limit) || 200, 1000),
       folder: req.query.folder || null,
     };
-    res.json(cache.getCachedToolCalls(name, opts));
+    res.json(await cache.getCachedToolCalls(name, opts));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/query', (req, res) => {
+app.post('/api/query', async (req, res) => {
   try {
     const { sql } = req.body;
     if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'sql string required' });
@@ -240,39 +240,28 @@ app.post('/api/query', (req, res) => {
     if (!['SELECT', 'PRAGMA', 'EXPLAIN', 'WITH'].includes(first)) {
       return res.status(403).json({ error: 'Only SELECT queries are allowed' });
     }
-    const db = cache.getDb();
-    if (!db) return res.status(500).json({ error: 'Database not initialized' });
-    const stmt = db.prepare(sql);
-    const rows = stmt.all();
-    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-    res.json({ columns, rows, count: rows.length });
+    const { columns, rows, count } = await cache.rawQuery(sql);
+    res.json({ columns, rows, count });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.get('/api/schema', (req, res) => {
+app.get('/api/schema', async (req, res) => {
   try {
-    const db = cache.getDb();
-    if (!db) return res.status(500).json({ error: 'Database not initialized' });
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
-    const schema = {};
-    for (const { name } of tables) {
-      schema[name] = db.prepare(`PRAGMA table_info(${name})`).all();
-    }
-    res.json({ tables: tables.map(t => t.name), schema });
+    res.json(await cache.schema());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/share-image', (req, res) => {
+app.get('/api/share-image', async (req, res) => {
   try {
     const filterOpts = { hiddenFolders: getHiddenFolders() };
     if (req.query.folder) filterOpts.folder = req.query.folder;
-    const overview = cache.getCachedOverview(filterOpts);
-    const stats = cache.getCachedDashboardStats(filterOpts);
-    const costs = cache.getCostAnalytics(filterOpts);
+    const overview = await cache.getCachedOverview(filterOpts);
+    const stats = await cache.getCachedDashboardStats(filterOpts);
+    const costs = await cache.getCostAnalytics(filterOpts);
     const opts = {};
     if (req.query.showEditors !== undefined) opts.showEditors = req.query.showEditors !== 'false';
     if (req.query.showModels !== undefined) opts.showModels = req.query.showModels !== 'false';
@@ -322,11 +311,11 @@ app.get('/api/refetch', async (req, res) => {
 // Config endpoints
 // ============================================================
 
-app.get('/api/config', (req, res) => {
+app.get('/api/config', async (req, res) => {
   res.json(readConfig());
 });
 
-app.put('/api/config', (req, res) => {
+app.put('/api/config', async (req, res) => {
   try {
     const config = readConfig();
     Object.assign(config, req.body);
@@ -369,10 +358,10 @@ app.get('/api/check-ai', async (req, res) => {
 // Artifacts — delegates to editors/index.js getAllArtifacts
 // ============================================================
 
-app.get('/api/artifacts', (req, res) => {
+app.get('/api/artifacts', async (req, res) => {
   try {
     const { getAllArtifacts } = require('./editors');
-    const projects = cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
+    const projects = await cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
     const result = [];
 
     for (const project of projects) {
@@ -405,14 +394,14 @@ app.get('/api/artifacts', (req, res) => {
   }
 });
 
-app.get('/api/artifact-content', (req, res) => {
+app.get('/api/artifact-content', async (req, res) => {
   try {
     const filePath = req.query.path;
     if (!filePath) return res.status(400).json({ error: 'path query param required' });
 
     // Security: validate file exists in known artifact results for at least one project
     const { getAllArtifacts } = require('./editors');
-    const projects = cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
+    const projects = await cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
     let allowed = false;
     for (const project of projects) {
       if (!project.folder) continue;
@@ -441,7 +430,7 @@ let _mcpToolsCache = null; // { servers, serverToolResults, toolToServer, server
 async function initMcpToolsCache() {
   const { getAllMCPServers } = require('./editors');
   const { queryMcpServerTools } = require('./editors/base');
-  const projects = cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
+  const projects = await cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
   const projectFolders = projects.map(p => p.folder).filter(Boolean);
 
   const servers = getAllMCPServers(projectFolders);
@@ -480,18 +469,12 @@ app.initMcpToolsCache = initMcpToolsCache;
 
 app.get('/api/mcps', async (req, res) => {
   try {
-    const db = cache.getDb();
-
     // Use cached MCP tool data (queried once at startup)
     if (!_mcpToolsCache) await initMcpToolsCache();
     const { servers, serverToolResults, toolToServer, serverToolPatterns } = _mcpToolsCache;
 
-    // 3. Get tool call stats from the SQLite cache
-    const toolRows = db.prepare(`
-      SELECT tc.tool_name, tc.source, tc.chat_id, tc.folder, tc.timestamp, c.name as chat_name
-      FROM tool_calls tc JOIN chats c ON tc.chat_id = c.id
-      ORDER BY tc.timestamp DESC
-    `).all();
+    // 3. Get tool call stats from the ClickHouse cache
+    const toolRows = await cache.getAllToolCallRows();
 
     const toolCallMap = {}; // toolName -> { count, editors: Set, sessions: Set, folders: Set }
     const sessionMap = {};  // chatId -> { ... }
@@ -639,7 +622,7 @@ app.get('/api/mcps', async (req, res) => {
       .slice(0, 50);
 
     // 7. Per-project MCP stats
-    const projects = cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
+    const projects = await cache.getCachedProjects({ hiddenFolders: getHiddenFolders() });
     const projectMcpConfigs = [
       { file: '.mcp.json', editor: 'claude-code', label: 'Claude Code' },
       { file: '.cursor/mcp.json', editor: 'cursor', label: 'Cursor' },
@@ -719,9 +702,9 @@ app.get('/api/mcps', async (req, res) => {
   }
 });
 
-app.get('/api/all-projects', (req, res) => {
+app.get('/api/all-projects', async (req, res) => {
   try {
-    res.json(cache.getCachedProjects({ ...parseDateOpts(req.query), includeHidden: true }));
+    res.json(await cache.getCachedProjects({ ...parseDateOpts(req.query), includeHidden: true }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -731,25 +714,25 @@ app.get('/api/all-projects', (req, res) => {
 // GSD endpoints
 // ============================================================
 
-app.get('/api/gsd/projects', (req, res) => {
+app.get('/api/gsd/projects', async (req, res) => {
   try {
-    res.json(cache.getCachedGSDProjects());
+    res.json(await cache.getCachedGSDProjects());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/gsd/phases', (req, res) => {
+app.get('/api/gsd/phases', async (req, res) => {
   try {
     const { folder } = req.query;
     if (!folder) return res.status(400).json({ error: 'folder query param required' });
-    res.json(cache.getCachedGSDPhases(folder));
+    res.json(await cache.getCachedGSDPhases(folder));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/gsd/plan', (req, res) => {
+app.get('/api/gsd/plan', async (req, res) => {
   try {
     const { folder, phase } = req.query;
     if (!folder || !phase) return res.status(400).json({ error: 'folder and phase query params required' });
@@ -762,15 +745,15 @@ app.get('/api/gsd/plan', (req, res) => {
   }
 });
 
-app.get('/api/gsd/overview', (req, res) => {
+app.get('/api/gsd/overview', async (req, res) => {
   try {
-    res.json(cache.getCachedGSDOverview());
+    res.json(await cache.getCachedGSDOverview());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/gsd/config', (req, res) => {
+app.get('/api/gsd/config', async (req, res) => {
   try {
     const { folder } = req.query;
     if (!folder) return res.status(400).json({ error: 'folder query param required' });
@@ -782,11 +765,11 @@ app.get('/api/gsd/config', (req, res) => {
   }
 });
 
-app.get('/api/gsd/phase-tokens', (req, res) => {
+app.get('/api/gsd/phase-tokens', async (req, res) => {
   try {
     const { folder } = req.query;
     if (!folder) return res.status(400).json({ error: 'folder query param required' });
-    res.json(cache.getGSDPhaseTokens(folder));
+    res.json(await cache.getGSDPhaseTokens(folder));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -794,7 +777,7 @@ app.get('/api/gsd/phase-tokens', (req, res) => {
 
 // Generic .planning file reader
 // type: 'state' (project-level STATE.md) | 'research' | 'verification' | 'summary' (phase-level, requires phase param)
-app.get('/api/gsd/file', (req, res) => {
+app.get('/api/gsd/file', async (req, res) => {
   try {
     const { folder, phase: phaseDir, type } = req.query;
     if (!folder || !type) return res.status(400).json({ error: 'folder and type required' });
@@ -830,7 +813,7 @@ app.get('/api/gsd/file', (req, res) => {
 });
 
 // SPA fallback
-app.get('*', (req, res) => {
+app.get('*', async (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
