@@ -30,6 +30,41 @@ function loadProjectMap() {
   return map;
 }
 
+/**
+ * Load a Gemini session record, handling BOTH on-disk formats:
+ *  - legacy single-object JSON: { sessionId, startTime, lastUpdated, messages: [...] }
+ *  - newer .jsonl oplog: a header line, then interleaved message objects and
+ *    {$set:{messages:[...]}} snapshots. Reconstruct = the latest messages snapshot
+ *    (they accumulate) plus any message objects appended after it.
+ * Returns { sessionId, startTime, lastUpdated, messages }.
+ */
+function loadGeminiRecord(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  if (!filePath.endsWith('.jsonl')) {
+    const rec = JSON.parse(raw);
+    return { sessionId: rec.sessionId, startTime: rec.startTime, lastUpdated: rec.lastUpdated, messages: rec.messages || [] };
+  }
+  let header = {}, messages = null, tail = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let o; try { o = JSON.parse(line); } catch { continue; }
+    if (o.$set) {
+      if (Array.isArray(o.$set.messages)) { messages = o.$set.messages; tail = []; }
+      if (o.$set.lastUpdated) header.lastUpdated = o.$set.lastUpdated;
+    } else if (o.type && o.content !== undefined) {
+      tail.push(o); // message appended after the last snapshot
+    } else if (o.sessionId || o.startTime) {
+      header = { ...header, ...o }; // header/meta line
+    }
+  }
+  return {
+    sessionId: header.sessionId,
+    startTime: header.startTime,
+    lastUpdated: header.lastUpdated,
+    messages: (messages || []).concat(tail),
+  };
+}
+
 function getChats() {
   const chats = [];
   if (!fs.existsSync(TMP_DIR)) return chats;
@@ -50,7 +85,9 @@ function getChats() {
 
     let files;
     try {
-      files = fs.readdirSync(chatsDir).filter(f => f.startsWith('session-') && f.endsWith('.json'));
+      // Both formats: legacy session-*.json + newer session-*.jsonl (oplog).
+      // The chats/<uuid>/ checkpoint subdirs are skipped (not session- prefixed).
+      files = fs.readdirSync(chatsDir).filter(f => f.startsWith('session-') && (f.endsWith('.json') || f.endsWith('.jsonl')));
     } catch { continue; }
 
     // Resolve folder from projects.json mapping
@@ -59,12 +96,11 @@ function getChats() {
     for (const file of files) {
       const fullPath = path.join(chatsDir, file);
       try {
-        const raw = fs.readFileSync(fullPath, 'utf-8');
-        const record = JSON.parse(raw);
-        if (!record || !record.messages) continue;
+        const record = loadGeminiRecord(fullPath);
+        if (!record || !record.messages || record.messages.length === 0) continue;
 
-        const sessionId = record.sessionId || file.replace('.json', '');
-        const messages = record.messages || [];
+        const sessionId = record.sessionId || file.replace(/\.jsonl?$/, '');
+        const messages = record.messages;
 
         // Extract first user prompt for title
         const firstUser = messages.find(m => m.type === 'user');
@@ -114,7 +150,7 @@ function getMessages(chat) {
 
   let record;
   try {
-    record = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    record = loadGeminiRecord(filePath);
   } catch { return []; }
 
   if (!record || !record.messages) return [];
