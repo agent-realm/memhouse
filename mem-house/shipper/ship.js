@@ -109,20 +109,24 @@ async function loadExisting(client) {
     query: 'SELECT session_id, last_updated_at, message_count, extra FROM sessions FINAL WHERE user_id = currentUser()',
     format: 'JSONEachRow',
   });
-  // Which sessions actually have message rows: a crash between the re-ship DELETE
-  // and the replacement inserts leaves a fresh-looking session row with no
-  // transcript — the skip must not trust freshness alone.
+  // Actual message rows per session: an interrupted re-ship (crash between the
+  // clear-DELETE and the inserts, or mid-flush on a large transcript) leaves a
+  // fresh-looking session row with a missing or PARTIAL transcript — the skip
+  // must compare the real row count against the recorded message_count, not
+  // merely check that some row exists.
   const mr = await client.query({
-    query: 'SELECT DISTINCT session_id FROM messages WHERE user_id = currentUser()',
+    query: 'SELECT session_id, count() AS n FROM messages FINAL WHERE user_id = currentUser() GROUP BY session_id',
     format: 'JSONEachRow',
   });
-  const hasMsgs = new Set((await mr.json()).map((r) => r.session_id));
+  const msgCounts = new Map();
+  for (const r of await mr.json()) msgCounts.set(r.session_id, toInt(r.n));
   const map = new Map();
   for (const r of await rs.json()) {
     // DateTime64 comes back as 'YYYY-MM-DD HH:MM:SS.mmm' — re-parse as UTC.
     const ms = r.last_updated_at ? Date.parse(r.last_updated_at.replace(' ', 'T') + 'Z') : null;
     const bc = toInt(r.extra && r.extra.bubbleCount);
-    map.set(r.session_id, { ms, count: toInt(r.message_count), bc, hasMsgs: hasMsgs.has(r.session_id) });
+    const count = toInt(r.message_count);
+    map.set(r.session_id, { ms, count, bc, intact: (msgCounts.get(r.session_id) || 0) === count });
   }
   return map;
 }
@@ -269,11 +273,11 @@ async function runShip(client, opts = {}) {
       // stores whole ms — without it every such session loses by <1ms and re-ships.
       const chatLast = Math.floor(chat.lastUpdatedAt || chat.createdAt || 0);
       const notNewer = chatLast === 0 || (prev.ms !== null && prev.ms >= chatLast);
-      // Freshness alone is not enough: require the transcript rows to actually be
-      // there (or the session to be legitimately empty) so an interrupted re-ship
-      // repairs itself on the next pass instead of being skipped forever.
-      const intact = prev.count === 0 || prev.hasMsgs;
-      if (notNewer && prev.bc >= (chat.bubbleCount || 0) && intact) { skipped++; continue; }
+      // Freshness alone is not enough: the transcript must be COMPLETE (stored
+      // row count == recorded message_count) so an interrupted re-ship — even one
+      // that died mid-flush leaving a partial transcript — repairs itself on the
+      // next pass instead of being skipped forever.
+      if (notNewer && prev.bc >= (chat.bubbleCount || 0) && prev.intact) { skipped++; continue; }
     }
 
     const rows = rowsForChat(chat, host);

@@ -120,13 +120,17 @@ info "house '$CH_DB' ready"
 
 # ---------- 5. write ~/.memhouse/env ----------------------------------------
 mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
+# Values are single-quoted (embedded ' escaped) — this file is sourced by shells
+# (docs/skills use `. ~/.memhouse/env`), so unquoted metacharacters in a password
+# would corrupt the value or execute on source.
+shq() { printf "%s" "$1" | sed "s/'/'\\\\''/g"; }
 cat > "$ENV_FILE" <<EOF
 # mem-house connection (written by install.sh $(date +%Y-%m-%d-%H_%M)). NEVER commit.
-MEMHOUSE_URL=$CH_URL
-MEMHOUSE_USER=$CH_USER
-MEMHOUSE_PASSWORD=$CH_PASSWORD
-MEMHOUSE_DB=$CH_DB
-MEMHOUSE_PORT=$DASH_PORT
+MEMHOUSE_URL='$(shq "$CH_URL")'
+MEMHOUSE_USER='$(shq "$CH_USER")'
+MEMHOUSE_PASSWORD='$(shq "$CH_PASSWORD")'
+MEMHOUSE_DB='$(shq "$CH_DB")'
+MEMHOUSE_PORT='$(shq "$DASH_PORT")'
 EOF
 chmod 600 "$ENV_FILE"
 info "wrote $ENV_FILE"

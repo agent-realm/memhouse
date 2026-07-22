@@ -177,20 +177,21 @@ async function scanAllAsync(onProgress, opts = {}) {
 
   // Existing-cache map (id → {ts, bc}) + which chats already have a stats row.
   const existing = {};
-  const statSet = new Set();
-  const msgSet = new Set();
+  const statTotals = new Map();
+  const msgCounts = new Map();
   {
     const rs = await client.query({
       query: 'SELECT id, last_updated_at AS ts, bubble_count AS bc FROM chats', format: 'JSONEachRow',
     });
     for (const r of await rs.json()) existing[r.id] = { ts: r.ts, bc: r.bc };
-    const rs2 = await client.query({ query: 'SELECT chat_id FROM chat_stats', format: 'JSONEachRow' });
-    for (const r of await rs2.json()) statSet.add(r.chat_id);
-    // Crash recovery: a kill between the clear-deletes and the inserts leaves
-    // fresh-looking chats/chat_stats rows with no transcript — the skip below
-    // must also verify message rows actually exist.
-    const rs3 = await client.query({ query: 'SELECT DISTINCT chat_id FROM messages', format: 'JSONEachRow' });
-    for (const r of await rs3.json()) msgSet.add(r.chat_id);
+    const rs2 = await client.query({ query: 'SELECT chat_id, total_messages FROM chat_stats', format: 'JSONEachRow' });
+    for (const r of await rs2.json()) statTotals.set(r.chat_id, r.total_messages);
+    // Crash recovery: a kill between the clear-deletes and the inserts — or
+    // mid-flush on a large transcript — leaves fresh-looking chats/chat_stats
+    // rows with a missing or PARTIAL transcript. The skip below must compare the
+    // actual message row count to chat_stats.total_messages, not mere existence.
+    const rs3 = await client.query({ query: 'SELECT chat_id, count() AS n FROM messages GROUP BY chat_id', format: 'JSONEachRow' });
+    for (const r of await rs3.json()) msgCounts.set(r.chat_id, r.n);
   }
 
   for (const chat of chats) chat.folder = normalizeFolder(chat.folder);
@@ -215,7 +216,8 @@ async function scanAllAsync(onProgress, opts = {}) {
     let bubbleCount = chatBc;
 
     if (!force && cached && cached.ts && cached.ts >= chatTs && cached.bc >= chatBc
-        && statSet.has(chat.composerId) && msgSet.has(chat.composerId)) {
+        && statTotals.has(chat.composerId)
+        && (msgCounts.get(chat.composerId) || 0) === statTotals.get(chat.composerId)) {
       skipped++;
     } else if (!chat.encrypted && (chat.name || chat.bubbleCount > 0)) {
       const res = analyzeChat(chat);
@@ -224,7 +226,7 @@ async function scanAllAsync(onProgress, opts = {}) {
         for (const m of res.msgRows) msgRows.push(m);
         for (const t of res.toolRows) toolRows.push(t);
         bubbleCount = res.bubbleCount;
-        if (existing[chat.composerId] || statSet.has(chat.composerId)) clearIds.push(chat.composerId);
+        if (existing[chat.composerId] || statTotals.has(chat.composerId)) clearIds.push(chat.composerId);
         didAnalyze = true;
         analyzed++;
       } else {
