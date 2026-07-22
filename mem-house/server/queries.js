@@ -345,7 +345,7 @@ async function getChats(opts = {}) {
 // ── single chat ─────────────────────────────────────────────────────────────────
 async function getChat(id) {
   const chat = await q1(`
-    SELECT c.session_id AS id, c.source AS source, c.name AS name, c.mode AS mode, c.folder AS folder,
+    SELECT c.session_id AS id, c.user_id AS user_id, c.source AS source, c.name AS name, c.mode AS mode, c.folder AS folder,
            toUnixTimestamp64Milli(c.created_at) AS created_at,
            toUnixTimestamp64Milli(c.last_updated_at) AS last_updated_at,
            c.total_msgs AS total_msgs, c.user_msgs AS user_msgs, c.assistant_msgs AS assistant_msgs,
@@ -355,12 +355,17 @@ async function getChat(id) {
     FROM sessions_v AS c WHERE session_id LIKE {idp:String} LIMIT 1`, { idp: id + '%' });
   if (!chat) return null;
 
+  // Sessions are keyed (session_id, user_id): constrain the row reloads to the
+  // selected rollup's writer, or an owner/no-RLS reader viewing a house where two
+  // members share an adapter-local session_id would see their rows merged.
   const messages = await q(`
     SELECT role, text AS content, model, input_tokens, output_tokens
-    FROM messages WHERE session_id = {cid:String} ORDER BY seq`, { cid: chat.id });
+    FROM messages WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY seq`,
+    { cid: chat.id, uid: chat.user_id });
 
   const toolCalls = await q(`
-    SELECT tool_name, args FROM tool_calls WHERE session_id = {cid:String} ORDER BY idx`, { cid: chat.id });
+    SELECT tool_name, args FROM tool_calls WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY idx`,
+    { cid: chat.id, uid: chat.user_id });
   const toolCallDetails = toolCalls.map(tc => ({ name: tc.tool_name, args: safeParseJson(tc.args) }));
 
   let toolMessages = 0, systemMessages = 0;
