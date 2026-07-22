@@ -565,13 +565,26 @@ async function getDeepAnalytics(opts = {}) {
 // ── tool calls ──────────────────────────────────────────────────────────────────
 async function getToolCalls(toolName, opts = {}) {
   const limit = opts.limit || 200;
+  // Join on the FULL (session_id, user_id) key — id alone fans each call out to
+  // every member's colliding session row (duplicates + wrong chat names). The
+  // drill-down also honors the same hidden/date/editor filters as the charts it
+  // is opened from, so out-of-scope call args never appear in it.
   let sql = `
     SELECT tc.tool_name AS tool_name, tc.args AS args, tc.source AS source, tc.folder AS folder,
-           toUnixTimestamp64Milli(tc.ts) AS timestamp, s.name AS chat_name, tc.session_id AS chat_id
-    FROM tool_calls AS tc INNER JOIN sessions AS s ON s.session_id = tc.session_id
+           toUnixTimestamp64Milli(tc.ts) AS timestamp, s.name AS chat_name,
+           concat(tc.session_id, '::', tc.user_id) AS chat_id
+    FROM tool_calls AS tc INNER JOIN sessions AS s
+      ON s.session_id = tc.session_id AND s.user_id = tc.user_id
     WHERE tc.tool_name = {name:String}`;
   const params = { name: toolName, limit };
   if (opts.folder) { sql += ' AND tc.folder = {folder:String}'; params.folder = opts.folder; }
+  if (opts.hiddenFolders && opts.hiddenFolders.length) {
+    sql += ' AND tc.folder NOT IN {hidden:Array(String)}';
+    params.hidden = opts.hiddenFolders;
+  }
+  if (opts.editor) { sql += ' AND tc.source LIKE {editor:String}'; params.editor = `%${opts.editor}%`; }
+  if (opts.dateFrom != null) { sql += ' AND toUnixTimestamp64Milli(tc.ts) >= {dateFrom:Int64}'; params.dateFrom = opts.dateFrom; }
+  if (opts.dateTo != null) { sql += ' AND toUnixTimestamp64Milli(tc.ts) <= {dateTo:Int64}'; params.dateTo = opts.dateTo; }
   sql += ' ORDER BY tc.ts DESC LIMIT {limit:UInt64}';
   const rows = await q(sql, params);
   return rows.map(r => ({
@@ -589,13 +602,13 @@ const ORPHAN_TOKENS = '(m.input_tokens > 0 OR m.output_tokens > 0 OR m.cache_rea
 // session_id → dominant model (most frequent across the session's messages).
 async function sessionDominantMap(f) {
   const rows = await q(`
-    SELECT session_id, argMax(model, cnt) AS dominant
-    FROM (SELECT m.session_id AS session_id, m.model AS model, count() AS cnt
+    SELECT session_id, user_id, argMax(model, cnt) AS dominant
+    FROM (SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, count() AS cnt
           FROM messages AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
-          GROUP BY session_id, model)
-    GROUP BY session_id`, f.params);
+          GROUP BY session_id, user_id, model)
+    GROUP BY session_id, user_id`, f.params);
   const map = {};
-  for (const r of rows) map[r.session_id] = r.dominant;
+  for (const r of rows) map[`${r.session_id}::${r.user_id}`] = r.dominant;
   return map;
 }
 
@@ -630,11 +643,11 @@ async function estimateCosts(opts = {}) {
     GROUP BY model`, f.params);
 
   const orphanRows = await q(`
-    SELECT m.session_id AS session_id, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
+    SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
            sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
     FROM messages AS m
     WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
-    GROUP BY session_id`, f.params);
+    GROUP BY session_id, user_id`, f.params);
 
   const dominantMap = await sessionDominantMap(f);
 
@@ -647,18 +660,18 @@ async function estimateCosts(opts = {}) {
     orphanByModel[dominant].cacheWrite += Number(cacheWrite) || 0;
   };
   for (const r of orphanRows) {
-    const dominant = dominantMap[r.session_id];
+    const dominant = dominantMap[`${r.session_id}::${r.user_id}`];
     if (dominant) addOrphan(dominant, r.input, r.output, r.cacheRead, r.cacheWrite);
   }
 
   // Sessions that name models but report zero tokens → estimate from chars.
   const charRows = await q(`
-    SELECT c.session_id AS session_id, c.user_chars AS userChars, c.assistant_chars AS asstChars
+    SELECT c.session_id AS session_id, c.user_id AS user_id, c.user_chars AS userChars, c.assistant_chars AS asstChars
     FROM sessions_v AS c
     WHERE notEmpty(c.models) AND c.input_tokens = 0 AND c.output_tokens = 0
       AND (c.user_chars > 0 OR c.assistant_chars > 0)${f.and}`, f.params);
   for (const r of charRows) {
-    const dominant = dominantMap[r.session_id];
+    const dominant = dominantMap[`${r.session_id}::${r.user_id}`];
     if (dominant) addOrphan(dominant, Math.round((Number(r.userChars) || 0) / CHARS_PER_TOKEN), Math.round((Number(r.asstChars) || 0) / CHARS_PER_TOKEN), 0, 0);
   }
 
@@ -707,25 +720,25 @@ async function estimateCosts(opts = {}) {
 // round-trips). Mirrors root computePerChatCosts.
 async function computePerChatCosts(f) {
   const aRows = await q(`
-    SELECT m.session_id AS session_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
+    SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM messages AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
-    GROUP BY session_id, model`, f.params);
+    GROUP BY session_id, user_id, model`, f.params);
   const byChatModel = {};
-  for (const r of aRows) (byChatModel[r.session_id] = byChatModel[r.session_id] || []).push(r);
+  for (const r of aRows) { const k = `${r.session_id}::${r.user_id}`; (byChatModel[k] = byChatModel[k] || []).push(r); }
 
   const bRows = await q(`
-    SELECT m.session_id AS session_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
+    SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM messages AS m
     WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
-    GROUP BY session_id`, f.params);
+    GROUP BY session_id, user_id`, f.params);
   const orphanByChat = {};
-  for (const r of bRows) orphanByChat[r.session_id] = r;
+  for (const r of bRows) orphanByChat[`${r.session_id}::${r.user_id}`] = r;
 
   const cRows = await q(`
-    SELECT c.session_id AS id, c.source AS source, c.name AS name, c.folder AS folder,
+    SELECT c.session_id AS id, c.user_id AS user_id, c.source AS source, c.name AS name, c.folder AS folder,
            toUnixTimestamp64Milli(c.last_updated_at) AS last_updated_at,
            toUnixTimestamp64Milli(c.created_at) AS created_at,
            c.total_msgs AS msgs, c.models AS models,
@@ -740,8 +753,9 @@ async function computePerChatCosts(f) {
 
   const out = [];
   for (const c of cRows) {
+    const key = `${c.id}::${c.user_id}`; // rollups are per (session_id, user_id)
     const hasModels = (c.models || []).length > 0;
-    const dominant = dominantMap[c.id] || null;
+    const dominant = dominantMap[key] || null;
     const tokenMap = {};
     const add = (rawModel, i, o, cr, cw) => {
       if (!rawModel) return;
@@ -750,8 +764,8 @@ async function computePerChatCosts(f) {
       tokenMap[key].input += Number(i) || 0; tokenMap[key].output += Number(o) || 0;
       tokenMap[key].cacheRead += Number(cr) || 0; tokenMap[key].cacheWrite += Number(cw) || 0;
     };
-    for (const r of (byChatModel[c.id] || [])) add(r.model, r.i, r.o, r.cr, r.cw);
-    const orphan = orphanByChat[c.id];
+    for (const r of (byChatModel[key] || [])) add(r.model, r.i, r.o, r.cr, r.cw);
+    const orphan = orphanByChat[key];
     if (orphan && dominant) add(dominant, orphan.i, orphan.o, orphan.cr, orphan.cw);
     if (hasModels && Number(c.ti) === 0 && Number(c.to_) === 0 && (c.uc > 0 || c.ac > 0) && dominant)
       add(dominant, Math.round((Number(c.uc) || 0) / CHARS_PER_TOKEN), Math.round((Number(c.ac) || 0) / CHARS_PER_TOKEN), 0, 0);
@@ -766,7 +780,7 @@ async function computePerChatCosts(f) {
     }
     byModel.sort((a, b) => b.cost - a.cost);
     out.push({
-      id: c.id, source: c.source, name: c.name, folder: c.folder,
+      id: key, user: c.user_id, source: c.source, name: c.name, folder: c.folder,
       last_updated_at: c.last_updated_at, created_at: c.created_at,
       msgs: Number(c.msgs), month: c.month, totalCost, byModel,
     });
