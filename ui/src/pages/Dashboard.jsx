@@ -67,7 +67,12 @@ export default function Dashboard({ overview }) {
     })
 
     if (!selectedEditor) {
-      setFilteredData(null)
+      // A date range without an editor must still refresh the overview widgets
+      // (KPIs, monthly trend, top projects) — falling back to the all-time
+      // `overview` prop would disagree with the date-scoped heatmap/stats/costs.
+      const hasDates = dateParams.dateFrom || dateParams.dateTo
+      if (hasDates) fetchOverviewApi(dateParams).then(setFilteredData)
+      else setFilteredData(null)
       fetchDailyActivity(dateParams).then(setDailyData)
       fetchDashboardStats(dateParams).then(setStats)
       fetchCosts(dateParams).then(setCosts)
