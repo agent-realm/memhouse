@@ -77,7 +77,10 @@ function filters(opts, { editorLike = false, folderLike = false } = {}) {
   }
   if (opts.chatId) {
     // Accept the composite 'session_id::user_id' id form getChats emits.
-    const [sid, uid] = String(opts.chatId).split('::');
+    // Last-separator split: codebuff session ids legitimately contain '::'.
+    const cut = String(opts.chatId).lastIndexOf('::');
+    const sid = cut === -1 ? String(opts.chatId) : String(opts.chatId).slice(0, cut);
+    const uid = cut === -1 ? undefined : String(opts.chatId).slice(cut + 2);
     parts.push('c.session_id = {chatId:String}'); params.chatId = sid;
     if (uid) { parts.push('c.user_id = {chatUid:String}'); params.chatUid = uid; }
   }
@@ -362,7 +365,12 @@ async function getChat(id) {
   // Accept both id forms: composite 'session_id::user_id' (what getChats emits —
   // deterministic when members share an adapter-local session_id) and a plain,
   // possibly-shortened session_id (manual/legacy use; LIMIT 1 picks arbitrarily).
-  const [sidPart, uidPart] = String(id).split('::');
+  // Split on the LAST '::' — some adapters (codebuff) build session ids as
+  // '<project>::<chatId>', so the first separator can be inside the sid. CH user
+  // names here are colon-free identifiers.
+  const cut = String(id).lastIndexOf('::');
+  const sidPart = cut === -1 ? String(id) : String(id).slice(0, cut);
+  const uidPart = cut === -1 ? undefined : String(id).slice(cut + 2);
   let sql = `
     SELECT c.session_id AS id, c.user_id AS user_id, c.source AS source, c.name AS name, c.mode AS mode, c.folder AS folder,
            toUnixTimestamp64Milli(c.created_at) AS created_at,
