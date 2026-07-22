@@ -148,9 +148,13 @@ app.get('/api/cost-analytics', route(async (req, res) => {
 app.get('/api/tool-calls', route(async (req, res) => {
   const name = req.query.name;
   if (!name) return res.status(400).json({ error: 'name query param required' });
+  // Same filter set as the analytics the drill-down is opened from.
   res.json(await qy.getToolCalls(name, {
     limit: Math.min(parseInt(req.query.limit) || 200, 1000),
     folder: req.query.folder || null,
+    editor: req.query.editor || null,
+    ...parseDateOpts(req.query),
+    hiddenFolders: hiddenFolders(),
   }));
 }));
 
