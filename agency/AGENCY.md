@@ -60,6 +60,37 @@ reuses the adapters' `getAllChats`/`getMessages`), so `messages_v`/`sessions_v`
 populate uniformly for editors memory-house cannot cover. The two agencies converge at
 the schema level — each in its own house.
 
+## Multiple members + shared memory (the memory-house model)
+
+memory-house's multi-tenant model — many people, each with their own credential, each
+seeing only their own sessions (own-only RLS) — is reproducible here. Most of it
+already works in what this agency ships; exactly one step belongs to the kernel.
+
+| Piece | Who does it | Status |
+|---|---|---|
+| Mint a member (a CH user) | **kernel** — `register-member{handle}` | works |
+| Let a member read/write the house | **owner** — `GRANT INSERT, SELECT ON agentlytics.* TO handle` | works |
+| Stamp each row's writer identity | **schema** — `user_id MATERIALIZED currentUser()` | works |
+| Each member ingests as themselves | **member** — run `agency.js` with their own `HOUSE_CLICKHOUSE_USER/PASSWORD` | works |
+| **Own-only RLS (row policy)** | **kernel** — the owner CANNOT (`CREATE ROW POLICY` needs ACCESS MANAGEMENT) | **the gap** |
+
+The only missing capability is installing the row policy in `house-rls.sql`, and it is
+deliberately the kernel's — agency owners are denied ACCESS MANAGEMENT by design. Two
+ways to close it:
+
+- **Kernel verb (clean).** Add a closed, parameterized, owner-approved catalog verb
+  (the SPEC §6 grant/capability family, design-only in M1) the kernel runs as `kernel`:
+  `grant-house-access{agency, member}` → the owner-grant above; and
+  `set-house-visibility{agency, mode: own-only|shared}` → installs/removes the row
+  policy. Both are content-blind and fit the model — a ~10-line addition to the
+  executor's `expand()`.
+- **Mayor applies it once (interim).** The mayor (has ACCESS MANAGEMENT) runs
+  `house-rls.sql` after install. Works today.
+
+Verified end-to-end on a throwaway kernel: two members ingesting as themselves each saw
+only their own rows (alice→2, bob→1); the owner (outside the policy) saw all; the
+owner's own attempt to create the policy was correctly denied.
+
 ## Design notes
 
 - **Deterministic worker (agent-desk tier).** `ingest.js` runs no LLM, so it is not a
