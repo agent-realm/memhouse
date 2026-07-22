@@ -103,46 +103,14 @@ if (isRelay) {
 
 // ── Join mode ────────────────────────────────────────────────
 if (isJoin) {
-  (async () => {
-    const relayAddress = process.argv[joinIndex + 1];
-    const usernameIndex = process.argv.indexOf('--username');
-    let username = usernameIndex !== -1 ? process.argv[usernameIndex + 1] : null;
-
-    if (!relayAddress) {
-      console.error(chalk.red(`\n  ✗ Missing relay address. Usage: ${PM_RUN} agentlytics --join <host:port> --username <name>\n`));
-      process.exit(1);
-    }
-
-    // Auto-detect username from git config if not provided
-    if (!username) {
-      try {
-        const gitEmail = execSync('git config user.email', { encoding: 'utf-8' }).trim();
-        if (gitEmail) username = gitEmail;
-      } catch {}
-    }
-
-    // If still no username, ask interactively
-    if (!username) {
-      const readline = require('readline');
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      username = await new Promise(r => {
-        rl.question(chalk.bold('\n  Enter your username: '), (answer) => {
-          rl.close();
-          r(answer.trim());
-        });
-      });
-      if (!username) {
-        console.error(chalk.red('\n  ✗ Username is required.\n'));
-        process.exit(1);
-      }
-    }
-
-    const { startJoinClient } = require('./relay-client');
-    startJoinClient(relayAddress, username);
-  })();
-
-  // Skip the rest of the normal flow
-  return;
+  // Fail fast: the relay join client still targets the removed synchronous SQLite
+  // cache (relay-client.js pickProjects → cache.getDb), which the ClickHouse
+  // cutover eliminated — it would crash after connecting. In memhouse, team
+  // sharing is the kernel path (members + owner grants + RLS), not relay.
+  console.error(chalk.red('\n  ✗ Relay join is not supported in memhouse.'));
+  console.error(chalk.dim('    Team sharing here is kernel-based: see mem-house/delivery/kernel-install.md'));
+  console.error(chalk.dim('    (register-member + owner GRANT + own-only RLS).\n'));
+  process.exit(1);
 }
 
 // ── Helper: get local IP for relay ───────────────────────────

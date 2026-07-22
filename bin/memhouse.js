@@ -230,11 +230,26 @@ async function cmdInstall({ interactive }) {
     cfg.db = await ask('  database (the house)', cfg.db);
     cfg.port = await ask('  dashboard port', cfg.port);
   }
+  if (!/^[A-Za-z0-9_]{1,64}$/.test(cfg.db)) {
+    console.log(bad(`invalid database name '${cfg.db}' — use letters, digits, underscore`));
+    return 1;
+  }
   writeEnvFile(cfg);
   console.log(ok(`config written: ${ENV_FILE}`));
-  try { await ch(cfg, 'SELECT 1'); }
+  // Preflight WITHOUT selecting the house — on a fresh standalone ClickHouse the
+  // database doesn't exist yet, and selecting it would fail before we can create it.
+  try { await ch(cfg, 'SELECT 1', { database: '' }); }
   catch (e) { console.log(bad(`connection failed: ${e.message}`)); console.log('  fix the connection, then re-run: memhouse install'); return 1; }
   console.log(ok('connection verified'));
+  // Ensure the house exists (standalone path). On a kernel realm the house is
+  // provisioned by install-agency and this is a no-op; if the user lacks CREATE
+  // DATABASE but the house is already reachable, that's fine too.
+  try { await ch(cfg, `CREATE DATABASE IF NOT EXISTS ${cfg.db}`, { database: '' }); }
+  catch (e) {
+    try { await ch(cfg, 'SELECT 1'); }
+    catch { console.log(bad(`house '${cfg.db}' does not exist and cannot be created: ${e.message}`)); return 1; }
+  }
+  console.log(ok(`house '${cfg.db}' ready`));
   if (run(SHIP_JS, ['--ensure-schema'], cfg) !== 0) return 1;
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
