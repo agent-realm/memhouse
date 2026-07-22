@@ -1,0 +1,8 @@
+{
+  "name": "memhouse",
+  "description": "Conversation memory for AI agents over the mem-house typed ClickHouse store: search, browse, and analyze every past session across all 17 supported editors and machines. Skills install as /memhouse:search, /memhouse:sessions, and /memhouse:sql.",
+  "version": "0.1.0",
+  "author": { "name": "Ramazan Polat" },
+  "homepage": "https://github.com/ramazanpolat/ultimagent-agentlytics",
+  "keywords": ["memory", "clickhouse", "search", "sessions", "analytics", "agentlytics"]
+}
