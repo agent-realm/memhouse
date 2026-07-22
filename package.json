@@ -1,7 +1,7 @@
 {
-  "name": "agentlytics",
-  "version": "0.2.13",
-  "description": "Comprehensive analytics dashboard for AI coding agents — Cursor, Devin, Claude Code, VS Code Copilot, Zed, Antigravity, OpenCode, Command Code",
+  "name": "ultimagent-memhouse",
+  "version": "0.1.0",
+  "description": "mem-house — agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store, kernel-agency install, and the agentlytics dashboard",
   "main": "index.js",
   "bin": {
     "agentlytics": "./index.js"
