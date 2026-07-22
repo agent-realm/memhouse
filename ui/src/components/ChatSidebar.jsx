@@ -101,7 +101,7 @@ export default function ChatSidebar({ chatId, onClose, fetchFn, extraHeader, use
           )}
           {chat && !fetchFn && (
             <a
-              href={`${BASE}/api/chats/${chat.id}/markdown`}
+              href={`${BASE}/api/chats/${encodeURIComponent(chat.id)}/markdown`}
               download
               className="flex items-center gap-1 px-2 py-1 text-[11px] transition shrink-0"
               style={{ background: 'var(--c-bg3)', color: 'var(--c-text)', border: '1px solid var(--c-border)' }}

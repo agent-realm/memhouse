@@ -72,7 +72,9 @@ export async function fetchChats(params = {}) {
 }
 
 export async function fetchChat(id) {
-  const res = await fetch(`${BASE}/api/chats/${id}`);
+  // Some adapters emit ids containing '/' (e.g. Kiro's dir/file fallback) —
+  // encode so the id stays a single path segment for the /api/chats/:id route.
+  const res = await fetch(`${BASE}/api/chats/${encodeURIComponent(id)}`);
   return res.json();
 }
 

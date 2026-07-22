@@ -103,6 +103,21 @@ ONE="$(curl -sS --connect-timeout 5 --fail-with-body \
 [ "$ONE" = "1" ] || die "unexpected reply from $CH_URL: $ONE"
 info "ClickHouse ok"
 
+# Ensure the house exists before ensure-schema (schema.sql is unqualified and the
+# shipper binds to MEMHOUSE_DB — on a virgin standalone server the database must
+# be created first). On a kernel realm the house is already provisioned; if the
+# user lacks CREATE DATABASE but the house is reachable, that's fine too.
+case "$CH_DB" in
+  (*[!A-Za-z0-9_]*|'') die "invalid database name '$CH_DB' — use letters, digits, underscore" ;;
+esac
+if ! curl -fsS --max-time 20 --user "$CH_USER:$CH_PASSWORD" \
+      --data-binary "CREATE DATABASE IF NOT EXISTS $CH_DB" "$CH_URL" >/dev/null 2>&1; then
+  curl -fsS --max-time 20 --user "$CH_USER:$CH_PASSWORD" \
+      --data-binary "SELECT 1" "$CH_URL/?database=$CH_DB" >/dev/null 2>&1 \
+    || die "house '$CH_DB' does not exist and cannot be created as $CH_USER"
+fi
+info "house '$CH_DB' ready"
+
 # ---------- 5. write ~/.memhouse/env ----------------------------------------
 mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
 cat > "$ENV_FILE" <<EOF
