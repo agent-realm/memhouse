@@ -224,7 +224,11 @@ function rowsForChat(chat, host) {
 async function runShip(client, opts = {}) {
   const { full = false } = opts;
   const host = hostId();
-  const existing = full ? new Map() : await loadExisting(client);
+  // Always load what the house holds — even with --full. The skip decision uses it
+  // only in incremental mode, but re-shipping a KNOWN session must clear its old
+  // message/tool rows first (a shrunken re-parse leaves stale higher-seq rows
+  // otherwise: ReplacingMergeTree collapses same-key rows only).
+  const existing = await loadExisting(client);
   const chats = getAllChats();
 
   const batches = { sessions: [], messages: [], tool_calls: [] };
@@ -252,7 +256,7 @@ async function runShip(client, opts = {}) {
     seen.add(id);
 
     const prev = existing.get(id);
-    if (prev) {
+    if (!full && prev) {
       // floor: some adapters (codex) emit fractional-ms timestamps, but DateTime64(3)
       // stores whole ms — without it every such session loses by <1ms and re-ships.
       const chatLast = Math.floor(chat.lastUpdatedAt || chat.createdAt || 0);
@@ -262,6 +266,19 @@ async function runShip(client, opts = {}) {
 
     const rows = rowsForChat(chat, host);
     if (!rows) { unreadable++; continue; } // write nothing → retried next pass
+    if (prev) {
+      // Known session being re-shipped: clear its old rows BEFORE inserting so a
+      // shorter re-parse can't leave stale seq/idx tails. Delete-then-insert is
+      // crash-safe here — a pass dying between the two is repaired by the next
+      // pass (the session re-ships until its row set is complete again).
+      for (const t of ['messages', 'tool_calls']) {
+        await client.command({
+          query: `DELETE FROM ${t} WHERE session_id = {id:String}`,
+          query_params: { id },
+          clickhouse_settings: { async_insert: 0 },
+        });
+      }
+    }
     await push('sessions', rows.session);
     sessions++;
     for (const r of rows.msgRows) { await push('messages', r); msgRows++; }
