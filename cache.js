@@ -373,6 +373,14 @@ async function getCachedToolCalls(toolName, opts = {}) {
              WHERE tc.tool_name = {name:String}`;
   const params = { name: toolName, limit };
   if (opts.folder) { sql += ' AND tc.folder = {folder:String}'; params.folder = opts.folder; }
+  // Drill-downs honor the same filters as the analytics they are opened from.
+  if (opts.hiddenFolders && opts.hiddenFolders.length) {
+    sql += ' AND (tc.folder IS NULL OR tc.folder NOT IN {hidden:Array(String)})';
+    params.hidden = opts.hiddenFolders;
+  }
+  if (opts.editor) { sql += ' AND tc.source LIKE {editor:String}'; params.editor = `%${opts.editor}%`; }
+  if (opts.dateFrom != null) { sql += ' AND tc.timestamp >= {dateFrom:Int64}'; params.dateFrom = opts.dateFrom; }
+  if (opts.dateTo != null) { sql += ' AND tc.timestamp <= {dateTo:Int64}'; params.dateTo = opts.dateTo; }
   sql += ' ORDER BY tc.timestamp DESC LIMIT {limit:UInt64}';
   const rows = await q(sql, params);
   return rows.map(r => ({
