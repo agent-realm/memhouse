@@ -14,6 +14,9 @@ const os = require('os');
 const qy = require('./queries');
 
 const PORT = parseInt(process.env.MEMHOUSE_PORT || '4640', 10);
+// Localhost by default: the dashboard exposes full transcripts and a SQL console
+// with no auth. Remote access is an explicit opt-in (MEMHOUSE_HOST=0.0.0.0).
+const HOST = process.env.MEMHOUSE_HOST || '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
 const CONFIG_PATH = path.join(os.homedir(), '.memhouse', 'config.json');
 
@@ -212,8 +215,9 @@ app.get('*', (req, res) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`[mem-house] dashboard → http://localhost:${PORT} (house '${qy.config.database}' @ ${qy.config.url.replace(/\/\/.*@/, '//')})`);
+  app.listen(PORT, HOST, () => {
+    console.log(`[mem-house] dashboard → http://localhost:${PORT} (house '${qy.config.database}' @ ${qy.config.url.replace(/\/\/.*@/, '//')})`
+      + (HOST !== '127.0.0.1' ? ` [bound to ${HOST} — remotely reachable]` : ''));
   });
 }
 

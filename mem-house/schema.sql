@@ -9,10 +9,17 @@
 -- adapter fields not yet normalized (never lose data to the schema).
 --
 -- Versioning/idempotency: ReplacingMergeTree(ingested_at) everywhere. `messages` is
--- keyed (session_id, seq): re-shipping a grown or corrected session REPLACES stale
--- rows (latest-wins) instead of accumulating variants. Identity is server-stamped
--- (`user_id MATERIALIZED currentUser()`; writers must use async_insert=0) and is the
--- RLS anchor (rls.sql). Readers should query with the `final=1` setting.
+-- keyed (session_id, user_id, seq): re-shipping a grown or corrected session
+-- REPLACES stale rows (latest-wins) instead of accumulating variants, and the
+-- user_id in every key means two members shipping the same adapter-local
+-- session_id can never collapse or overwrite each other's rows. Identity is
+-- server-stamped (`user_id MATERIALIZED currentUser()`; writers must use
+-- async_insert=0) and is the RLS anchor (rls.sql). Readers should query with the
+-- `final=1` setting.
+--
+-- BREAKING (pre-release): the user_id-in-key change alters ORDER BY, which
+-- CREATE TABLE IF NOT EXISTS will NOT apply to an existing house — recreate with
+-- `memhouse reset` (or DROP the tables and re-run --ensure-schema).
 
 -- One row per session (adapter-level metadata; aggregates live in sessions_v).
 CREATE TABLE IF NOT EXISTS sessions
@@ -34,7 +41,7 @@ CREATE TABLE IF NOT EXISTS sessions
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY session_id;
+ORDER BY (session_id, user_id);
 
 -- One row per message. FTS: two lower(text) materialized columns each carry one
 -- text index (ngram for substring/LIKE, word for token match) — query with
@@ -66,7 +73,7 @@ CREATE TABLE IF NOT EXISTS messages
     INDEX idx_text_word  text_word  TYPE text(tokenizer = splitByNonAlpha) GRANULARITY 1
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, seq);
+ORDER BY (session_id, user_id, seq);
 
 -- One row per tool call (memory-house has no equivalent; this powers the tool
 -- analytics). `seq` = owning message's seq; `idx` = call index within the session.
@@ -86,7 +93,7 @@ CREATE TABLE IF NOT EXISTS tool_calls
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, idx);
+ORDER BY (session_id, user_id, idx);
 
 -- Analytics-ready rollup: session metadata + message aggregates. Query with final=1.
 CREATE OR REPLACE VIEW sessions_v AS
@@ -99,7 +106,7 @@ SELECT
     any(s.folder) AS folder,
     any(s.project) AS project,
     any(s.git_branch) AS git_branch,
-    any(s.user_id) AS user_id,
+    s.user_id AS user_id,
     any(s.created_at) AS created_at,
     any(s.last_updated_at) AS last_updated_at,
     min(m.ts) AS started,
@@ -118,5 +125,5 @@ SELECT
     sumIf(length(m.text), m.role = 'assistant') AS assistant_chars,
     substring(argMinIf(m.text, m.seq, m.role = 'user' AND m.text != ''), 1, 200) AS first_prompt
 FROM sessions AS s
-INNER JOIN messages AS m ON m.session_id = s.session_id
-GROUP BY s.session_id;
+INNER JOIN messages AS m ON m.session_id = s.session_id AND m.user_id = s.user_id
+GROUP BY s.session_id, s.user_id;

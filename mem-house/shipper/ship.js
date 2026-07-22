@@ -12,7 +12,7 @@
 //     format; ISO 'T'/'Z' forms parse unreliably under JSONEachRow). Nullable → null.
 //   - Int64-bound values are integer-coerced (some adapters emit fractional ms).
 //   - Re-shipping is always safe: ReplacingMergeTree(ingested_at) keyed
-//     (session_id, seq) collapses to latest-wins at FINAL.
+//     (session_id, user_id, seq) collapses to latest-wins at FINAL.
 //
 // CLI:  node ship.js                one incremental pass
 //       node ship.js --loop [sec]   repeat every sec seconds (default 300)
@@ -106,7 +106,7 @@ async function ensureSchema(client) {
 // must be decidable WITHOUT calling getMessages on every chat.
 async function loadExisting(client) {
   const rs = await client.query({
-    query: 'SELECT session_id, last_updated_at, message_count, extra FROM sessions FINAL',
+    query: 'SELECT session_id, last_updated_at, message_count, extra FROM sessions FINAL WHERE user_id = currentUser()',
     format: 'JSONEachRow',
   });
   const map = new Map();
@@ -273,7 +273,7 @@ async function runShip(client, opts = {}) {
       // pass (the session re-ships until its row set is complete again).
       for (const t of ['messages', 'tool_calls']) {
         await client.command({
-          query: `DELETE FROM ${t} WHERE session_id = {id:String}`,
+          query: `DELETE FROM ${t} WHERE session_id = {id:String} AND user_id = currentUser()`,
           query_params: { id },
           clickhouse_settings: { async_insert: 0 },
         });
