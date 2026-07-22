@@ -1,4 +1,4 @@
-# ultimagent-memhouse
+# memhouse
 
 **mem-house** — agent conversation memory as a product. Every coding-agent session
 on your machines — across the **17 editors** the agentlytics adapters support —
@@ -29,7 +29,7 @@ npx memhouse onboard      # wizard: discover → configure → ship → start
 
 While the package is private, run it from the repo (`npm install` once, then
 `node bin/memhouse.js …` or `npm link` for a global `memhouse`), or
-`npx github:ramazanpolat/ultimagent-memhouse …` with git auth. The public npm
+`npx github:ramazanpolat/memhouse …` with git auth. The public npm
 name `memhouse` is reserved for release.
 
 ```text
