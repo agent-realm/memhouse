@@ -345,12 +345,15 @@ export default function App() {
               style={{ background: 'var(--c-bg3)', border: '1px solid var(--c-border)', color: 'var(--c-text)', fontFamily: 'JetBrains Mono, monospace', lineHeight: 1.6 }}
             >{`{\n  "mcpServers": {\n    "agentlytics": {\n      "url": "${window.location.origin}/mcp"\n    }\n  }\n}`}</pre>
 
-            <div className="text-[12px] font-medium mb-1.5" style={{ color: 'var(--c-white)' }}>Join Command</div>
-            <div className="text-[10px] mb-1" style={{ color: 'var(--c-text3)' }}>Share with your team to start syncing sessions</div>
+            <div className="text-[12px] font-medium mb-1.5" style={{ color: 'var(--c-white)' }}>Team Sharing</div>
+            <div className="text-[10px] mb-1" style={{ color: 'var(--c-text3)' }}>
+              Relay join is not supported in memhouse — team sharing is kernel-based
+              (members + grants + row-level security). See mem-house/delivery/kernel-install.md.
+            </div>
             <pre
               className="text-[11px] px-3 py-2 overflow-x-auto"
               style={{ background: 'var(--c-bg3)', border: '1px solid var(--c-border)', color: 'var(--c-text)', fontFamily: 'JetBrains Mono, monospace', lineHeight: 1.6 }}
-            >{`cd /path/to/your-project\nRELAY_PASSWORD=${relayPassword || '<pass>'} npx agentlytics --join ${window.location.host}`}</pre>
+            >{`# each member ships with their own credential:\nMEMHOUSE_URL=<realm-url> MEMHOUSE_USER=<member> MEMHOUSE_PASSWORD=<credential> \\\n  memhouse ship --loop`}</pre>
           </div>
         </>
       )}
