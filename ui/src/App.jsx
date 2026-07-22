@@ -329,7 +329,12 @@ export default function App() {
               <div className="text-[10px]" style={{ color: 'var(--c-text3)' }}>Add to your AI client's MCP settings</div>
               <button
                 onClick={() => {
-                  const json = JSON.stringify({ "mcpServers": { "agentlytics": { "url": `${window.location.origin}/mcp` } } }, null, 2)
+                  // Password-protected relays gate /mcp with the same bearer token the
+                  // dashboard got at login — include it or the copied config 401s.
+                  const relayToken = localStorage.getItem('agentlytics_relay_token')
+                  const server = { url: `${window.location.origin}/mcp` }
+                  if (relayToken) server.headers = { Authorization: `Bearer ${relayToken}` }
+                  const json = JSON.stringify({ "mcpServers": { "agentlytics": server } }, null, 2)
                   navigator.clipboard.writeText(json)
                   setMcpCopied(true)
                   setTimeout(() => setMcpCopied(false), 2000)
@@ -343,7 +348,9 @@ export default function App() {
             <pre
               className="text-[11px] px-3 py-2 overflow-x-auto mb-4"
               style={{ background: 'var(--c-bg3)', border: '1px solid var(--c-border)', color: 'var(--c-text)', fontFamily: 'JetBrains Mono, monospace', lineHeight: 1.6 }}
-            >{`{\n  "mcpServers": {\n    "agentlytics": {\n      "url": "${window.location.origin}/mcp"\n    }\n  }\n}`}</pre>
+            >{localStorage.getItem('agentlytics_relay_token')
+              ? `{\n  "mcpServers": {\n    "agentlytics": {\n      "url": "${window.location.origin}/mcp",\n      "headers": { "Authorization": "Bearer ${localStorage.getItem('agentlytics_relay_token')}" }\n    }\n  }\n}`
+              : `{\n  "mcpServers": {\n    "agentlytics": {\n      "url": "${window.location.origin}/mcp"\n    }\n  }\n}`}</pre>
 
             <div className="text-[12px] font-medium mb-1.5" style={{ color: 'var(--c-white)' }}>Team Sharing</div>
             <div className="text-[10px] mb-1" style={{ color: 'var(--c-text3)' }}>

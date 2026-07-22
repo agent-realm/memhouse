@@ -78,13 +78,16 @@ if (isRelay) {
     console.log('');
     console.log(chalk.green(`  ✓ Relay server running on port ${RELAY_PORT}`));
     console.log('');
-    console.log(chalk.bold('  Share this command with your team:'));
-    console.log('');
-    console.log(chalk.cyan(`    ${PM_RUN} agentlytics --join ${localIp}:${RELAY_PORT} --username <name>`));
+    console.log(chalk.bold('  Team sharing:'));
+    console.log(chalk.dim('    Relay join is not supported in memhouse — members ship with their own'));
+    console.log(chalk.dim('    credentials (kernel-based): see mem-house/delivery/kernel-install.md'));
     console.log('');
     console.log(chalk.bold('  MCP server endpoint (add to your AI client):'));
     console.log('');
     console.log(chalk.cyan(`    ${relayUrl}/mcp`));
+    if (process.env.RELAY_PASSWORD) {
+      console.log(chalk.dim('    (password protection is on — clients must send the bearer token from /api/login)'));
+    }
     console.log('');
     console.log(chalk.dim('  REST endpoints:'));
     console.log(chalk.dim(`    GET  ${relayUrl}/relay/health`));
