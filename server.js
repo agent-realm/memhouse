@@ -223,6 +223,9 @@ app.get('/api/tool-calls', async (req, res) => {
     const opts = {
       limit: Math.min(parseInt(req.query.limit) || 200, 1000),
       folder: req.query.folder || null,
+      editor: req.query.editor || null,
+      ...parseDateOpts(req.query),
+      hiddenFolders: getHiddenFolders(),
     };
     res.json(await cache.getCachedToolCalls(name, opts));
   } catch (err) {

@@ -201,6 +201,8 @@ export async function fetchToolCalls(name, opts = {}) {
   const q = new URLSearchParams({ name });
   if (opts.limit) q.set('limit', opts.limit);
   if (opts.folder) q.set('folder', opts.folder);
+  if (opts.editor) q.set('editor', opts.editor);
+  appendDateParams(q, opts);
   const res = await fetch(`${BASE}/api/tool-calls?${q}`);
   return res.json();
 }

@@ -133,15 +133,21 @@ function ToolCallRow({ call, toolName, index }) {
   )
 }
 
-function ToolDrillDown({ toolName, folder, onClose }) {
+function ToolDrillDown({ toolName, folder, editor, dateRange, onClose }) {
   const [calls, setCalls] = useState(null)
   const [loading, setLoading] = useState(true)
   const projectName = folder ? folder.split('/').pop() : null
 
   useEffect(() => {
     setLoading(true)
-    fetchToolCalls(toolName, { folder: folder || undefined }).then(data => { setCalls(data); setLoading(false) })
-  }, [toolName, folder])
+    // Same filters as the charts this drill-down was opened from — otherwise the
+    // call list can show other editors/dates than the clicked segment counted.
+    fetchToolCalls(toolName, {
+      folder: folder || undefined,
+      editor: editor || undefined,
+      ...dateRangeToApiParams(dateRange),
+    }).then(data => { setCalls(data); setLoading(false) })
+  }, [toolName, folder, editor, dateRange])
 
   return (
     <div className="card p-3 fade-in" style={{ borderColor: 'rgba(99,102,241,0.3)' }}>
@@ -480,7 +486,7 @@ export default function DeepAnalysis({ overview }) {
 
           {/* Tool drill-down */}
           {selectedTool && (
-            <ToolDrillDown toolName={selectedTool} folder={folder} onClose={() => setSelectedTool(null)} />
+            <ToolDrillDown toolName={selectedTool} folder={folder} editor={editor} dateRange={dateRange} onClose={() => setSelectedTool(null)} />
           )}
         </>
       )}
