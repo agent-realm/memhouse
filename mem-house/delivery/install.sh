@@ -166,8 +166,9 @@ Next steps:
   nohup node "$SHIP" --loop >> "$ENV_DIR/ship.log" 2>&1 &
 
   # agent skills (search/sessions/sql from inside Claude Code):
-  cp -R "$HERE/plugin" "\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills/memhouse"
-  # -> loads as memhouse@skills-dir next session: /memhouse:search, /memhouse:sessions, /memhouse:sql
+  node "$REPO_ROOT/bin/memhouse.js" plugins install claude
+  # -> installs memhouse-search / memhouse-sessions / memhouse-sql into
+  #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills (loads next session)
 
 Verify anytime:
   set -a; . "$ENV_FILE"; set +a

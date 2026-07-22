@@ -203,8 +203,23 @@ function wireMcpToExpress(app, getDb) {
   const sseTransports = {};
   const httpTransports = {};
 
+  // Same auth gate as the relay's /relay/* routes (same token derivation as
+  // createRelayApp): when RELAY_PASSWORD is set, /mcp must not expose
+  // search_sessions / get_session_detail to unauthenticated clients.
+  const RELAY_PASSWORD = process.env.RELAY_PASSWORD || null;
+  const AUTH_TOKEN = RELAY_PASSWORD
+    ? require('crypto').createHmac('sha256', 'agentlytics-relay').update(RELAY_PASSWORD).digest('hex')
+    : null;
+  function requireAuth(req, res, next) {
+    if (!AUTH_TOKEN) return next();
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (token === AUTH_TOKEN) return next();
+    res.status(401).json({ error: 'Unauthorized' });
+  }
+
   // SSE: GET /mcp establishes SSE stream
-  app.get('/mcp', async (req, res) => {
+  app.get('/mcp', requireAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
 
     // Streamable HTTP GET for SSE stream resumption
@@ -229,7 +244,7 @@ function wireMcpToExpress(app, getDb) {
   });
 
   // POST /mcp handles both SSE messages and Streamable HTTP
-  app.post('/mcp', async (req, res) => {
+  app.post('/mcp', requireAuth, async (req, res) => {
     // Check for SSE session first
     const sseSessionId = req.query.sessionId;
     if (sseSessionId && sseTransports[sseSessionId]) {
@@ -264,7 +279,7 @@ function wireMcpToExpress(app, getDb) {
   });
 
   // DELETE /mcp for session cleanup
-  app.delete('/mcp', async (req, res) => {
+  app.delete('/mcp', requireAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     if (sessionId && httpTransports[sessionId]) {
       await httpTransports[sessionId].handleRequest(req, res);
