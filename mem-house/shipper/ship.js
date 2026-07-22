@@ -109,12 +109,20 @@ async function loadExisting(client) {
     query: 'SELECT session_id, last_updated_at, message_count, extra FROM sessions FINAL WHERE user_id = currentUser()',
     format: 'JSONEachRow',
   });
+  // Which sessions actually have message rows: a crash between the re-ship DELETE
+  // and the replacement inserts leaves a fresh-looking session row with no
+  // transcript — the skip must not trust freshness alone.
+  const mr = await client.query({
+    query: 'SELECT DISTINCT session_id FROM messages WHERE user_id = currentUser()',
+    format: 'JSONEachRow',
+  });
+  const hasMsgs = new Set((await mr.json()).map((r) => r.session_id));
   const map = new Map();
   for (const r of await rs.json()) {
     // DateTime64 comes back as 'YYYY-MM-DD HH:MM:SS.mmm' — re-parse as UTC.
     const ms = r.last_updated_at ? Date.parse(r.last_updated_at.replace(' ', 'T') + 'Z') : null;
     const bc = toInt(r.extra && r.extra.bubbleCount);
-    map.set(r.session_id, { ms, count: toInt(r.message_count), bc });
+    map.set(r.session_id, { ms, count: toInt(r.message_count), bc, hasMsgs: hasMsgs.has(r.session_id) });
   }
   return map;
 }
@@ -261,16 +269,20 @@ async function runShip(client, opts = {}) {
       // stores whole ms — without it every such session loses by <1ms and re-ships.
       const chatLast = Math.floor(chat.lastUpdatedAt || chat.createdAt || 0);
       const notNewer = chatLast === 0 || (prev.ms !== null && prev.ms >= chatLast);
-      if (notNewer && prev.bc >= (chat.bubbleCount || 0)) { skipped++; continue; }
+      // Freshness alone is not enough: require the transcript rows to actually be
+      // there (or the session to be legitimately empty) so an interrupted re-ship
+      // repairs itself on the next pass instead of being skipped forever.
+      const intact = prev.count === 0 || prev.hasMsgs;
+      if (notNewer && prev.bc >= (chat.bubbleCount || 0) && intact) { skipped++; continue; }
     }
 
     const rows = rowsForChat(chat, host);
     if (!rows) { unreadable++; continue; } // write nothing → retried next pass
     if (prev) {
       // Known session being re-shipped: clear its old rows BEFORE inserting so a
-      // shorter re-parse can't leave stale seq/idx tails. Delete-then-insert is
-      // crash-safe here — a pass dying between the two is repaired by the next
-      // pass (the session re-ships until its row set is complete again).
+      // shorter re-parse can't leave stale seq/idx tails. A crash between the
+      // delete and the inserts is repaired by the next pass: the skip predicate
+      // refuses to skip a non-empty session whose message rows are missing.
       for (const t of ['messages', 'tool_calls']) {
         await client.command({
           query: `DELETE FROM ${t} WHERE session_id = {id:String} AND user_id = currentUser()`,

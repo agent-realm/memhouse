@@ -388,7 +388,10 @@ const BOT_STYLES = [
       return startServer(port + 1);
     }
 
-    app.listen(port, '0.0.0.0', () => {
+    // Loopback by default — the dashboard exposes transcripts and a SQL console
+    // with no auth. LAN exposure is an explicit opt-in (AGENTLYTICS_HOST=0.0.0.0).
+    const HOST = process.env.AGENTLYTICS_HOST || '127.0.0.1';
+    app.listen(port, HOST, () => {
       if (isUiDev) return;
       const url = `http://localhost:${port}`;
       console.log(chalk.green(`  ✓ Dashboard ready at ${chalk.bold.white(url)}`));
