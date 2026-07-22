@@ -1,12 +1,15 @@
 {
-  "name": "ultimagent-memhouse",
+  "name": "memhouse",
   "version": "0.1.0",
-  "description": "mem-house — agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store, kernel-agency install, and the agentlytics dashboard",
-  "main": "index.js",
+  "description": "mem-house \u2014 agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store, kernel-agency install, and the agentlytics dashboard",
+  "main": "bin/memhouse.js",
   "bin": {
+    "memhouse": "./bin/memhouse.js",
     "agentlytics": "./index.js"
   },
   "files": [
+    "bin/",
+    "mem-house/",
     "index.js",
     "cache.js",
     "server.js",
@@ -27,33 +30,30 @@
     "README.md"
   ],
   "scripts": {
-    "start": "node index.js",
+    "start": "node bin/memhouse.js",
     "build": "cd ui && npm install && npm run build",
-    "dev": "cd ui && npm run dev"
+    "dev": "cd ui && npm run dev",
+    "prepack": "cd ui && npm install --no-audit --no-fund && npm run build"
   },
   "keywords": [
-    "cursor",
-    "devin",
-    "devin-desktop",
+    "memory",
+    "agents",
+    "clickhouse",
     "claude",
-    "vscode",
-    "copilot",
-    "zed",
-    "antigravity",
-    "opencode",
     "codex",
+    "gemini",
+    "cursor",
     "analytics",
-    "ai",
-    "agent"
+    "mem-house"
   ],
-  "author": "fkadev",
-  "license": "ISC",
+  "author": "Ramazan Polat <ramazanpolat@gmail.com> (built on agentlytics by fkadev)",
+  "license": "MIT",
   "engines": {
     "node": ">=20.19.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/f/agentlytics"
+    "url": "https://github.com/ramazanpolat/ultimagent-memhouse"
   },
   "dependencies": {
     "@clickhouse/client": "^1.23.1",
