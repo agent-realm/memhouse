@@ -21,22 +21,31 @@ memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
 | `agency/` | the earlier agentlytics-agency wrap (raw canonical shape) — kept as prior art |
 | everything else at root | upstream agentlytics (see `AGENTLYTICS-README.md`), still runnable |
 
-## Quickstart
+## Quickstart — the `memhouse` CLI
 
 ```bash
-npm install
-# configure ~/.memhouse/env (MEMHOUSE_URL/USER/PASSWORD/DB), then:
-node mem-house/shipper/ship.js --ensure-schema
-node mem-house/shipper/ship.js            # parse-on-client ship of all local sessions
-node mem-house/shipper/ship.js --stats    # per-source counts
-cd ui && npm install && npm run build && cd ..
-node mem-house/server/server.js           # dashboard → http://localhost:4640
+npx memhouse onboard      # wizard: discover → configure → ship → start
 ```
 
-Full instructions: `mem-house/delivery/AGENT-INSTALL.md` (or
-`mem-house/delivery/install.sh`). Kernel install (agency `memhouse`, members,
-own-only RLS): `mem-house/delivery/kernel-install.md`. Claude Code skills + plugin:
-`mem-house/delivery/skills/`, `mem-house/delivery/plugin/`.
+While the package is private, run it from the repo (`npm install` once, then
+`node bin/memhouse.js …` or `npm link` for a global `memhouse`), or
+`npx github:ramazanpolat/ultimagent-memhouse …` with git auth. The public npm
+name `memhouse` is reserved for release.
+
+```text
+memhouse onboard | install | setup | discover | uninstall | reset
+memhouse ship [--full|--loop N] | stats | search <terms> | start | stop | status | doctor
+memhouse plugins install claude | prompt
+```
+
+Every command is dual-mode: interactive for humans, `--yes`/flags/`--json` for
+agents — so an agent can self-install its own memory (`memhouse install --yes …`,
+`memhouse plugins install claude`). Config: flags > `MEMHOUSE_*` env >
+`~/.memhouse/env` > defaults.
+
+Deeper docs: `mem-house/delivery/AGENT-INSTALL.md`, kernel install (agency
+`memhouse`, members, own-only RLS): `mem-house/delivery/kernel-install.md`,
+skills/plugin payloads: `mem-house/delivery/`.
 
 ## Heritage & license
 
