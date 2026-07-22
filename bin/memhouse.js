@@ -51,7 +51,16 @@ function readEnvFile() {
   try {
     for (const line of fs.readFileSync(ENV_FILE, 'utf-8').split('\n')) {
       const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-      if (m && !line.trim().startsWith('#')) out[m[1]] = m[2];
+      if (m && !line.trim().startsWith('#')) {
+        let v = m[2].trim();
+        // Unwrap shell quoting (we write single-quoted; tolerate double too).
+        if (v.startsWith("'") && v.endsWith("'") && v.length >= 2) {
+          v = v.slice(1, -1).replace(/'\\''/g, "'");
+        } else if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
+          v = v.slice(1, -1);
+        }
+        out[m[1]] = v;
+      }
     }
   } catch { /* no env file yet */ }
   return out;
@@ -80,13 +89,16 @@ function childEnv(cfg) {
 
 function writeEnvFile(cfg) {
   fs.mkdirSync(HOME_DIR, { recursive: true });
+  // Single-quoted values: this file is also sourced by shells (skills/docs use
+  // `. ~/.memhouse/env`), so metacharacters in a password must never be bare.
+  const sq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
   const body = [
     '# mem-house connection — written by `memhouse install/setup`',
-    `MEMHOUSE_URL=${cfg.url}`,
-    `MEMHOUSE_USER=${cfg.user}`,
-    `MEMHOUSE_PASSWORD=${cfg.password}`,
-    `MEMHOUSE_DB=${cfg.db}`,
-    `MEMHOUSE_PORT=${cfg.port}`,
+    `MEMHOUSE_URL=${sq(cfg.url)}`,
+    `MEMHOUSE_USER=${sq(cfg.user)}`,
+    `MEMHOUSE_PASSWORD=${sq(cfg.password)}`,
+    `MEMHOUSE_DB=${sq(cfg.db)}`,
+    `MEMHOUSE_PORT=${sq(cfg.port)}`,
     '',
   ].join('\n');
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
