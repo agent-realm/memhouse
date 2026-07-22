@@ -123,10 +123,14 @@ async function loadExisting(client) {
 // m._toolCalls: matches '[tool-call: Name(' and '[tool-call: Name]' forms.
 const TOOL_CALL_RE = /\[tool-call: ([^(\]]+)/g;
 
-// Build the typed rows for one chat. Returns null when the chat is unreadable.
+// Build the typed rows for one chat. Returns null when the chat is unreadable
+// (adapter threw — e.g. a partially-written or locked session file): the caller
+// must write NOTHING for it, so the next incremental pass retries. A chat that
+// parses to zero messages still gets its session row (deliberate: the stored row
+// absorbs the incremental skip for stable-empty chats).
 function rowsForChat(chat, host) {
   let messages;
-  try { messages = getMessages(chat) || []; } catch { messages = []; }
+  try { messages = getMessages(chat) || []; } catch { return null; }
 
   const id = String(chat.composerId);
   const source = chat.source;
@@ -240,7 +244,7 @@ async function runShip(client, opts = {}) {
   };
 
   const seen = new Set(); // adapters must not double-ship a session_id within a pass
-  let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0;
+  let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0, unreadable = 0;
   for (const chat of chats) {
     if (chat.encrypted) continue;
     const id = String(chat.composerId);
@@ -257,13 +261,14 @@ async function runShip(client, opts = {}) {
     }
 
     const rows = rowsForChat(chat, host);
+    if (!rows) { unreadable++; continue; } // write nothing → retried next pass
     await push('sessions', rows.session);
     sessions++;
     for (const r of rows.msgRows) { await push('messages', r); msgRows++; }
     for (const r of rows.toolRows) { await push('tool_calls', r); toolRows++; }
   }
   for (const table of Object.keys(batches)) await flush(table);
-  return { sessions, skipped, msgRows, toolRows };
+  return { sessions, skipped, msgRows, toolRows, unreadable };
 }
 
 // Per-source rollup straight from sessions_v (final=1 so ReplacingMergeTree collapses).
@@ -317,7 +322,7 @@ async function main() {
       const t0 = Date.now();
       try {
         const r = await runShip(client, { full });
-        console.log(`[mem-house] shipped ${r.sessions} sessions (${r.skipped} skipped) → ` +
+        console.log(`[mem-house] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}) → ` +
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         console.error(`[mem-house] pass failed: ${e.message}`);
