@@ -75,7 +75,12 @@ function filters(opts, { editorLike = false, folderLike = false } = {}) {
     if (folderLike) { parts.push('c.folder LIKE {folder:String}'); params.folder = `%${opts.folder}%`; }
     else { parts.push('c.folder = {folder:String}'); params.folder = opts.folder; }
   }
-  if (opts.chatId) { parts.push('c.session_id = {chatId:String}'); params.chatId = opts.chatId; }
+  if (opts.chatId) {
+    // Accept the composite 'session_id::user_id' id form getChats emits.
+    const [sid, uid] = String(opts.chatId).split('::');
+    parts.push('c.session_id = {chatId:String}'); params.chatId = sid;
+    if (uid) { parts.push('c.user_id = {chatUid:String}'); params.chatUid = uid; }
+  }
   if (opts.dateFrom != null) { parts.push(`${MS} >= {dateFrom:Int64}`); params.dateFrom = opts.dateFrom; }
   if (opts.dateTo != null) { parts.push(`${MS} <= {dateTo:Int64}`); params.dateTo = opts.dateTo; }
   return {
@@ -86,10 +91,14 @@ function filters(opts, { editorLike = false, folderLike = false } = {}) {
 }
 
 // Restrict a messages/tool_calls query to the filtered session set. Empty filter →
-// no restriction (avoids a pointless subquery).
+// no restriction (avoids a pointless subquery). Matches the FULL (session_id,
+// user_id) key: with session_id alone, an owner/no-RLS reader filtering by
+// folder/date/editor would pull EVERY member's rows for a colliding adapter-local
+// session_id into the filtered aggregate.
 function inSessions(f, col) {
   if (!f.and) return '';
-  return ` AND ${col} IN (SELECT session_id FROM sessions_v AS c WHERE 1=1${f.and})`;
+  const alias = col.split('.')[0];
+  return ` AND (${alias}.session_id, ${alias}.user_id) IN (SELECT session_id, user_id FROM sessions_v AS c WHERE 1=1${f.and})`;
 }
 
 // Fold a [{name|model, cnt}] list through normalizeModelName into a freq map.
@@ -299,7 +308,7 @@ async function countChats(opts = {}) {
 async function getChats(opts = {}) {
   const f = filters(opts, { editorLike: true, folderLike: true });
   let sql = `
-    SELECT c.session_id AS id, c.source AS source, c.name AS name, c.mode AS mode, c.folder AS folder,
+    SELECT c.session_id AS id, c.user_id AS user_id, c.source AS source, c.name AS name, c.mode AS mode, c.folder AS folder,
            toUnixTimestamp64Milli(c.created_at) AS created_at,
            toUnixTimestamp64Milli(c.last_updated_at) AS last_updated_at,
            c.total_msgs AS bubble_count,
@@ -315,19 +324,20 @@ async function getChats(opts = {}) {
   const rows = await q(sql, params);
   if (rows.length === 0) return [];
 
-  // Top model per session = most frequent model across the session's messages.
+  // Top model per rollup = most frequent model across THAT WRITER's messages
+  // (session_id alone would blend colliding sessions across members).
   const ids = rows.map(r => r.id);
   const tmRows = await q(`
-    SELECT session_id, argMax(model, cnt) AS top_model
-    FROM (SELECT session_id, model, count() AS cnt FROM messages
+    SELECT session_id, user_id, argMax(model, cnt) AS top_model
+    FROM (SELECT session_id, user_id, model, count() AS cnt FROM messages
           WHERE session_id IN {ids:Array(String)} AND model NOT IN ${EXCLUDED_MODELS}
-          GROUP BY session_id, model)
-    GROUP BY session_id`, { ids });
+          GROUP BY session_id, user_id, model)
+    GROUP BY session_id, user_id`, { ids });
   const topModelBySession = {};
-  for (const r of tmRows) topModelBySession[r.session_id] = r.top_model;
+  for (const r of tmRows) topModelBySession[`${r.session_id}::${r.user_id}`] = r.top_model;
 
   return rows.map(r => {
-    const topModel = topModelBySession[r.id] || null;
+    const topModel = topModelBySession[`${r.id}::${r.user_id}`] || null;
     let inTok = Number(r._inTok) || 0, outTok = Number(r._outTok) || 0;
     if (inTok === 0 && outTok === 0 && ((r._uChars || 0) > 0 || (r._aChars || 0) > 0)) {
       inTok = Math.round((r._uChars || 0) / 4);
@@ -335,7 +345,12 @@ async function getChats(opts = {}) {
     }
     const cost = topModel ? (calculateCost(topModel, inTok, outTok, Number(r._cacheR) || 0, Number(r._cacheW) || 0) || 0) : 0;
     return {
-      id: r.id, source: r.source, name: r.name, mode: r.mode, folder: r.folder,
+      // Composite API id: rollups are keyed (session_id, user_id), so the id a
+      // client clicks must pin BOTH — otherwise opening one of two colliding
+      // rows shows an arbitrary member's transcript. '::' never occurs in
+      // session ids; getChat() splits it and plain ids still work.
+      id: `${r.id}::${r.user_id}`, user: r.user_id,
+      source: r.source, name: r.name, mode: r.mode, folder: r.folder,
       createdAt: r.created_at, lastUpdatedAt: r.last_updated_at,
       encrypted: false, bubbleCount: Number(r.bubble_count), topModel, cost,
     };
@@ -344,7 +359,11 @@ async function getChats(opts = {}) {
 
 // ── single chat ─────────────────────────────────────────────────────────────────
 async function getChat(id) {
-  const chat = await q1(`
+  // Accept both id forms: composite 'session_id::user_id' (what getChats emits —
+  // deterministic when members share an adapter-local session_id) and a plain,
+  // possibly-shortened session_id (manual/legacy use; LIMIT 1 picks arbitrarily).
+  const [sidPart, uidPart] = String(id).split('::');
+  let sql = `
     SELECT c.session_id AS id, c.user_id AS user_id, c.source AS source, c.name AS name, c.mode AS mode, c.folder AS folder,
            toUnixTimestamp64Milli(c.created_at) AS created_at,
            toUnixTimestamp64Milli(c.last_updated_at) AS last_updated_at,
@@ -352,7 +371,11 @@ async function getChat(id) {
            c.user_chars AS user_chars, c.assistant_chars AS assistant_chars,
            c.input_tokens AS input_tokens, c.output_tokens AS output_tokens,
            c.cache_read_tokens AS cache_read_tokens, c.cache_write_tokens AS cache_write_tokens
-    FROM sessions_v AS c WHERE session_id LIKE {idp:String} LIMIT 1`, { idp: id + '%' });
+    FROM sessions_v AS c WHERE session_id LIKE {idp:String}`;
+  const params = { idp: sidPart + '%' };
+  if (uidPart) { sql += ' AND user_id = {uid:String}'; params.uid = uidPart; }
+  sql += ' LIMIT 1';
+  const chat = await q1(sql, params);
   if (!chat) return null;
 
   // Sessions are keyed (session_id, user_id): constrain the row reloads to the
@@ -386,7 +409,10 @@ async function getChat(id) {
   };
 
   return {
-    id: chat.id, source: chat.source, name: chat.name, mode: chat.mode, folder: chat.folder,
+    // Echo the id form the caller used: composite stays composite so follow-up
+    // URLs built from it (markdown download) stay pinned to the same writer.
+    id: uidPart ? `${chat.id}::${chat.user_id}` : chat.id, user: chat.user_id,
+    source: chat.source, name: chat.name, mode: chat.mode, folder: chat.folder,
     createdAt: chat.created_at, lastUpdatedAt: chat.last_updated_at, encrypted: false,
     messages: messages.map(m => ({
       role: m.role, content: m.content, model: m.model || null,
@@ -480,7 +506,7 @@ async function getProjects(opts = {}) {
 async function getDeepAnalytics(opts = {}) {
   const f = filters(opts, { editorLike: true });
   let sql = `
-    SELECT c.session_id AS id, c.total_msgs AS msgs, c.user_chars AS uc, c.assistant_chars AS ac,
+    SELECT c.session_id AS id, c.user_id AS user_id, c.total_msgs AS msgs, c.user_chars AS uc, c.assistant_chars AS ac,
            c.input_tokens AS ti, c.output_tokens AS to_, c.cache_read_tokens AS cr, c.cache_write_tokens AS cw
     FROM sessions_v AS c WHERE 1=1${f.and} ORDER BY ${MS} DESC`;
   const params = { ...f.params };
@@ -499,19 +525,25 @@ async function getDeepAnalytics(opts = {}) {
     totalCacheWrite += Number(r.cw);
   }
 
+  // Constrain by the FULL (session_id, user_id) pairs of the selected rollups —
+  // an id-only list would readmit other members' rows for colliding session_ids.
   const ids = rows.map(r => r.id);
+  const users = rows.map(r => r.user_id);
   let topTools = [], topModels = [], totalToolCalls = 0;
   if (ids.length > 0) {
+    const pairs = { ids, users };
     const toolRows = await q(`
       SELECT tool_name, count() AS cnt FROM tool_calls
-      WHERE session_id IN {ids:Array(String)} GROUP BY tool_name`, { ids });
+      WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
+      GROUP BY tool_name`, pairs);
     const toolFreq = {};
     for (const r of toolRows) { toolFreq[r.tool_name] = Number(r.cnt); totalToolCalls += Number(r.cnt); }
     topTools = topN(toolFreq, 30);
 
     const modelRows = await q(`
       SELECT model, count() AS cnt FROM messages
-      WHERE session_id IN {ids:Array(String)} AND model NOT IN ${EXCLUDED_MODELS} GROUP BY model`, { ids });
+      WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
+        AND model NOT IN ${EXCLUDED_MODELS} GROUP BY model`, pairs);
     topModels = topN(normalizedModelFreq(modelRows), 20);
   }
 
