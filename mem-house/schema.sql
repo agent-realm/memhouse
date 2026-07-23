@@ -2,7 +2,9 @@
 --
 -- Applied by the agency OWNER (`memhouse_root`) inside its own house; names are
 -- UNQUALIFIED so this works whatever the operator named the house. Requires
--- ClickHouse >= 26.2 (JSON type + text indexes).
+-- ClickHouse >= 26.2 natively; 25.11 also works because the shipper passes
+-- allow_experimental_full_text_index=1 per-query when applying this file
+-- (the messages text indexes are still gated on 25.x; 26.x+ ignores the flag).
 --
 -- Parse-on-client: the shipper runs the 17 editor adapters and ships TYPED rows —
 -- these tables are the contract. `extra JSON` on each table is the escape hatch for

@@ -94,7 +94,14 @@ async function ensureSchema(client) {
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
   for (const q of stmts) {
-    await client.command({ query: q, clickhouse_settings: { async_insert: 0 } });
+    await client.command({
+      query: q,
+      // allow_experimental_full_text_index: on 25.x the messages text indexes
+      // are gated behind this flag (SUPPORT_IS_DISABLED without it); 26.x+
+      // accepts it as a no-op. Query-scoped, so no server config or admin
+      // rights are needed. Verified on 25.11 and 26.7.
+      clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
+    });
   }
   return stmts.length;
 }
