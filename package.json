@@ -10,6 +10,7 @@
   "files": [
     "bin/",
     "mem-house/",
+    "misc/syntax-check.js",
     "index.js",
     "cache.js",
     "ch-schema.js",
