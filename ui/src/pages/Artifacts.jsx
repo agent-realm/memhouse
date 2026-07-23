@@ -105,7 +105,7 @@ function parseFrontmatter(raw) {
   const entries = []
   const lines = match[1].split('\n')
   for (let i = 0; i < lines.length; i++) {
-    const kv = lines[i].match(/^(\w[\w\-]*):\s*(.*)/)
+    const kv = lines[i].match(/^(\w[\w-]*):\s*(.*)/)
     if (kv) {
       const key = kv[1]
       const inlineVal = kv[2].replace(/^["']|["']$/g, '').trim()
@@ -122,13 +122,13 @@ function parseFrontmatter(raw) {
             items.push({ type: 'checkbox', checked: checkMatch[1] !== ' ', text: checkMatch[2] })
           } else {
             // Could be start of a YAML object (e.g. "id: scaffold-core")
-            const objKv = item.match(/^(\w[\w\-]*):\s*(.*)/)
+            const objKv = item.match(/^(\w[\w-]*):\s*(.*)/)
             if (objKv) {
               const obj = { [objKv[1]]: objKv[2].replace(/^["']|["']$/g, '') }
               // Collect remaining properties of this object
               while (i + 1 < lines.length && /^\s{4,}\w/.test(lines[i + 1]) && !/^\s+-/.test(lines[i + 1])) {
                 i++
-                const propMatch = lines[i].trim().match(/^(\w[\w\-]*):\s*(.*)/)
+                const propMatch = lines[i].trim().match(/^(\w[\w-]*):\s*(.*)/)
                 if (propMatch) obj[propMatch[1]] = propMatch[2].replace(/^["']|["']$/g, '')
               }
               items.push({ type: 'object', data: obj })
