@@ -83,6 +83,11 @@ function makeClient() {
     clickhouse_settings: {
       // Int64/UInt64 back as JSON numbers — our values (counts, tokens) are < 2^53.
       output_format_json_quote_64bit_integers: 0,
+      // With a 300s request_timeout the client warns unless progress headers
+      // keep long requests alive through proxies/load balancers — enable them
+      // (also silences the startup WARN on every ship/install run).
+      send_progress_in_http_headers: 1,
+      http_headers_progress_interval_ms: '110000',
     },
   });
 }
