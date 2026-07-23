@@ -17,9 +17,17 @@
 -- async_insert=0) and is the RLS anchor (rls.sql). Readers should query with the
 -- `final=1` setting.
 --
+-- session_id is CANONICAL and globally unique: '<source>:<adapter-local id>',
+-- stamped by the shipper. Adapter-local ids are only unique within one editor;
+-- the source prefix makes every key, incremental comparison, delete, view join,
+-- and API id collision-free across editors. `source` remains a plain column for
+-- filtering.
+--
 -- BREAKING (pre-release): the user_id-in-key change alters ORDER BY, which
 -- CREATE TABLE IF NOT EXISTS will NOT apply to an existing house — recreate with
--- `memhouse reset` (or DROP the tables and re-run --ensure-schema).
+-- `memhouse reset` (or DROP the tables and re-run --ensure-schema). The
+-- source-prefixed session_id change needs no DDL, but rows shipped before it
+-- linger under their old bare ids — run `memhouse reset` once after upgrading.
 
 -- One row per session (adapter-level metadata; aggregates live in sessions_v).
 CREATE TABLE IF NOT EXISTS sessions
@@ -96,6 +104,11 @@ ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (session_id, user_id, idx);
 
 -- Analytics-ready rollup: session metadata + message aggregates. Query with final=1.
+-- LEFT JOIN (not INNER): stable-empty sessions are deliberately stored (the row
+-- absorbs the incremental skip) and must stay visible with zero aggregates, not
+-- vanish from every dashboard count. join_use_nulls makes unmatched message
+-- columns NULL so count(m.seq)/coalesce produce true zeros instead of counting
+-- the placeholder row.
 CREATE OR REPLACE VIEW sessions_v AS
 SELECT
     s.session_id AS session_id,
@@ -111,19 +124,20 @@ SELECT
     any(s.last_updated_at) AS last_updated_at,
     min(m.ts) AS started,
     max(m.ts) AS ended,
-    dateDiff('second', min(m.ts), max(m.ts)) AS duration_sec,
-    count() AS total_msgs,
+    coalesce(dateDiff('second', min(m.ts), max(m.ts)), 0) AS duration_sec,
+    count(m.seq) AS total_msgs,
     countIf(m.role = 'user') AS user_msgs,
     countIf(m.role = 'assistant') AS assistant_msgs,
     countIf(m.is_subagent) AS subagent_msgs,
     groupUniqArrayIf(m.model, m.model NOT IN ('', '<synthetic>')) AS models,
-    sum(m.input_tokens) AS input_tokens,
-    sum(m.output_tokens) AS output_tokens,
-    sum(m.cache_read_tokens) AS cache_read_tokens,
-    sum(m.cache_write_tokens) AS cache_write_tokens,
-    sumIf(length(m.text), m.role = 'user') AS user_chars,
-    sumIf(length(m.text), m.role = 'assistant') AS assistant_chars,
-    substring(argMinIf(m.text, m.seq, m.role = 'user' AND m.text != ''), 1, 200) AS first_prompt
+    coalesce(sum(m.input_tokens), 0) AS input_tokens,
+    coalesce(sum(m.output_tokens), 0) AS output_tokens,
+    coalesce(sum(m.cache_read_tokens), 0) AS cache_read_tokens,
+    coalesce(sum(m.cache_write_tokens), 0) AS cache_write_tokens,
+    coalesce(sumIf(length(m.text), m.role = 'user'), 0) AS user_chars,
+    coalesce(sumIf(length(m.text), m.role = 'assistant'), 0) AS assistant_chars,
+    coalesce(substring(argMinIf(m.text, m.seq, m.role = 'user' AND m.text != ''), 1, 200), '') AS first_prompt
 FROM sessions AS s
-INNER JOIN messages AS m ON m.session_id = s.session_id AND m.user_id = s.user_id
-GROUP BY s.session_id, s.user_id;
+LEFT JOIN messages AS m ON m.session_id = s.session_id AND m.user_id = s.user_id
+GROUP BY s.session_id, s.user_id
+SETTINGS join_use_nulls = 1;

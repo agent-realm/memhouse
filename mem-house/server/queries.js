@@ -363,11 +363,13 @@ async function getChats(opts = {}) {
 // ── single chat ─────────────────────────────────────────────────────────────────
 async function getChat(id) {
   // Accept both id forms: composite 'session_id::user_id' (what getChats emits —
-  // deterministic when members share an adapter-local session_id) and a plain,
-  // possibly-shortened session_id (manual/legacy use; LIMIT 1 picks arbitrarily).
-  // Split on the LAST '::' — some adapters (codebuff) build session ids as
-  // '<project>::<chatId>', so the first separator can be inside the sid. CH user
-  // names here are colon-free identifiers.
+  // deterministic when members share a session_id) and a plain full session_id
+  // (manual/legacy use). Split on the LAST '::' — some adapters (codebuff) build
+  // session ids as '<project>::<chatId>', so the first separator can be inside
+  // the sid. CH user names here are colon-free identifiers.
+  // EQUALITY, not prefix LIKE: the UI passes complete ids, and a prefix match is
+  // ambiguous when one id prefixes another ('1' vs '10'). Prefix search, if ever
+  // needed, must be a separate deterministic operation.
   const cut = String(id).lastIndexOf('::');
   const sidPart = cut === -1 ? String(id) : String(id).slice(0, cut);
   const uidPart = cut === -1 ? undefined : String(id).slice(cut + 2);
@@ -379,11 +381,16 @@ async function getChat(id) {
            c.user_chars AS user_chars, c.assistant_chars AS assistant_chars,
            c.input_tokens AS input_tokens, c.output_tokens AS output_tokens,
            c.cache_read_tokens AS cache_read_tokens, c.cache_write_tokens AS cache_write_tokens
-    FROM sessions_v AS c WHERE session_id LIKE {idp:String}`;
-  const params = { idp: sidPart + '%' };
+    FROM sessions_v AS c WHERE session_id = {sid:String}`;
+  const params = { sid: sidPart };
   if (uidPart) { sql += ' AND user_id = {uid:String}'; params.uid = uidPart; }
   sql += ' LIMIT 1';
-  const chat = await q1(sql, params);
+  let chat = await q1(sql, params);
+  if (!chat && uidPart) {
+    // A plain codebuff-style id ('<source>:<project>::<chatId>', no user suffix)
+    // parses as sid::uid above. Retry treating the whole string as the sid.
+    chat = await q1(sql.replace(' AND user_id = {uid:String}', ''), { sid: String(id) });
+  }
   if (!chat) return null;
 
   // Sessions are keyed (session_id, user_id): constrain the row reloads to the
