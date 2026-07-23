@@ -8,20 +8,36 @@ import PageHeader from '../components/PageHeader'
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Filler)
 
-const EXAMPLE_QUERIES = [
-  { label: 'Sessions per editor', sql: `SELECT source, COUNT(*) as count FROM chats GROUP BY source ORDER BY count DESC` },
-  { label: 'Top 10 projects', sql: `SELECT folder, COUNT(*) as sessions, SUM(bubble_count) as messages FROM chats WHERE folder IS NOT NULL GROUP BY folder ORDER BY sessions DESC LIMIT 10` },
-  { label: 'Messages per day', sql: `SELECT date(created_at/1000, 'unixepoch') as day, COUNT(*) as count FROM chats WHERE created_at IS NOT NULL GROUP BY day ORDER BY day` },
-  { label: 'Top models', sql: `SELECT model, COUNT(*) as count FROM messages WHERE model IS NOT NULL GROUP BY model ORDER BY count DESC LIMIT 10` },
-  { label: 'Top tools', sql: `SELECT tool_name, COUNT(*) as count FROM tool_calls GROUP BY tool_name ORDER BY count DESC LIMIT 15` },
-  { label: 'Token usage by editor', sql: `SELECT c.source, SUM(cs.total_input_tokens) as input_tokens, SUM(cs.total_output_tokens) as output_tokens FROM chat_stats cs JOIN chats c ON c.id = cs.chat_id GROUP BY c.source ORDER BY input_tokens DESC` },
-  { label: 'Sessions by mode', sql: `SELECT mode, COUNT(*) as count FROM chats WHERE mode IS NOT NULL GROUP BY mode ORDER BY count DESC` },
-  { label: 'Hourly distribution', sql: `SELECT CAST(strftime('%H', created_at/1000, 'unixepoch') AS INTEGER) as hour, COUNT(*) as count FROM chats WHERE created_at IS NOT NULL GROUP BY hour ORDER BY hour` },
+// Two backends share this SPA: the typed mem-house house (sessions / messages /
+// tool_calls + the sessions_v rollup) and the legacy agentlytics cache (chats /
+// chat_stats). Both are ClickHouse — the flavor is detected from /api/schema
+// (sessions_v present → typed) and the matching example set is offered.
+const TYPED_EXAMPLES = [
+  { label: 'Sessions per editor', sql: `SELECT source, count() AS count FROM sessions_v GROUP BY source ORDER BY count DESC` },
+  { label: 'Top 10 projects', sql: `SELECT project, count() AS sessions, sum(total_msgs) AS messages FROM sessions_v WHERE project != '' GROUP BY project ORDER BY sessions DESC LIMIT 10` },
+  { label: 'Messages per day', sql: `SELECT toDate(ts) AS day, count() AS count FROM messages GROUP BY day ORDER BY day` },
+  { label: 'Top models', sql: `SELECT model, count() AS count FROM messages WHERE model NOT IN ('', '<synthetic>') GROUP BY model ORDER BY count DESC LIMIT 10` },
+  { label: 'Top tools', sql: `SELECT tool_name, count() AS count FROM tool_calls GROUP BY tool_name ORDER BY count DESC LIMIT 15` },
+  { label: 'Token usage by editor', sql: `SELECT source, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM sessions_v GROUP BY source ORDER BY input_tokens DESC` },
+  { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM sessions_v WHERE mode != '' GROUP BY mode ORDER BY count DESC` },
+  { label: 'Hourly distribution', sql: `SELECT toHour(ts) AS hour, count() AS count FROM messages GROUP BY hour ORDER BY hour` },
+  { label: 'Full-text search', sql: `SELECT session_id, any(source) AS source, count() AS hits FROM messages WHERE text_ngram LIKE '%clickhouse%' GROUP BY session_id ORDER BY hits DESC LIMIT 10` },
+]
+const LEGACY_EXAMPLES = [
+  { label: 'Sessions per editor', sql: `SELECT source, count() AS count FROM chats GROUP BY source ORDER BY count DESC` },
+  { label: 'Top 10 projects', sql: `SELECT folder, count() AS sessions, sum(bubble_count) AS messages FROM chats WHERE folder IS NOT NULL GROUP BY folder ORDER BY sessions DESC LIMIT 10` },
+  { label: 'Messages per day', sql: `SELECT toDate(toDateTime(intDiv(created_at, 1000))) AS day, count() AS count FROM chats WHERE created_at IS NOT NULL GROUP BY day ORDER BY day` },
+  { label: 'Top models', sql: `SELECT model, count() AS count FROM messages WHERE model IS NOT NULL GROUP BY model ORDER BY count DESC LIMIT 10` },
+  { label: 'Top tools', sql: `SELECT tool_name, count() AS count FROM tool_calls GROUP BY tool_name ORDER BY count DESC LIMIT 15` },
+  { label: 'Token usage by editor', sql: `SELECT c.source AS source, sum(cs.total_input_tokens) AS input_tokens, sum(cs.total_output_tokens) AS output_tokens FROM chat_stats AS cs JOIN chats AS c ON c.id = cs.chat_id GROUP BY c.source ORDER BY input_tokens DESC` },
+  { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM chats WHERE mode IS NOT NULL GROUP BY mode ORDER BY count DESC` },
+  { label: 'Hourly distribution', sql: `SELECT toHour(toDateTime(intDiv(created_at, 1000))) AS hour, count() AS count FROM chats WHERE created_at IS NOT NULL GROUP BY hour ORDER BY hour` },
 ]
 
 export default function SqlViewer() {
   const { dark } = useTheme()
-  const [sql, setSql] = useState(EXAMPLE_QUERIES[0].sql)
+  const [examples, setExamples] = useState(TYPED_EXAMPLES)
+  const [sql, setSql] = useState(TYPED_EXAMPLES[0].sql)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -32,7 +48,14 @@ export default function SqlViewer() {
   const textareaRef = useRef(null)
 
   useEffect(() => {
-    fetchSchema().then(setSchema).catch(() => {})
+    fetchSchema().then(s => {
+      setSchema(s)
+      // Flavor detection: the typed house always has the sessions_v rollup.
+      const ex = s?.tables?.includes('sessions_v') ? TYPED_EXAMPLES : LEGACY_EXAMPLES
+      setExamples(ex)
+      // Swap the prefilled query only if the user hasn't edited it yet.
+      setSql(prev => (prev === TYPED_EXAMPLES[0].sql || prev === LEGACY_EXAMPLES[0].sql) ? ex[0].sql : prev)
+    }).catch(() => {})
   }, [])
 
   const runQuery = async () => {
@@ -174,7 +197,7 @@ export default function SqlViewer() {
 
       {/* Example queries */}
       <div className="flex flex-wrap gap-1">
-        {EXAMPLE_QUERIES.map((q, i) => (
+        {examples.map((q, i) => (
           <button
             key={i}
             onClick={() => setSql(q.sql)}
