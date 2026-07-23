@@ -94,15 +94,22 @@ const dt = (ms) => `toDateTime(intDiv(${ms}, 1000))`;
 // ── chats list ──────────────────────────────────────────────────────────────────
 async function getCachedChats(opts = {}) {
   const f = filters(opts, 'c', { editorLike: true, folderLike: true });
-  let sql = `SELECT c.*,
+  // Filters live INSIDE the subquery; the LEFT JOIN happens outside with no
+  // outer WHERE. LEFT JOIN + WHERE under the client's global final=1 fails on
+  // ClickHouse >= 26.5 with NOT_FOUND_COLUMN_IN_BLOCK (see the
+  // ch-267-not-found-column repro) — filter-then-join sidesteps the broken plan.
+  const params = { ...f.params };
+  let sub = `SELECT id, source, name, mode, folder, created_at, last_updated_at,
+    encrypted, bubble_count FROM chats AS c WHERE 1=1${f.and}`;
+  if (opts.named !== false) sub += ' AND (c.name IS NOT NULL OR c.bubble_count > 0)';
+  let sql = `SELECT c.id, c.source, c.name, c.mode, c.folder,
+    c.created_at, c.last_updated_at, c.encrypted, c.bubble_count,
     cs.models AS _models,
     cs.total_input_tokens AS _inTok, cs.total_output_tokens AS _outTok,
     cs.total_cache_read AS _cacheR, cs.total_cache_write AS _cacheW,
     cs.total_user_chars AS _uChars, cs.total_assistant_chars AS _aChars
-    FROM chats AS c LEFT JOIN chat_stats AS cs ON cs.chat_id = c.id WHERE 1=1${f.and}`;
-  const params = { ...f.params };
-  if (opts.named !== false) sql += ' AND (c.name IS NOT NULL OR c.bubble_count > 0)';
-  sql += ' ORDER BY c.last_updated_at DESC';
+    FROM (${sub}) AS c LEFT JOIN chat_stats AS cs ON cs.chat_id = c.id
+    ORDER BY c.last_updated_at DESC`;
   if (opts.limit) { sql += ' LIMIT {limit:UInt64}'; params.limit = opts.limit; }
   if (opts.offset) { sql += ' OFFSET {offset:UInt64}'; params.offset = opts.offset; }
 
@@ -247,7 +254,9 @@ async function getCachedDeepAnalytics(opts = {}) {
 
 // ── single chat ─────────────────────────────────────────────────────────────────
 async function getCachedChat(id) {
-  const chat = await q1('SELECT * FROM chats AS c WHERE id LIKE {idp:String} LIMIT 1', { idp: id + '%' });
+  // Equality, not prefix LIKE: the UI/API always passes complete ids, and a
+  // prefix match is ambiguous when one id is a prefix of another ('1' vs '10').
+  const chat = await q1('SELECT * FROM chats AS c WHERE id = {id:String} LIMIT 1', { id });
   if (!chat) return null;
 
   const stats = await q1('SELECT * FROM chat_stats WHERE chat_id = {cid:String} LIMIT 1', { cid: chat.id });
