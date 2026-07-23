@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { Activity, BarChart3, GitCompare, MessageSquare, FolderOpen, DollarSign, CreditCard, Sun, Moon, RefreshCw, AlertTriangle, Github, Terminal, Database, Users, Plug, Copy, Check, Settings as SettingsIcon, Package, ChevronDown, Target } from 'lucide-react'
-import { fetchOverview, refetchAgents, fetchMode, fetchRelayConfig, getAuthToken, setOnAuthFailure } from './lib/api'
+import { fetchOverview, refetchAgents, fetchMode, getAuthToken, setOnAuthFailure } from './lib/api'
 import { useTheme } from './lib/theme'
 import { useLive } from './hooks/useLive'
 import AnimatedLogo from './components/AnimatedLogo'
@@ -80,7 +80,6 @@ export default function App() {
   const { dark, toggle } = useTheme()
   const [mcpOpen, setMcpOpen] = useState(false)
   const [mcpCopied, setMcpCopied] = useState(false)
-  const [relayPassword, setRelayPassword] = useState('')
 
   useEffect(() => {
     setOnAuthFailure(() => setAuthed(false))
@@ -92,12 +91,6 @@ export default function App() {
       setNeedsAuth(!!data.auth)
     })
   }, [])
-
-  useEffect(() => {
-    if (mode === 'relay' && authed) {
-      fetchRelayConfig().then(c => setRelayPassword(c.relayPassword || '')).catch(() => {})
-    }
-  }, [mode, authed])
 
   const refreshOverview = useCallback(() => {
     fetchOverview().then(setOverview).catch(() => {})
@@ -113,7 +106,9 @@ export default function App() {
     setOverview(data)
   }, [])
 
-  // Live mode: rescan & refresh every 60s
+  // Live mode: rescan & refresh every 60s. `mode` must be a dependency: it
+  // starts as null (detection is async), so without it a persisted live=true
+  // never starts the interval once mode resolves to 'local'.
   useEffect(() => {
     if (live && mode === 'local') {
       liveRef.current = setInterval(() => {
@@ -124,7 +119,7 @@ export default function App() {
       liveRef.current = null
     }
     return () => { if (liveRef.current) clearInterval(liveRef.current) }
-  }, [live, rescanAndRefresh])
+  }, [live, mode, rescanAndRefresh])
 
   const handleRefetch = async () => {
     setRefetchState({ scanned: 0, total: 0 })

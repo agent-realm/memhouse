@@ -325,11 +325,6 @@ export async function fetchRelayFeed(opts = {}) {
   return res.json();
 }
 
-export async function fetchRelayConfig() {
-  const res = await authFetch(`${BASE}/relay/config`);
-  return res.json();
-}
-
 export async function mergeRelayUsers(from, to) {
   const res = await authFetch(`${BASE}/relay/merge-users`, {
     method: 'POST',

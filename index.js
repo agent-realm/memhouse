@@ -50,6 +50,18 @@ const isJoin = joinIndex !== -1;
 
 // ── Relay mode ───────────────────────────────────────────────
 if (isRelay) {
+  // Loopback by default; exposing to the network is an explicit opt-in AND
+  // fail-closed: a non-loopback bind without RELAY_PASSWORD would let any
+  // network client read all transcripts, upload/overwrite sessions, and merge
+  // users — refuse before touching anything.
+  const RELAY_HOST = process.env.RELAY_HOST || '127.0.0.1';
+  const relayLoopback = RELAY_HOST === '127.0.0.1' || RELAY_HOST === 'localhost' || RELAY_HOST === '::1';
+  if (!relayLoopback && !process.env.RELAY_PASSWORD) {
+    console.error(chalk.red(`  ✗ Refusing to bind relay to ${RELAY_HOST} without RELAY_PASSWORD.`));
+    console.error(chalk.dim('    Set RELAY_PASSWORD, or drop RELAY_HOST to stay loopback-only.'));
+    process.exit(1);
+  }
+
   const { initRelayDb, getRelayDb, createRelayApp } = require('./relay-server');
   const { wireMcpToExpress } = require('./mcp-server');
 
@@ -68,11 +80,11 @@ if (isRelay) {
   if (process.env.RELAY_PASSWORD) {
     console.log(chalk.green('  ✓ Password protection enabled'));
   } else {
-    console.log(chalk.yellow('  ⚠ No password set (set RELAY_PASSWORD env to protect)'));
+    console.log(chalk.yellow('  ⚠ No password set (loopback-only; set RELAY_PASSWORD before exposing with RELAY_HOST)'));
   }
 
-  app.listen(RELAY_PORT, () => {
-    const localIp = getLocalIp();
+  app.listen(RELAY_PORT, RELAY_HOST, () => {
+    const localIp = relayLoopback ? '127.0.0.1' : getLocalIp();
     const relayUrl = `http://${localIp}:${RELAY_PORT}`;
 
     console.log('');
@@ -350,9 +362,15 @@ const BOT_STYLES = [
   const http = require('http');
   const net = require('net');
 
-  // Pre-cache MCP server tool lists (runs in background, non-blocking)
+  // Pre-cache MCP server configs (runs in background, non-blocking). Live tool
+  // discovery — which EXECUTES configured servers — only happens when the user
+  // opted in via AGENTLYTICS_MCP_DISCOVERY=1 (see server.js initMcpToolsCache).
+  const mcpDiscovery = process.env.AGENTLYTICS_MCP_DISCOVERY === '1'
+    || process.env.AGENTLYTICS_MCP_DISCOVERY === 'true';
   app.initMcpToolsCache().then(() => {
-    console.log(chalk.green('  ✓ MCP tools cached'));
+    console.log(chalk.green(mcpDiscovery
+      ? '  ✓ MCP tools cached'
+      : '  ✓ MCP configs listed (tool discovery off — enable with AGENTLYTICS_MCP_DISCOVERY=1)'));
   }).catch(() => {});
 
   function isPortFree(port) {

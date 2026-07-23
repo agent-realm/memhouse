@@ -144,8 +144,12 @@ function rowsForChat(chat, host) {
   let messages;
   try { messages = getMessages(chat) || []; } catch { return null; }
 
-  const id = String(chat.composerId);
   const source = chat.source;
+  // Canonical globally-unique session id: '<source>:<adapter-local id>'.
+  // composerId is only unique WITHIN one editor; two editors emitting the same
+  // id must never collide in keys, incremental state, deletes, or the API.
+  // Sources are colon-free, so the prefix parses back unambiguously.
+  const id = `${source}:${String(chat.composerId)}`;
   const folder = chat.folder || '';
   const project = folder ? path.basename(folder) : '';
   const total = messages.length;
@@ -162,7 +166,7 @@ function rowsForChat(chat, host) {
     created_at: chat.createdAt ? chTs(chat.createdAt) : null,
     last_updated_at: chat.lastUpdatedAt ? chTs(chat.lastUpdatedAt) : null,
     message_count: total,
-    path: chat._fullPath || chat._dbPath || `${source}:${id}`,
+    path: chat._fullPath || chat._dbPath || id,
     extra: { bubbleCount: chat.bubbleCount || 0 },
   };
 
@@ -259,11 +263,14 @@ async function runShip(client, opts = {}) {
     if (batches[table].length >= BATCH_ROWS) await flush(table);
   };
 
-  const seen = new Set(); // adapters must not double-ship a session_id within a pass
+  const seen = new Set(); // adapters must not double-ship a session id within a pass
   let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0, unreadable = 0;
   for (const chat of chats) {
     if (chat.encrypted) continue;
-    const id = String(chat.composerId);
+    // Same canonical '<source>:<adapter-local id>' as rowsForChat: dedup and
+    // incremental state are per (source, id) — two editors sharing an id must
+    // not skip or overwrite each other.
+    const id = `${chat.source}:${String(chat.composerId)}`;
     if (seen.has(id)) continue;
     seen.add(id);
 

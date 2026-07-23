@@ -168,7 +168,7 @@ memhouse ${PKG.version} — agent conversation memory across 17 editors
 
 Setup        onboard              interactive wizard: discover → configure → ship → start
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
-             setup                (re)write the connection config only
+             setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
              uninstall            stop daemons + remove ${HOME_DIR.replace(os.homedir(), '~')} (house data untouched)
              reset                truncate the house tables and re-ship everything (--yes to skip confirm)
@@ -443,12 +443,22 @@ function cmdUninstall() {
     case 'onboard': process.exitCode = await cmdOnboard(); break;
     case 'install': process.exitCode = await cmdInstall({ interactive: false }); break;
     case 'setup': {
+      // Dual-mode like install: --yes (with any --url/--user/--password/--db/
+      // --port overrides, already resolved into cfg) skips every prompt so
+      // agents/CI can rewrite the config non-interactively.
       const c = { ...cfg };
-      c.url = await ask('  ClickHouse URL', c.url);
-      c.user = await ask('  user', c.user);
-      c.password = await ask('  password', c.password);
-      c.db = await ask('  database (the house)', c.db);
-      c.port = await ask('  dashboard port', c.port);
+      if (flags.yes !== true) {
+        c.url = await ask('  ClickHouse URL', c.url);
+        c.user = await ask('  user', c.user);
+        c.password = await ask('  password', c.password);
+        c.db = await ask('  database (the house)', c.db);
+        c.port = await ask('  dashboard port', c.port);
+      }
+      if (!/^[A-Za-z0-9_]{1,64}$/.test(c.db)) {
+        console.log(bad(`invalid database name '${c.db}' — use letters, digits, underscore`));
+        process.exitCode = 1;
+        break;
+      }
       writeEnvFile(c);
       console.log(ok(`config written: ${ENV_FILE}`));
       break;
