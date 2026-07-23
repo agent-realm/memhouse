@@ -748,11 +748,14 @@ app.get('/api/gsd/plan', async (req, res) => {
     const { folder, phase } = req.query;
     if (!folder || !phase) return res.status(400).json({ error: 'folder and phase query params required' });
     // Same containment as /api/gsd/file: indexed project + no ../ escape.
+    // Anchor at .planning/phases, not .planning — '../backlog' resolves inside
+    // .planning and would pass a planningDir-prefix check while leaving phases/.
     const planningDir = await authorizedPlanningDir(folder);
     if (!planningDir) return res.status(403).json({ error: 'Not an indexed GSD project' });
-    const phaseFullDir = path.resolve(planningDir, 'phases', String(phase));
-    if (!phaseFullDir.startsWith(path.resolve(planningDir) + path.sep)) {
-      return res.status(403).json({ error: 'phase escapes the .planning directory' });
+    const phasesDir = path.resolve(planningDir, 'phases');
+    const phaseFullDir = path.resolve(phasesDir, String(phase));
+    if (!phaseFullDir.startsWith(phasesDir + path.sep)) {
+      return res.status(403).json({ error: 'phase escapes the phases directory' });
     }
     const gsd = require('./editors/gsd');
     const detail = gsd.getGSDPlanDetail(folder, phase);
@@ -821,9 +824,11 @@ app.get('/api/gsd/file', async (req, res) => {
       const filePath = path.join(planningDir, 'STATE.md');
       if (fs.existsSync(filePath)) content = fs.readFileSync(filePath, 'utf-8');
     } else if (phaseDir) {
-      const phaseFullDir = path.resolve(planningDir, 'phases', String(phaseDir));
-      if (!phaseFullDir.startsWith(path.resolve(planningDir) + path.sep)) {
-        return res.status(403).json({ error: 'phase escapes the .planning directory' });
+      // Anchor at .planning/phases, not .planning (see /api/gsd/plan).
+      const phasesDir = path.resolve(planningDir, 'phases');
+      const phaseFullDir = path.resolve(phasesDir, String(phaseDir));
+      if (!phaseFullDir.startsWith(phasesDir + path.sep)) {
+        return res.status(403).json({ error: 'phase escapes the phases directory' });
       }
       const pattern = type === 'research' ? /RESEARCH\.md$/i
         : type === 'verification' ? /VERIFICATION\.md$/i
