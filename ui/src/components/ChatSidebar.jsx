@@ -8,6 +8,7 @@ import TokenTimeline from './TokenTimeline'
 export default function ChatSidebar({ chatId, onClose, fetchFn, extraHeader, username }) {
   const [chat, setChat] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
   const [msgFilter, setMsgFilter] = useState('')
   const scrollRef = useRef(null)
   const msgCountRef = useRef(0)
@@ -16,11 +17,17 @@ export default function ChatSidebar({ chatId, onClose, fetchFn, extraHeader, use
     if (!chatId) return
     setLoading(true)
     setChat(null)
+    setError(null)
     msgCountRef.current = 0
     const doFetch = fetchFn || fetchChat
     doFetch(chatId).then(data => {
       setChat(data)
       msgCountRef.current = data?.messages?.length || 0
+      setLoading(false)
+    }).catch(e => {
+      // Without this, a failed initial fetch leaves the spinner forever and
+      // surfaces as an unhandled rejection.
+      setError(e?.message || 'Failed to load session')
       setLoading(false)
     })
 
@@ -165,6 +172,11 @@ export default function ChatSidebar({ chatId, onClose, fetchFn, extraHeader, use
         <div ref={scrollRef} className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-2">
           {loading && (
             <div className="text-[12px] py-12 text-center" style={{ color: 'var(--c-text3)' }}>Loading conversation...</div>
+          )}
+          {!loading && !chat && (
+            <div className="text-[12px] py-12 text-center" style={{ color: 'var(--c-text3)' }}>
+              {error ? `Failed to load conversation: ${error}` : 'Conversation not found.'}
+            </div>
           )}
           {!loading && chat && chat.messages.length === 0 && (
             <div className="text-[12px] py-12 text-center" style={{ color: 'var(--c-text3)' }}>
