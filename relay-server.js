@@ -91,21 +91,44 @@ function createRelayApp() {
     ? crypto.createHmac('sha256', 'agentlytics-relay').update(RELAY_PASSWORD).digest('hex')
     : null;
 
+  // Constant-time comparison — string === leaks match length through timing.
+  function tokenMatches(candidate) {
+    if (!AUTH_TOKEN || typeof candidate !== 'string') return false;
+    const a = Buffer.from(candidate);
+    const b = Buffer.from(AUTH_TOKEN);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+
   function requireAuth(req, res, next) {
     if (!AUTH_TOKEN) return next();
     const header = req.headers.authorization || '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-    if (token === AUTH_TOKEN) return next();
+    if (tokenMatches(token)) return next();
     res.status(401).json({ error: 'Unauthorized' });
   }
 
   // ── Login endpoint ──
+  // Rate-limited: 10 failures per IP per 15 minutes, then locked out for the
+  // remainder of the window. In-memory — resets on restart, which is fine for
+  // slowing online guessing.
+  const loginFailures = new Map(); // ip -> { count, windowStart }
+  const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+  const LOGIN_MAX_FAILURES = 10;
+
   app.post('/api/login', (req, res) => {
     if (!AUTH_TOKEN) return res.json({ token: null });
+    const ip = req.ip || 'unknown';
+    const now = Date.now();
+    let fail = loginFailures.get(ip);
+    if (fail && now - fail.windowStart > LOGIN_WINDOW_MS) fail = null;
+    if (fail && fail.count >= LOGIN_MAX_FAILURES) {
+      return res.status(429).json({ error: 'Too many attempts — try again later' });
+    }
     const { password } = req.body || {};
     if (!password) return res.status(400).json({ error: 'Password required' });
-    const attempt = crypto.createHmac('sha256', 'agentlytics-relay').update(password).digest('hex');
-    if (attempt === AUTH_TOKEN) return res.json({ token: AUTH_TOKEN });
+    const attempt = crypto.createHmac('sha256', 'agentlytics-relay').update(String(password)).digest('hex');
+    if (tokenMatches(attempt)) { loginFailures.delete(ip); return res.json({ token: AUTH_TOKEN }); }
+    loginFailures.set(ip, fail ? { count: fail.count + 1, windowStart: fail.windowStart } : { count: 1, windowStart: now });
     res.status(401).json({ error: 'Invalid password' });
   });
 
@@ -115,8 +138,10 @@ function createRelayApp() {
   });
 
   // ── Config for UI ──
+  // Never return the raw password — a leaked token must not escalate to the
+  // reusable credential. The UI only needs to know whether auth is on.
   app.get('/relay/config', requireAuth, (req, res) => {
-    res.json({ relayPassword: RELAY_PASSWORD || '' });
+    res.json({ auth: !!AUTH_TOKEN });
   });
 
   // ── Team stats (aggregate across all users) ──

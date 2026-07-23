@@ -430,6 +430,14 @@ app.get('/api/artifact-content', async (req, res) => {
 // Cache: MCP server tool lists are queried once at startup via initMcpToolsCache()
 let _mcpToolsCache = null; // { servers, serverToolResults, toolToServer, serverToolPatterns }
 
+// Live tool discovery EXECUTES each configured server (stdio discovery spawns
+// the configured command; HTTP discovery calls its URL). Any project's .mcp.json
+// or editor MCP config would otherwise run arbitrary commands just by opening
+// the dashboard — so discovery is opt-in: config files are always read and
+// listed, but servers are only queried when AGENTLYTICS_MCP_DISCOVERY=1.
+const MCP_DISCOVERY = process.env.AGENTLYTICS_MCP_DISCOVERY === '1'
+  || process.env.AGENTLYTICS_MCP_DISCOVERY === 'true';
+
 async function initMcpToolsCache() {
   const { getAllMCPServers } = require('./editors');
   const { queryMcpServerTools } = require('./editors/base');
@@ -439,7 +447,7 @@ async function initMcpToolsCache() {
   const servers = getAllMCPServers(projectFolders);
 
   const queryPromises = servers.map(async (server) => {
-    if (server.disabled) return { server, tools: [] };
+    if (server.disabled || !MCP_DISCOVERY) return { server, tools: [] };
     try {
       const tools = await queryMcpServerTools(server);
       return { server, tools };
@@ -739,6 +747,13 @@ app.get('/api/gsd/plan', async (req, res) => {
   try {
     const { folder, phase } = req.query;
     if (!folder || !phase) return res.status(400).json({ error: 'folder and phase query params required' });
+    // Same containment as /api/gsd/file: indexed project + no ../ escape.
+    const planningDir = await authorizedPlanningDir(folder);
+    if (!planningDir) return res.status(403).json({ error: 'Not an indexed GSD project' });
+    const phaseFullDir = path.resolve(planningDir, 'phases', String(phase));
+    if (!phaseFullDir.startsWith(path.resolve(planningDir) + path.sep)) {
+      return res.status(403).json({ error: 'phase escapes the .planning directory' });
+    }
     const gsd = require('./editors/gsd');
     const detail = gsd.getGSDPlanDetail(folder, phase);
     if (!detail) return res.status(404).json({ error: 'Plan not found' });
@@ -760,7 +775,9 @@ app.get('/api/gsd/config', async (req, res) => {
   try {
     const { folder } = req.query;
     if (!folder) return res.status(400).json({ error: 'folder query param required' });
-    const configPath = require('path').join(folder, '.planning', 'config.json');
+    const planningDir = await authorizedPlanningDir(folder);
+    if (!planningDir) return res.status(403).json({ error: 'Not an indexed GSD project' });
+    const configPath = path.join(planningDir, 'config.json');
     if (!fs.existsSync(configPath)) return res.json(null);
     res.json(JSON.parse(fs.readFileSync(configPath, 'utf-8')));
   } catch (err) {
@@ -778,6 +795,17 @@ app.get('/api/gsd/phase-tokens', async (req, res) => {
   }
 });
 
+// GSD routes read the local filesystem from caller-supplied params. Two rules,
+// mirroring /api/artifact-content: the folder must be one of the INDEXED GSD
+// projects (never an arbitrary path), and phase paths must resolve INSIDE that
+// project's .planning directory (no ../ escapes).
+async function authorizedPlanningDir(folder) {
+  const projects = await cache.getCachedGSDProjects();
+  const resolved = path.resolve(String(folder));
+  const known = projects.some(p => p.folder && path.resolve(p.folder) === resolved);
+  return known ? path.join(resolved, '.planning') : null;
+}
+
 // Generic .planning file reader
 // type: 'state' (project-level STATE.md) | 'research' | 'verification' | 'summary' (phase-level, requires phase param)
 app.get('/api/gsd/file', async (req, res) => {
@@ -785,14 +813,18 @@ app.get('/api/gsd/file', async (req, res) => {
     const { folder, phase: phaseDir, type } = req.query;
     if (!folder || !type) return res.status(400).json({ error: 'folder and type required' });
 
-    const planningDir = path.join(folder, '.planning');
+    const planningDir = await authorizedPlanningDir(folder);
+    if (!planningDir) return res.status(403).json({ error: 'Not an indexed GSD project' });
     let content = null;
 
     if (type === 'state') {
       const filePath = path.join(planningDir, 'STATE.md');
       if (fs.existsSync(filePath)) content = fs.readFileSync(filePath, 'utf-8');
     } else if (phaseDir) {
-      const phaseFullDir = path.join(planningDir, 'phases', phaseDir);
+      const phaseFullDir = path.resolve(planningDir, 'phases', String(phaseDir));
+      if (!phaseFullDir.startsWith(path.resolve(planningDir) + path.sep)) {
+        return res.status(403).json({ error: 'phase escapes the .planning directory' });
+      }
       const pattern = type === 'research' ? /RESEARCH\.md$/i
         : type === 'verification' ? /VERIFICATION\.md$/i
         : type === 'summary' ? /SUMMARY\.md$/i
