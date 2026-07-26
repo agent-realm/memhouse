@@ -86,8 +86,12 @@ function makeClient() {
       // With a 300s request_timeout the client warns unless progress headers
       // keep long requests alive through proxies/load balancers — enable them
       // (also silences the startup WARN on every ship/install run).
+      // The interval MUST sit below the smallest idle timeout in the path:
+      // 60s is the default for AWS ALB and nginx proxy_read_timeout, so a
+      // longer interval emits nothing before the socket is dropped and the
+      // setting only silences the warning. 30s leaves headroom for both.
       send_progress_in_http_headers: 1,
-      http_headers_progress_interval_ms: '110000',
+      http_headers_progress_interval_ms: '30000',
     },
   });
 }
