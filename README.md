@@ -6,6 +6,10 @@ parsed locally, shipped to one typed ClickHouse store, shareable with a team,
 installable on the ultimagent kernel as an **agency**, and visible through the
 agentlytics dashboard unchanged.
 
+An **agency** in the constellation sense (`TERMINOLOGY.md`): a **house** — the
+`memhouse` database — plus the **resident** working in it, the shipper. The house
+alone would hold; the shipper is what makes it act.
+
 An alternative agency **competing with memory-house**; if it wins, it becomes
 memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
 (parse-on-client, typed common schema, kernel-agency, borrowed UI).
@@ -19,6 +23,7 @@ memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
 | `pricing.js` + `pricing.json` | the cost engine |
 | `ui/` | the dashboard SPA (built to `public/`, served unchanged by the mem-house server) |
 | `agency/` | the earlier agentlytics-agency wrap (raw canonical shape) — kept as prior art |
+| `TERMINOLOGY.md` | the constellation terminology canon + how it applies here |
 | everything else at root | upstream agentlytics (see `AGENTLYTICS-README.md`), still runnable |
 
 ## Quickstart — the `memhouse` CLI

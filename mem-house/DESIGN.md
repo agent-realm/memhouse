@@ -5,6 +5,11 @@ on your machines — across **all 17 editors** agentlytics supports — parsed l
 shipped to one typed ClickHouse store, shareable with a team, installable on the
 ultimagent kernel as an **agency**, and visible through the agentlytics dashboard.
 
+**Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) mem-house is a
+**house** — the `memhouse` database — **plus a resident**: the shipper, a `worker`
+that runs the adapters and keeps the rooms fed. That pairing is what the word
+*agency* means; a house on its own only holds.
+
 **Positioning:** an alternative agency **competing with memory-house**. It borrows
 memory-house's proven ideas (server-stamped identity, own-only RLS, idempotent
 shipping, skills/plugin delivery) and agentlytics' proven assets (adapters, UI,
@@ -29,8 +34,9 @@ side by side as separate agencies, each in its own house. Naming: the product is
    indexes built in (CH ≥ 26.2).
 3. **Kernel-installable agency.** Same install path proven for agentlytics-agency:
    `install-agency{memhouse}` → house + `memhouse_root` + credential; members via
-   `register-member` + owner `GRANT`; own-only visibility via the kernel-applied
-   row policy (`rls.sql`). Identity is `user_id MATERIALIZED currentUser()`
+   `register-member` + owner `GRANT`; own-only visibility via the row policy
+   (`rls.sql`) applied by the ego (the `kernel` user) or the mayor. The shipper is
+   the resident that lands with it. Identity is `user_id MATERIALIZED currentUser()`
    (requires `async_insert=0`). Sharing modes: own-only (policy TO member) or
    team-pool (no policy).
 4. **Borrowed UI, zero fork.** The React SPA consumes REST JSON, not tables. The
@@ -43,8 +49,8 @@ side by side as separate agencies, each in its own house. Naming: the product is
 | Path | What | Notes |
 |---|---|---|
 | `schema.sql` | the house schema (typed) | unqualified names; owner applies in its house |
-| `rls.sql` | own-only row policies | kernel/mayor applies (owner lacks ACCESS MANAGEMENT) |
-| `shipper/ship.js` | parse-on-client shipper CLI | reuses `../../editors`; incremental; idempotent |
+| `rls.sql` | own-only row policies | the ego (`kernel`) or the mayor applies (owner lacks ACCESS MANAGEMENT) |
+| `shipper/ship.js` | parse-on-client shipper CLI — the resident (`worker`) | reuses `../../editors`; incremental; idempotent |
 | `server/server.js` | REST API + dashboard | same API contract as agentlytics; serves `../../public` |
 | `delivery/` | delivery kit | installer, skills, plugin, AGENT-INSTALL.md, prompt |
 
