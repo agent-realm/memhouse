@@ -4,8 +4,11 @@ How to run mem-house as an **agency** on an ultimagent kernel — a ClickHouse s
 (a **town**) promoted into a realm — instead of a plain ClickHouse. Same flow proven
 for the agentlytics agency (`agency/AGENCY.md`); the agency/house name here is
 **`memhouse`** (CH identifiers can't carry a dash). What lands is a **house** (the
-`memhouse` database) with a **resident** (the shipper) — that pairing is the agency.
-Terms: `../../TERMINOLOGY.md`.
+`memhouse` database) with a **resident** (the shipper, connecting under its own
+identity) — that pairing is the agency. Terms: `../../TERMINOLOGY.md`.
+
+This is an operator runbook, so it speaks machine vocabulary throughout — ClickHouse,
+`GRANT`, row policies. That is correct for this audience.
 
 ## 1. Provision (operator, one-time — from the kernel checkout)
 

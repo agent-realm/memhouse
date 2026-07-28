@@ -17,8 +17,10 @@ See `../TERMINOLOGY.md` for the canon.
   install lands both: the house (a database) + an owner user (`<name>_root`) + owner
   grants, and the resident that actually does the work. agentlytics is an agency
   because of `ingest.js`; the database alone would just be a house.
-- **resident** — the scoped user doing that work. Here it is one `worker`: the
-  deterministic ingest loop, no LLM.
+- **resident** — something that acts **under its own identity**. Here there is exactly
+  one, a `worker`: the deterministic ingest loop, no LLM, connecting as its own CH user.
+  The derived `messages_v` / `sessions_v` are *plain* views — no identity, they run as
+  whoever queries them — so they are part of the house, not residents.
 - **mayor** — the **human** owner who approves installs; holds a real superuser
   credential, and is not a ClickHouse user the kernel mints.
 - **member** — a joined CH user.
@@ -39,8 +41,9 @@ the house. It returns a one-time **credential** — rotate it on first connect.
 
 **2. Run the agency (this repo)** — `agentlytics_root` connects to its house, creates
 the session schema, and ships local editor sessions into it. The kernel never runs or
-reads this; it is the agency's own resident — a deterministic `worker`. This half is
-what makes the install an agency rather than an empty house.
+reads this; it is the agency's own resident — a deterministic `worker` acting under
+its own identity. This half is what makes the install an agency rather than an empty
+house.
 
 ```bash
 export HOUSE_CLICKHOUSE_URL=https://<kernel-host>:8443

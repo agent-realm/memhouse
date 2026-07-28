@@ -7,8 +7,10 @@ installable on the ultimagent kernel as an **agency**, and visible through the
 agentlytics dashboard unchanged.
 
 An **agency** in the constellation sense (`TERMINOLOGY.md`): a **house** — the
-`memhouse` database — plus the **resident** working in it, the shipper. The house
-alone would hold; the shipper is what makes it act.
+`memhouse` database — plus a **resident** working in it, the shipper. The test is
+identity: the shipper authenticates as its own user and every row it writes carries
+that identity (`user_id MATERIALIZED currentUser()`). The house alone would hold;
+the shipper is what makes it act.
 
 An alternative agency **competing with memory-house**; if it wins, it becomes
 memory-house v4. Start with `mem-house/DESIGN.md` for the four bets

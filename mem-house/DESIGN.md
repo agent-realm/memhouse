@@ -8,7 +8,11 @@ ultimagent kernel as an **agency**, and visible through the agentlytics dashboar
 **Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) mem-house is a
 **house** — the `memhouse` database — **plus a resident**: the shipper, a `worker`
 that runs the adapters and keeps the rooms fed. That pairing is what the word
-*agency* means; a house on its own only holds.
+*agency* means; a house on its own only holds. The test is **identity**: the shipper
+authenticates as its own ClickHouse user and the house stamps that identity into
+every row it writes. `sessions_v` is a plain view — it runs as whoever queries it,
+has no identity, and is therefore part of the house, not a second resident. Strip
+the shipper and what is left is a database and a view: inert.
 
 **Positioning:** an alternative agency **competing with memory-house**. It borrows
 memory-house's proven ideas (server-stamped identity, own-only RLS, idempotent

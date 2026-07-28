@@ -17,7 +17,14 @@ The realm is described twice, for two audiences:
   Plain English, no machinery.
 - **The machine vocabulary** — what specs, catalogs, and code say. ClickHouse objects.
 
-Both name the same system. A machine word appearing in a sentence aimed at a member is a **leak**.
+Both name the same system. A machine word appearing in a sentence aimed at a **member** is a
+**leak**.
+
+**The test is the audience, not the document.** Install runbooks, operator guides, and specs are
+written for the person deploying a realm — often the mayor — and they legitimately say ClickHouse,
+`GRANT`, and `MATERIALIZED currentUser()`. Rewriting those into town vocabulary would make them
+false. The leak rule bites where a *member or guest* is the reader: a lobby notice, a greeting, a
+front-door screen, a plugin description.
 
 ---
 
@@ -39,7 +46,7 @@ A room address reads like a path: `acme.com/support/tickets`.
 | **mayor** | the human owner, holding a real superuser credential |
 | **ego** | the `kernel` ClickHouse user — the realm's non-interactive executive |
 | **agency** | a house **plus the residents working in it** (see below) |
-| **resident** | a scoped ClickHouse user doing that work |
+| **resident** | something that acts **under its own identity** — a daemon, or a materialized view with a definer user |
 | **member** | a registered user with grants |
 | **guest** | the `guest` user — `SELECT` on the lobby only |
 
@@ -66,9 +73,15 @@ Residents come in three kinds (`[[resident]].kind`):
 
 | kind | what it is |
 |---|---|
-| `none` | no resident — the table *is* the logic (a house, not an agency) |
-| `worker` | deterministic compiled logic — an MV, a view, a UDF, a daemon |
+| `none` | nothing acts — the table *is* the logic (a house, not an agency) |
+| `worker` | deterministic logic acting under its own identity — a daemon, or a materialized view with a definer user |
 | `agent` | an autonomous LLM resident |
+
+**A resident is defined by having an identity of its own.** That is the test, and it is what makes
+the house/agency line decidable rather than a matter of taste. A daemon authenticates as some
+user; a materialized view can carry a definer. A **plain view or a UDF has no identity** — it
+executes as whoever queries it — so it is part of the *house*, not a resident, and a database
+whose only moving parts are views is still a house.
 
 ## Things you ask for
 
@@ -88,10 +101,37 @@ Residents come in three kinds (`[[resident]].kind`):
 `MATERIALIZED currentUser()` · `ROLE ADMIN` · `<agency>_root` · processor (Extractor / Tagger /
 Distiller) · typed room · contract · conformance · settled watermark
 
+*Note: **processors** are designed, not built. memory-house's live residents today are the
+`agent-sync` shipper and its materialized views. The term describes the design, not running code.*
+
 Terms with no counterpart are a feature. A member never needs the word `argMax`, and the kernel
 has no concept of a "public square."
 
 ---
+
+## The public register — delivery materials
+
+READMEs' top halves, kick-starter prompts, plugin descriptions, the hosted signup, and any
+member-facing screen use **exactly this register and nothing else**. The name budget is spent; a
+synonym is a cost, not a convenience.
+
+| Public word | Meaning |
+|---|---|
+| **Ultimagent** | the project |
+| **realm** | your organization's place for agents, at your domain |
+| **town** | the server behind a realm |
+| **agency** | what you install on a realm (memory, files, keys, a help desk) |
+| **join / deploy / hosted** | the three ways in |
+
+*Supersedes `DELIVERY-2026-07-13-v2.md` §1, whose register predates this canon: it listed the
+retired **agent-house** as the public word for a town, treated **town** as an internal word to be
+hidden, and used **app** for the installable unit. **`agency` replaces `app`** (decided
+2026-07-29) — `app` plus `agency` plus the retired `module` was three words for one thing, which is
+exactly the sprawl that register exists to prevent.*
+
+Still correct from that document, and worth restating: **no new platform name.** Not "agent OS" as
+a brand, not "agent orchestration platform." The platform *is a realm*. Orchestration
+mis-positions — orchestrators schedule work; a realm is a place where agents live.
 
 ## Retired words — do not reintroduce
 
@@ -99,9 +139,11 @@ has no concept of a "public square."
 |---|---|---|
 | **hall** | **house** | one word for a database; `-house` components are literally houses |
 | **module** | **agency** (or **house**, if it has no residents) | superseded 2026-07-28 |
+| **app** | **agency** | superseded 2026-07-29; the register keeps one word, not two |
 | **faculty**, **organ** | **agency** | candidate names, never adopted |
 | **agent-house** | **town**, or "my realm" | it named a whole deployment, but a house is one unit *inside* a town |
 | **Mayor as a ClickHouse user** | **ego** / the `kernel` user | the mayor is a human; provisioning is the ego's job |
+| **memorecall** | **`/mem:recall`** | retired 2026-07-29 — the shipped skill is `/mem:recall` (`mem-recall` on agents without namespacing), installed in production. The canon follows what people actually type |
 
 The `agent-` prefix does no work — in an Agent Realm everything is agent-something.
 
@@ -138,34 +180,60 @@ to it. Keep the canon verbatim so drift is visible in a diff; put all local deta
 
 # In this repo
 
-**memhouse is an agency, not merely a house.**
+**memhouse is an agency, not merely a house.** Under the canon's identity test this is not a
+judgement call — it is decidable, and memhouse decides cleanly.
 
-The canon's test is residency: a house is a database that holds; an agency is a house *plus the
-residents working in it*. memhouse ships both halves. The house is the `memhouse` database — typed
-`sessions` / `messages` / `tool_calls` rooms. The resident is the **shipper** (`mem-house/shipper/ship.js`,
-and its predecessor `agency/ingest.js`): a long-lived process that runs the 17 editor adapters,
-parses on the client, and INSERTs typed rows on its own schedule (`--loop`). Nothing about the
-house causes that to happen — remove the shipper and the database is inert storage, a house with
-no agency. That resident is `kind = worker`, not `agent`: it is deterministic compiled logic with
-no LLM in the loop, which is exactly why it is not a prompt-injection surface.
+**The test: does something here act under its own identity?** Yes, and it is the **shipper**
+(`mem-house/shipper/ship.js`, and its predecessor `agency/ingest.js`). The shipper authenticates to
+ClickHouse as its own user — `MEMHOUSE_USER`, either the agency owner `memhouse_root` or a member's
+own credential — and the house stamps what it writes with `user_id MATERIALIZED currentUser()`.
+That stamp *is* the identity, recorded per row, un-spoofable, and load-bearing: it is what makes
+own-only RLS work at all. A process whose identity is written into every row it produces is a
+resident by any reading of the test.
 
-The identity realm is the canon's counter-example of a house with no agency — one shared table
-where insert *is* read. memhouse is the opposite shape: the interesting work happens *outside* the
-INSERT, in a resident that must exist and must keep running.
+So the two halves are:
 
-This repo is also the origin of the phrase **"installs on the kernel as an agency."** Under the
-sharpened canon that phrase is still correct here — but only because of the shipper. It was
-sometimes used loosely to mean "an installed app"; that sense is now wrong and has been corrected
-in the docs below.
+| Half | What | Identity? |
+|---|---|---|
+| the **house** | the `memhouse` database — typed `sessions` / `messages` / `tool_calls` rooms, plus the `sessions_v` view | no |
+| the **resident** | the shipper — runs the 17 editor adapters, parses on the client, INSERTs typed rows on its own schedule (`--loop`) | yes — its own CH user |
+
+**The view is not a resident, and that matters.** `sessions_v` is a *plain* view, not a
+materialized view with a definer — it executes as whoever queries it and has no identity of its
+own. Under the sharpened canon it is part of the *house*. memhouse has no materialized views at
+all, so its agency status rests **entirely** on the shipper. This is the sharpest possible version
+of the claim: strip the shipper and what remains is a database plus a view — a house, inert, with
+nothing that acts.
+
+That resident is `kind = worker`, not `agent`: deterministic logic, no LLM in the loop, which is
+exactly why it is not a prompt-injection surface.
+
+The identity realm is the canon's counter-example — one shared table where insert *is* read,
+nothing acting. memhouse is the opposite shape: the interesting work happens *outside* the INSERT,
+in something that must exist, must authenticate, and must keep running.
+
+**This repo coined the phrase "installs on the kernel as an agency"** — and as of the 2026-07-29
+register decision that phrase is canon-correct in *both* of its senses. Publicly, **agency** is now
+the word for the installable unit (**`app` is retired**; `app` + `agency` + the retired `module`
+was three words for one thing). Structurally, memhouse earns the word by having a resident. The
+phrase used to be loose — it sometimes meant only "an installed application", the retired sense —
+and that looseness has been corrected in the docs below.
+
+**On the leak rule.** The canon's audience qualifier settles a question this repo would otherwise
+have raised: `mem-house/delivery/kernel-install.md`, `AGENT-INSTALL.md`, and `PROMPT.md` are
+operator- and agent-facing — install runbooks and a system-prompt snippet whose whole job is to
+teach an agent to query ClickHouse. They legitimately say `GRANT`, `currentUser()`, and `SETTINGS
+final=1`; rewriting them into town vocabulary would make them false. The register applies to
+`README.md`'s top half and to member-facing plugin/skill descriptions, not to these.
 
 ## Terms this repo provides
 
 | Term | Here it is |
 |---|---|
-| **agency** | `memhouse` — the memory agency: the `memhouse` house plus its shipper resident |
-| **house** | the `memhouse` ClickHouse database (`MEMHOUSE_DB`, default `memhouse`) |
-| **room** | `sessions`, `messages`, `tool_calls`, plus the `sessions_v` view |
-| **resident** (`worker`) | the shipper — `mem-house/shipper/ship.js`; earlier `agency/ingest.js` |
+| **agency** | `memhouse` — the memory agency: the `memhouse` house plus its shipper resident. Also the public word for what you install here |
+| **house** | the `memhouse` ClickHouse database (`MEMHOUSE_DB`, default `memhouse`) — including `sessions_v`, a plain view with no identity |
+| **room** | `sessions`, `messages`, `tool_calls` |
+| **resident** (`worker`) | the shipper — `mem-house/shipper/ship.js`; earlier `agency/ingest.js`. Acts as its own CH user; **the only resident here** |
 | **member** | a person with their own credential; rows stamped `user_id MATERIALIZED currentUser()` |
 
 ## Terms this repo consumes from the kernel
@@ -183,9 +251,12 @@ in the docs below.
 
 Not in the canon, and not meant to be — these are memhouse's own words:
 
-- **shipper** — the resident process. `ship`/`shipping`/`re-ship` are its verbs.
+- **shipper** — the resident process; the thing that makes this an agency. `ship`/`shipping`/
+  `re-ship` are its verbs.
 - **parse-on-client** — the first bet: adapters run on the member's machine, typed rows go over the
-  wire. Distinguishes memhouse from memory-house, which ships raw lines and parses in views.
+  wire. Distinguishes memhouse from memory-house, which ships raw lines and parses in views. In
+  canon terms the bet *moves work out of the house and into the resident*: memhouse's derived layer
+  has no identity precisely because all the parsing already happened in something that does.
 - **adapter** / **editor** — the 17 per-editor session readers inherited from agentlytics
   (`editors/`). "editor" here means Claude Code, Cursor, Zed, … — not a text-editing UI.
 - **typed common schema** — physical typed columns across all 17 editors, versus derived-in-view.
@@ -207,7 +278,25 @@ Recorded rather than silently reconciled.
 3. **`realm` used loosely as "a ClickHouse server".** Older text here (and the schema comments
    "the realm session store", "realm session schema") used *realm* where the canon now says *town*.
    Corrected in prose; **not** corrected in SQL comments or identifiers.
-4. **memhouse competes with `memory-house` on the memory plane.** Two agencies, two houses, one
+4. **Stale repo name in a runbook.** `mem-house/delivery/AGENT-INSTALL.md:12` still reads
+   `cd <repo>   # the ultimagent-agentlytics checkout`; the repo is `memhouse`. Not a terminology
+   question — a plain staleness bug — so it is left for a follow-up rather than fixed under a
+   docs-only canon pass.
+5. **memhouse competes with `memory-house` on the memory plane.** Two agencies, two houses, one
    schema-level convergence. If memhouse wins it becomes memory-house v4 — at which point the
    agency name and the component name diverge for a while. Noted so the constellation catalog does
    not treat the duplication as drift.
+
+## Sweeps that came back clean
+
+Recorded so a later pass does not redo them:
+
+- **`hall`**, **`module`** as the installable unit, **`agent-house`** — no occurrences anywhere in
+  this repo (docs, JS, SQL, config). Those retirements are no-ops here.
+- **`app`** as the installable-unit noun (retired 2026-07-29) — no occurrences. Every `app` in the
+  tree is an Express application object (`index.js`, `relay-server.js`) or a macOS `.app` bundle
+  path in the editor-discovery table; `AGENTLYTICS-README.md`'s "requires their app to be running"
+  means the Devin/Antigravity desktop application. None is the installable unit; none changed.
+- **`memorecall`** (retired 2026-07-29 → `/mem:recall`) — no occurrences. memhouse ships its own
+  skills under the `memhouse-*` / `/memhouse:*` names (`memhouse-search`, `memhouse-sessions`,
+  `memhouse-sql`), which are unaffected by that retirement.
