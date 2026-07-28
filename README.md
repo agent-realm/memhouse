@@ -8,9 +8,9 @@ agentlytics dashboard unchanged.
 
 An **agency** in the constellation sense (`TERMINOLOGY.md`): a **house** — the
 `memhouse` database — plus a **resident** working in it, the shipper. The test is
-identity: the shipper authenticates as its own user and every row it writes carries
-that identity (`user_id MATERIALIZED currentUser()`). The house alone would hold;
-the shipper is what makes it act.
+what writes. The shipper fires on its own loop and puts rows in the house that
+outlive any query; everything else here is only ever read. The house alone would
+hold; the shipper is what makes it act.
 
 An alternative agency **competing with memory-house**; if it wins, it becomes
 memory-house v4. Start with `mem-house/DESIGN.md` for the four bets

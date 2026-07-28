@@ -17,10 +17,12 @@ See `../TERMINOLOGY.md` for the canon.
   install lands both: the house (a database) + an owner user (`<name>_root`) + owner
   grants, and the resident that actually does the work. agentlytics is an agency
   because of `ingest.js`; the database alone would just be a house.
-- **resident** — something that acts **under its own identity**. Here there is exactly
-  one, a `worker`: the deterministic ingest loop, no LLM, connecting as its own CH user.
-  The derived `messages_v` / `sessions_v` are *plain* views — no identity, they run as
-  whoever queries them — so they are part of the house, not residents.
+- **resident** — something that fires on a trigger and **writes**. Here there is exactly
+  one: the deterministic ingest loop (`kind = "worker"`, `on = "loop"` — no LLM). The
+  test is mechanical: *does it produce a write?*
+- **routine** — something called that returns, changing nothing. The derived
+  `messages_v` / `sessions_v` are plain views, so they are routines: house machinery,
+  not residents. There are no materialized views here at all.
 - **mayor** — the **human** owner who approves installs; holds a real superuser
   credential, and is not a ClickHouse user the kernel mints.
 - **member** — a joined CH user.
@@ -41,9 +43,9 @@ the house. It returns a one-time **credential** — rotate it on first connect.
 
 **2. Run the agency (this repo)** — `agentlytics_root` connects to its house, creates
 the session schema, and ships local editor sessions into it. The kernel never runs or
-reads this; it is the agency's own resident — a deterministic `worker` acting under
-its own identity. This half is what makes the install an agency rather than an empty
-house.
+reads this; it is the agency's own resident — a deterministic `worker` on a loop,
+writing rows nobody queried for. This half is what makes the install an agency rather
+than an empty house.
 
 ```bash
 export HOUSE_CLICKHOUSE_URL=https://<kernel-host>:8443
@@ -107,11 +109,13 @@ owner's own attempt to create the policy was correctly denied.
 
 ## Design notes
 
-- **Deterministic worker (agent-desk tier).** `ingest.js` is a resident of kind
-  `worker`, not `agent`: it runs no LLM, so it is not a prompt-injection surface — it
-  only reads local files and INSERTs rows.
+- **Deterministic worker (agent-desk tier).** `ingest.js` is a resident with
+  `kind = "worker"`, not `"agent"`: it runs no LLM, so it is not a prompt-injection
+  surface — it only reads local files and INSERTs rows.
 - **Un-spoofable identity.** `user_id = currentUser()` is stamped by the DB; the worker
-  must insert with `async_insert=0` (enforced here) or identity would be lost.
+  must insert with `async_insert=0` (enforced here) or identity would be lost. This is a
+  materialized *column* — part of the table, computed during the worker's own insert.
+  It governs attribution and blast radius, a different axis from residency.
 - **Idempotent.** Re-runs collapse via `ReplacingMergeTree` on
   `(sessionId, timestamp, uuid, line_hash)`; no cursor state required for correctness.
 - **RLS / multiple writers are the kernel's job.** The kernel-issued owner has

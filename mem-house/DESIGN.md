@@ -6,13 +6,28 @@ shipped to one typed ClickHouse store, shareable with a team, installable on the
 ultimagent kernel as an **agency**, and visible through the agentlytics dashboard.
 
 **Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) mem-house is a
-**house** — the `memhouse` database — **plus a resident**: the shipper, a `worker`
-that runs the adapters and keeps the rooms fed. That pairing is what the word
-*agency* means; a house on its own only holds. The test is **identity**: the shipper
-authenticates as its own ClickHouse user and the house stamps that identity into
-every row it writes. `sessions_v` is a plain view — it runs as whoever queries it,
-has no identity, and is therefore part of the house, not a second resident. Strip
-the shipper and what is left is a database and a view: inert.
+**house** — the `memhouse` database — **plus a resident**: the shipper. That pairing
+is what the word *agency* means; a house on its own only holds.
+
+The test is mechanical — **residents write, routines read**. The shipper fires on a
+trigger no query supplies (its own loop) and produces writes that outlive the call:
+
+```toml
+[[resident]]
+kind = "worker"    # deterministic code, no LLM
+on   = "loop"      # a daemon — not an insert trigger, not a schedule
+```
+
+`sessions_v` is a plain view: computed during your query, for your query, writing
+nothing. It is a **routine** — house machinery, not a second resident. mem-house has
+**no materialized views at all**, so the shipper is not merely a resident, it is the
+only candidate in the tree. Strip it and every remaining moving part is a routine
+over rows nobody is writing any more.
+
+Note that `user_id MATERIALIZED currentUser()` is a materialized *column*: it computes
+during your own insert and is part of the table's definition. It makes own-only RLS
+work and it records who wrote each row, but it is an identity property, not what makes
+this an agency.
 
 **Positioning:** an alternative agency **competing with memory-house**. It borrows
 memory-house's proven ideas (server-stamped identity, own-only RLS, idempotent
@@ -29,7 +44,10 @@ side by side as separate agencies, each in its own house. Naming: the product is
    agentlytics' breadth includes sqlite-backed editors (Cursor, VS Code, Zed,
    Devin…) where no "raw line" exists; the adapter must crack a DB. So client-side
    parsing is not a style choice — it is what unlocks 17-editor coverage. The
-   shipper runs the adapters (`editors/`) and ships **typed rows**.
+   shipper runs the adapters (`editors/`) and ships **typed rows**. On the canon's
+   write axis this bet is precisely *moving work from routine to resident*:
+   memory-house parses when you query, mem-house parses before anyone asks and
+   writes the result down.
 2. **Typed common schema** (`schema.sql`). Physical typed columns (what
    memory-house derives in views) + `tool_calls` (memory-house has none) + one
    `extra JSON` escape hatch per table so unnormalized adapter fields are never

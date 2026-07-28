@@ -4,8 +4,9 @@ How to run mem-house as an **agency** on an ultimagent kernel — a ClickHouse s
 (a **town**) promoted into a realm — instead of a plain ClickHouse. Same flow proven
 for the agentlytics agency (`agency/AGENCY.md`); the agency/house name here is
 **`memhouse`** (CH identifiers can't carry a dash). What lands is a **house** (the
-`memhouse` database) with a **resident** (the shipper, connecting under its own
-identity) — that pairing is the agency. Terms: `../../TERMINOLOGY.md`.
+`memhouse` database) with a **resident** (the shipper — `kind = "worker"`,
+`on = "loop"`) — that pairing is the agency. Residents write; routines read, and the
+`sessions_v` view is a routine. Terms: `../../TERMINOLOGY.md`.
 
 This is an operator runbook, so it speaks machine vocabulary throughout — ClickHouse,
 `GRANT`, row policies. That is correct for this audience.
@@ -34,8 +35,8 @@ node mem-house/shipper/ship.js          # first ship; then --loop 300 to keep fr
 ```
 
 The kernel never runs or reads any of this — it is content-blind; the shipper is
-the agency's own resident, a deterministic `worker` (no LLM, not an injection
-surface).
+the agency's own resident, a deterministic `worker` on a loop (no LLM, not an
+injection surface). It is the only thing here that writes without being asked.
 
 ## 3. Members (multi-user)
 
