@@ -1,7 +1,7 @@
 {
   "name": "memhouse",
   "version": "0.3.0",
-  "description": "mem-house \u2014 agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store, kernel-agency install, and the agentlytics dashboard",
+  "description": "memhouse \u2014 agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store, kernel-agency install, and the agentlytics dashboard",
   "main": "bin/memhouse.js",
   "bin": {
     "memhouse": "./bin/memhouse.js",

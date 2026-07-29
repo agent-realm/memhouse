@@ -1,6 +1,6 @@
 ---
 name: memhouse-sessions
-description: List recent agent sessions from mem-house conversation memory — names, projects, editors, hosts, times, message and token counts across all 17 supported editors. Use for "what was I working on", "show my recent sessions", "sessions from last week", "what did I do in project X", "list my cursor sessions", or to orient before drilling into one session.
+description: List recent agent sessions from memhouse conversation memory — names, projects, editors, hosts, times, message and token counts across all 17 supported editors. Use for "what was I working on", "show my recent sessions", "sessions from last week", "what did I do in project X", "list my cursor sessions", or to orient before drilling into one session.
 user-invocable: true
 argument-hint: "[N] [project <name>] [from <editor>] [today|week|month]"
 allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
@@ -9,7 +9,7 @@ allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 # memhouse-sessions — browse session history
 
 List/filter sessions from the `sessions_v` rollup view (session metadata +
-message aggregates) in the mem-house house.
+message aggregates) in the memhouse house.
 
 ## When to use
 

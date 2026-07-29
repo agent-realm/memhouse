@@ -1,6 +1,6 @@
 # memhouse
 
-**mem-house** — agent conversation memory as a product. Every coding-agent session
+**memhouse** — agent conversation memory as a product. Every coding-agent session
 on your machines — across the **17 editors** the agentlytics adapters support —
 parsed locally, shipped to one typed ClickHouse store, shareable with a team,
 installable on the ultimagent kernel as an **agency**, and visible through the
@@ -23,7 +23,7 @@ memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
 | `mem-house/` | the product: `DESIGN.md`, `schema.sql`, `rls.sql`, `shipper/`, `server/`, `delivery/` |
 | `editors/` | the 17 editor adapters (inherited from agentlytics; the crown jewels) |
 | `pricing.js` + `pricing.json` | the cost engine |
-| `ui/` | the dashboard SPA (built to `public/`, served unchanged by the mem-house server) |
+| `ui/` | the dashboard SPA (built to `public/`, served unchanged by the memhouse server) |
 | `agency/` | the earlier agentlytics-agency wrap (raw canonical shape) — kept as prior art |
 | `TERMINOLOGY.md` | the constellation terminology canon + how it applies here |
 | everything else at root | upstream agentlytics (see `AGENTLYTICS-README.md`), still runnable |

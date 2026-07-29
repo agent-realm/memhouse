@@ -1,6 +1,6 @@
 ---
 name: memhouse-search
-description: Full-text search across ALL shipped agent conversations — every session from all 17 supported editors (Claude Code, Codex, Cursor, VS Code, Zed, OpenCode, Gemini CLI, …), every project, every machine — stored in the mem-house ClickHouse. Use whenever the user refers to something from the past that isn't in the current context, e.g. "what did I say about X", "find that conversation about Y", "when did I work on Z", "did I ever try W", "the chat where we discussed it", "remind me how I did it". Reach for this before saying you don't know about prior work.
+description: Full-text search across ALL shipped agent conversations — every session from all 17 supported editors (Claude Code, Codex, Cursor, VS Code, Zed, OpenCode, Gemini CLI, …), every project, every machine — stored in the memhouse ClickHouse. Use whenever the user refers to something from the past that isn't in the current context, e.g. "what did I say about X", "find that conversation about Y", "when did I work on Z", "did I ever try W", "the chat where we discussed it", "remind me how I did it". Reach for this before saying you don't know about prior work.
 user-invocable: true
 argument-hint: "<search terms> [in <project>] [last <N> days] [from <editor>]"
 allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
@@ -8,7 +8,7 @@ allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 
 # memhouse-search — search conversation memory
 
-Search the full message history in the mem-house house (`messages` + `sessions`
+Search the full message history in the memhouse house (`messages` + `sessions`
 tables on ClickHouse).
 
 ## Connection

@@ -351,14 +351,25 @@ Recorded rather than silently reconciled.
 3. **`realm` used loosely as "a ClickHouse server".** Older text here (and the schema comments
    "the realm session store", "realm session schema") used *realm* where the canon now says *town*.
    Corrected in prose; **not** corrected in SQL comments or identifiers.
-4. **Stale repo name in a runbook.** `mem-house/delivery/AGENT-INSTALL.md:12` still reads
-   `cd <repo>   # the ultimagent-agentlytics checkout`; the repo is `memhouse`. Not a terminology
-   question — a plain staleness bug — so it is left for a follow-up rather than fixed under a
-   docs-only canon pass.
+4. **Stale repo name in a runbook — RESOLVED 2026-07-30.** `AGENT-INSTALL.md` read
+   `cd <repo>   # the ultimagent-agentlytics checkout`; it now reads `# the memhouse checkout`.
+   The follow-up this item asked for has happened; kept in the list (rather than renumbered) so the
+   history stays readable.
 5. **memhouse competes with `memory-house` on the memory plane.** Two agencies, two houses, one
    schema-level convergence. If memhouse wins it becomes memory-house v4 — at which point the
    agency name and the component name diverge for a while. Noted so the constellation catalog does
    not treat the duplication as drift.
+6. **`mem-house` (hyphenated) survives structurally; the product is `memhouse`.** Decided
+   2026-07-30, by the same public-register/structural split this list already applies to `agency`
+   (item 1) and SQL comments (item 3). **Corrected** on every surface a member, agent, or npm
+   browser reads: `README.md`'s lede (which said `**mem-house**` under an `# memhouse` heading — a
+   self-contradiction), the `package.json` description, the plugin description, and the three
+   `memhouse-*` skill descriptions. **Deliberately left**: the `mem-house/` directory, the
+   shipper's `[mem-house]` log prefix, code headers, SQL comments, and the design/runbook docs
+   (`DESIGN.md`, `PROMPT.md`, `kernel-install.md`, `install.sh`) — those are structural or
+   operator-facing, where renaming is a code change, not an editorial one. The `mem-house` npm
+   keyword also stands, as a deliberate discovery alias. Read `mem-house` in a path or a log line
+   as the directory; the agency, package, and command are all `memhouse`.
 
 ## Sweeps that came back clean
 

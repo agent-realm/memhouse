@@ -1,6 +1,6 @@
 ---
 name: memhouse-sql
-description: Run free-form read-only SQL against mem-house conversation memory (typed sessions/messages/tool_calls tables + the sessions_v view on ClickHouse). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
+description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls tables + the sessions_v view on ClickHouse). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
 user-invocable: true
 argument-hint: "<question or SQL>"
 allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
@@ -63,7 +63,7 @@ ORDER BY out_tok DESC
 FORMAT PrettyCompact
 ```
 
-Which tools do I use most (mem-house exclusive — memory-house has no tool table):
+Which tools do I use most (memhouse exclusive — memory-house has no tool table):
 
 ```sql
 SELECT tool_name, count() AS calls, uniqExact(session_id) AS sessions
