@@ -5,6 +5,30 @@ on your machines — across **all 17 editors** agentlytics supports — parsed l
 shipped to one typed ClickHouse store, shareable with a team, installable on the
 ultimagent kernel as an **agency**, and visible through the agentlytics dashboard.
 
+**Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) mem-house is a
+**house** — the `memhouse` database — **plus a resident**: the shipper. That pairing
+is what the word *agency* means; a house on its own only holds.
+
+The test is mechanical — **residents write, routines read**. The shipper fires on a
+trigger no query supplies (its own loop) and produces writes that outlive the call:
+
+```toml
+[[resident]]
+kind = "worker"    # deterministic code, no LLM
+on   = "loop"      # a daemon — not an insert trigger, not a schedule
+```
+
+`sessions_v` is a plain view: computed during your query, for your query, writing
+nothing. It is a **routine** — house machinery, not a second resident. mem-house has
+**no materialized views at all**, so the shipper is not merely a resident, it is the
+only candidate in the tree. Strip it and every remaining moving part is a routine
+over rows nobody is writing any more.
+
+Note that `user_id MATERIALIZED currentUser()` is a materialized *column*: it computes
+during your own insert and is part of the table's definition. It makes own-only RLS
+work and it records who wrote each row, but it is an identity property, not what makes
+this an agency.
+
 **Positioning:** an alternative agency **competing with memory-house**. It borrows
 memory-house's proven ideas (server-stamped identity, own-only RLS, idempotent
 shipping, skills/plugin delivery) and agentlytics' proven assets (adapters, UI,
@@ -20,7 +44,10 @@ side by side as separate agencies, each in its own house. Naming: the product is
    agentlytics' breadth includes sqlite-backed editors (Cursor, VS Code, Zed,
    Devin…) where no "raw line" exists; the adapter must crack a DB. So client-side
    parsing is not a style choice — it is what unlocks 17-editor coverage. The
-   shipper runs the adapters (`editors/`) and ships **typed rows**.
+   shipper runs the adapters (`editors/`) and ships **typed rows**. On the canon's
+   write axis this bet is precisely *moving work from routine to resident*:
+   memory-house parses when you query, mem-house parses before anyone asks and
+   writes the result down.
 2. **Typed common schema** (`schema.sql`). Physical typed columns (what
    memory-house derives in views) + `tool_calls` (memory-house has none) + one
    `extra JSON` escape hatch per table so unnormalized adapter fields are never
@@ -29,8 +56,9 @@ side by side as separate agencies, each in its own house. Naming: the product is
    indexes built in (CH ≥ 26.2).
 3. **Kernel-installable agency.** Same install path proven for agentlytics-agency:
    `install-agency{memhouse}` → house + `memhouse_root` + credential; members via
-   `register-member` + owner `GRANT`; own-only visibility via the kernel-applied
-   row policy (`rls.sql`). Identity is `user_id MATERIALIZED currentUser()`
+   `register-member` + owner `GRANT`; own-only visibility via the row policy
+   (`rls.sql`) applied by the ego (the `kernel` user) or the mayor. The shipper is
+   the resident that lands with it. Identity is `user_id MATERIALIZED currentUser()`
    (requires `async_insert=0`). Sharing modes: own-only (policy TO member) or
    team-pool (no policy).
 4. **Borrowed UI, zero fork.** The React SPA consumes REST JSON, not tables. The
@@ -43,8 +71,8 @@ side by side as separate agencies, each in its own house. Naming: the product is
 | Path | What | Notes |
 |---|---|---|
 | `schema.sql` | the house schema (typed) | unqualified names; owner applies in its house |
-| `rls.sql` | own-only row policies | kernel/mayor applies (owner lacks ACCESS MANAGEMENT) |
-| `shipper/ship.js` | parse-on-client shipper CLI | reuses `../../editors`; incremental; idempotent |
+| `rls.sql` | own-only row policies | the ego (`kernel`) or the mayor applies (owner lacks ACCESS MANAGEMENT) |
+| `shipper/ship.js` | parse-on-client shipper CLI — the resident (`worker`) | reuses `../../editors`; incremental; idempotent |
 | `server/server.js` | REST API + dashboard | same API contract as agentlytics; serves `../../public` |
 | `delivery/` | delivery kit | installer, skills, plugin, AGENT-INSTALL.md, prompt |
 
