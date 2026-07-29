@@ -8,7 +8,7 @@ ClickHouse >= 26.2 (local server, Cloud, or a kernel house — see
 ## 1. Install
 
 ```bash
-cd <repo>            # the ultimagent-agentlytics checkout
+cd <repo>            # the memhouse checkout
 npm install --no-audit --no-fund
 ```
 
