@@ -147,7 +147,10 @@ function getSqliteMessages(sessionId) {
 
     db.close();
     return result;
-  } catch {
+  } catch (e) {
+    // Message reads must report too, not just the session scan: an empty transcript
+    // is written over the stored one on re-ship.
+    adapterErrors.record('opencode', e, DB_PATH);
     return [];
   }
 }
@@ -198,7 +201,13 @@ function getMessagesForSession(sessionId) {
   if (!fs.existsSync(sessionMsgDir)) return [];
 
   let files;
-  try { files = fs.readdirSync(sessionMsgDir).filter(f => f.startsWith('msg_') && f.endsWith('.json')); } catch { return []; }
+  try { files = fs.readdirSync(sessionMsgDir).filter(f => f.startsWith('msg_') && f.endsWith('.json')); }
+  catch (e) {
+    // The directory exists (checked above) but is unreadable — report it, or the
+    // empty result overwrites the stored transcript on re-ship.
+    adapterErrors.record('opencode', e, sessionMsgDir);
+    return [];
+  }
 
   const rawMsgs = [];
   for (const file of files) {

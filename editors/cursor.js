@@ -333,7 +333,13 @@ function getMessages(chat) {
   }
 
   let globalDb;
-  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); } catch { return []; }
+  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); }
+  catch (e) {
+    // Returning [] unreported would let a re-ship overwrite this session's stored
+    // transcript with nothing.
+    adapterErrors.record('cursor', e, GLOBAL_STORAGE_DB);
+    return [];
+  }
   const bubbles = getComposerBubbles(globalDb, chat.composerId);
   globalDb.close();
   const msgs = bubblesToMessages(bubbles);

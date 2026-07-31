@@ -88,7 +88,10 @@ function queryBlob(id) {
     const row = db.prepare('SELECT data FROM threads WHERE id = ?').get(id);
     db.close();
     return row ? row.data : null;
-  } catch {
+  } catch (e) {
+    // This is the message-blob read. A silent null here becomes a zero-message
+    // session, which overwrites the stored transcript on re-ship.
+    adapterErrors.record('zed', e, THREADS_DB);
     return null;
   }
 }
@@ -132,7 +135,10 @@ function getMessages(chat) {
       json = blob.toString('utf-8');
     }
   } catch (e) {
-    // Decompression failed - zstd CLI not available
+    // Decompression failed — usually no zstd CLI and no native zstd in this Node.
+    // The thread exists and has content we cannot read, so this must be reported:
+    // silently returning [] would overwrite its stored transcript on re-ship.
+    adapterErrors.record('zed', e, THREADS_DB);
     return [];
   }
 
