@@ -249,7 +249,11 @@ function getMessagesFromJsonl(chat) {
 
   for (const line of lines) {
     let obj;
-    try { obj = JSON.parse(line); } catch { continue; }
+    // The legacy JSONL store needs the same protection as the SQLite one: a corrupt
+    // line drops a message, and the truncated transcript would overwrite the stored
+    // one when the file's mtime changes or --full is used.
+    try { obj = JSON.parse(line); }
+    catch (e) { adapterErrors.record('goose', e, filePath); continue; }
 
     if (!obj.role) continue;
 

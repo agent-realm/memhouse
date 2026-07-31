@@ -25,8 +25,28 @@ function recorded() {
   return errors.slice();
 }
 
+/** Current position, for scoping a retraction. See dropRange(). */
+function mark() {
+  return errors.length;
+}
+
+/**
+ * Retract the failures recorded between two marks.
+ *
+ * For readers with a fallback: opencode tries its file store, then opencode.db. A
+ * failure on the first path is not a failure of the read if the second path returns
+ * the full transcript, and leaving it recorded would make the shipper withhold a
+ * session it can read perfectly well. Scoped by range rather than truncating to a
+ * mark, so failures recorded by the fallback itself — which are real truncation —
+ * survive.
+ */
+function dropRange(start, end) {
+  if (end <= start) return;
+  errors.splice(start, end - start);
+}
+
 function reset() {
   errors = [];
 }
 
-module.exports = { record, recorded, reset };
+module.exports = { record, recorded, mark, dropRange, reset };

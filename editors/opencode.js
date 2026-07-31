@@ -361,10 +361,22 @@ function cleanTitle(title) {
 }
 
 function getMessages(chat) {
-  // Prefer file-based messages; fall back to SQLite
+  // Prefer file-based messages; fall back to SQLite.
+  //
+  // Failures on the file path are only failures of the READ if the fallback also
+  // comes up empty. An unreadable message directory for a session that opencode.db
+  // still holds in full is not a reason to withhold the session — and leaving those
+  // entries in the sink would make the shipper do exactly that, forever. So they are
+  // retracted once SQLite produces a transcript. Scoped to the file attempt, so any
+  // truncation the SQLite reader reports about itself survives.
+  const beforeFile = adapterErrors.mark();
   const fileMessages = getMessagesForSession(chat.composerId);
+  const afterFile = adapterErrors.mark();
   if (fileMessages.length > 0) return fileMessages;
-  return getSqliteMessages(chat.composerId);
+
+  const sqliteMessages = getSqliteMessages(chat.composerId);
+  if (sqliteMessages.length > 0) adapterErrors.dropRange(beforeFile, afterFile);
+  return sqliteMessages;
 }
 
 const labels = { 'opencode': 'OpenCode' };

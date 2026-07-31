@@ -152,7 +152,14 @@ function getComposerHeaders(stateDbPath) {
       mode: c.unifiedMode || c.forceMode || 'unknown',
       isAgentic: c.unifiedMode === 'agent',
     }));
-  } catch { return []; }
+  } catch (e) {
+    // One workspace's state.vscdb being locked, corrupt, or on an incompatible
+    // ItemTable removes every composer in that workspace. The global database still
+    // opens, so without this Cursor looks healthy while a whole workspace of
+    // sessions quietly disappears.
+    adapterErrors.record('cursor', e, stateDbPath);
+    return [];
+  }
 }
 
 function getModelPreference(globalDb) {
