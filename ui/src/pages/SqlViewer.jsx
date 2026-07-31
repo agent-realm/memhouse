@@ -21,7 +21,10 @@ const TYPED_EXAMPLES = [
   { label: 'Token usage by editor', sql: `SELECT source, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM sessions_v GROUP BY source ORDER BY input_tokens DESC` },
   { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM sessions_v WHERE mode != '' GROUP BY mode ORDER BY count DESC` },
   { label: 'Hourly distribution', sql: `SELECT toHour(ts) AS hour, count() AS count FROM messages GROUP BY hour ORDER BY hour` },
-  { label: 'Full-text search', sql: `SELECT session_id, any(source) AS source, count() AS hits FROM messages WHERE text_ngram LIKE '%clickhouse%' GROUP BY session_id ORDER BY hits DESC LIMIT 10` },
+  // Grouped by (session_id, user_id), matching the table's ORDER BY. In a team-pool
+  // house two members can ship the same adapter-local session id; grouping on
+  // session_id alone would merge them and make any(source) an arbitrary member's.
+  { label: 'Full-text search', sql: `SELECT session_id, user_id, any(source) AS source, count() AS hits FROM messages WHERE text_ngram LIKE '%clickhouse%' GROUP BY session_id, user_id ORDER BY hits DESC LIMIT 10` },
 ]
 const LEGACY_EXAMPLES = [
   { label: 'Sessions per editor', sql: `SELECT source, count() AS count FROM chats GROUP BY source ORDER BY count DESC` },
@@ -36,8 +39,13 @@ const LEGACY_EXAMPLES = [
 
 export default function SqlViewer() {
   const { dark } = useTheme()
-  const [examples, setExamples] = useState(TYPED_EXAMPLES)
-  const [sql, setSql] = useState(TYPED_EXAMPLES[0].sql)
+  // Three states, and they must stay distinguishable: 'loading' while /api/schema is
+  // in flight, an array once the house's flavor is known, and null when the request
+  // finished without telling us. Guessing wrong offers queries against tables that do
+  // not exist, so nothing is offered until the answer is in — but a page that is
+  // merely still loading must not claim detection failed.
+  const [examples, setExamples] = useState('loading')
+  const [sql, setSql] = useState('')
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -50,15 +58,26 @@ export default function SqlViewer() {
   useEffect(() => {
     fetchSchema().then(s => {
       setSchema(s)
-      // Flavor detection: the typed house always has the sessions_v rollup.
-      const ex = s?.tables?.includes('sessions_v') ? TYPED_EXAMPLES : LEGACY_EXAMPLES
+      // Three outcomes, not two. The typed house has the sessions_v rollup; the
+      // legacy one has chats. Anything else — an error object with no `tables`, a
+      // half-applied schema with neither marker — is indeterminate, and offering
+      // either set would hand the user queries that error.
+      const tables = s?.tables
+      const ex = !Array.isArray(tables) ? null
+        : tables.includes('sessions_v') ? TYPED_EXAMPLES
+          : tables.includes('chats') ? LEGACY_EXAMPLES
+            : null
       setExamples(ex)
+      if (!ex) return
       // Swap the prefilled query only if the user hasn't edited it yet.
-      setSql(prev => (prev === TYPED_EXAMPLES[0].sql || prev === LEGACY_EXAMPLES[0].sql) ? ex[0].sql : prev)
-    }).catch(() => {})
+      setSql(prev => (prev === '' || prev === TYPED_EXAMPLES[0].sql || prev === LEGACY_EXAMPLES[0].sql) ? ex[0].sql : prev)
+    }).catch(() => setExamples(null))
   }, [])
 
   const runQuery = async () => {
+    // Guard here, not only on the button: ⌘+Enter reaches this directly, and an
+    // empty submit comes back as a bare "sql string required" from /api/query.
+    if (!sql.trim() || loading) return
     setLoading(true)
     setError(null)
     setResult(null)
@@ -195,9 +214,16 @@ export default function SqlViewer() {
         </div>
       )}
 
-      {/* Example queries */}
+      {/* Example queries — withheld until the schema flavor is known, since the
+          typed and legacy sets target entirely different tables. */}
       <div className="flex flex-wrap gap-1">
-        {examples.map((q, i) => (
+        {examples === 'loading' ? (
+          <span className="text-[11px]" style={txt2Style}>loading examples…</span>
+        ) : examples === null ? (
+          <span className="text-[11px]" style={txt2Style}>
+            examples unavailable — could not determine the schema from /api/schema
+          </span>
+        ) : examples.map((q, i) => (
           <button
             key={i}
             onClick={() => setSql(q.sql)}
