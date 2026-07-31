@@ -190,6 +190,11 @@ function getAllSessions() {
       const data = readJson(filePath);
       if (data && data.id) {
         sessions.push({ ...data, _filePath: filePath });
+      } else {
+        // The file was listed, so it exists. Failing to decode it drops the session
+        // from discovery entirely — it reaches neither doctor nor the shipper, and
+        // nothing downstream can miss what it never saw.
+        adapterErrors.record('opencode', new Error('unreadable session metadata file'), filePath);
       }
     }
   }

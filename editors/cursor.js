@@ -281,13 +281,24 @@ function getChats() {
       const meta = readStoreMeta(db);
       db.close();
       if (meta) {
+        // The agent store carries no per-chat updated time and no message count, so
+        // the shipper had nothing that changes as the conversation grows: it
+        // compared a fixed createdAt against itself and an absent count against 0,
+        // and skipped every intact session forever. store.db's mtime is the real
+        // change signal — it moves when blobs are appended. If it cannot be read,
+        // fall back to declaring the count unknown so the skip stands down instead
+        // of silently freezing the transcript.
+        let storeMtime = null;
+        try { storeMtime = fs.statSync(dbPath).mtimeMs; } catch { /* fall back below */ }
         chats.push({
           source: 'cursor',
           composerId: chatId,
           name: meta.name || null,
           createdAt: meta.createdAt || null,
+          lastUpdatedAt: storeMtime,
           mode: meta.mode || null,
           folder: null,
+          _countUnknown: storeMtime === null,
           _dbPath: dbPath,
           _rootBlobId: meta.latestRootBlobId,
           _lastUsedModel: meta.lastUsedModel || null,
