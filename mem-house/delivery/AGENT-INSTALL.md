@@ -17,19 +17,21 @@ the install script that builds the native binding. Without it those five silentl
 return zero sessions and you ship a partial history. Verify with step 4 —
 `memhouse discover` names any adapter it had to skip.
 
-On `EACCES`, read the path in the error before using `sudo` — it is only the right
-answer for one of the two causes.
+On `EACCES`, decide by **ownership of the failing path, not by what the path looks
+like**. Homebrew's prefix is `/usr/local` on Intel and `/opt/homebrew` on Apple
+Silicon and is owned by the user in both cases, so a system-looking path does not
+mean a system-managed install.
 
 ```bash
-npm prefix -g     # the global prefix; compare it with the path npm named
+ls -ld "$(npm prefix -g)/lib/node_modules"   # and the path named in the error
 ```
 
-If the failing path is under a system prefix (`/usr`, `/usr/local` — where
-distro-packaged Node installs), re-run as
-`sudo npm install -g memhouse --allow-scripts=better-sqlite3`. If it is under a
-home/version-manager prefix (`~/.nvm`, `~/.local/share/fnm`, `~/.volta`) or the npm
-cache (`~/.npm`), an earlier root-run npm left root-owned files there; `sudo` makes
-that worse. Fix the ownership instead:
+Root-owned → a system-managed Node; re-run as
+`sudo npm install -g memhouse --allow-scripts=better-sqlite3`.
+
+Owned by the current user → an earlier `sudo npm` left root-owned files inside a
+prefix that is already the user's (Homebrew, fnm, nvm, volta) or in `~/.npm`.
+Another `sudo` deepens it; take the path back instead:
 `sudo chown -R "$(id -u):$(id -g)" <path npm named>`.
 
 From a checkout instead (contributors): `npm install --no-audit --no-fund` in the

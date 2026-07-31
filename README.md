@@ -42,18 +42,21 @@ install scripts by default, so without the flag those five read nothing and you
 silently ship a partial history. `memhouse discover` and `memhouse doctor` both
 say so when the binding is missing.
 
-If that install fails with `EACCES`, read the path npm names in the error before
-reaching for `sudo`. Only one cause actually warrants it:
+If that install fails with `EACCES`, `sudo` is the right answer for only one of the
+two causes. **Ownership decides it, not the path** — Homebrew's prefix is
+`/usr/local` on Intel and `/opt/homebrew` on Apple Silicon and is owned by you in
+both cases, so "looks like a system directory" proves nothing.
 
-- The path is under a **system prefix** (`/usr`, `/usr/local`) — that is where
-  distro and `apt`-packaged Node install. Re-run with `sudo`.
-- The path is under **your home** (`~/.nvm`, `~/.local/share/fnm`, `~/.volta`) or is
-  the **npm cache** (`~/.npm`). Something earlier ran npm as root and left
-  root-owned files there. `sudo` would deepen that; fix the ownership instead —
+```bash
+ls -ld "$(npm prefix -g)/lib/node_modules"   # and the path named in the error
+```
+
+- **Owned by `root`** — a genuinely system-managed Node (distro packages, `/usr`).
+  Re-run with `sudo`.
+- **Owned by you** — an earlier `sudo npm` left root-owned files inside a prefix
+  that is yours (Homebrew, fnm, nvm, volta) or in the cache (`~/.npm`). Another
+  `sudo` deepens it. Take the path back instead:
   `sudo chown -R "$(id -u):$(id -g)" <the path npm named>`.
-
-`npm prefix -g` prints the prefix so you can tell the two apart. It only prints the
-path — it does not test writability, so compare it against the failing path yourself.
 
 To try it without installing, npx takes the same flag — it has to come before the
 package name:
