@@ -43,20 +43,23 @@ silently ship a partial history. `memhouse discover` and `memhouse doctor` both
 say so when the binding is missing.
 
 If that install fails with `EACCES`, `sudo` is the right answer for only one of the
-two causes. **Ownership decides it, not the path** — Homebrew's prefix is
-`/usr/local` on Intel and `/opt/homebrew` on Apple Silicon and is owned by you in
-both cases, so "looks like a system directory" proves nothing.
+two causes, and the thing that tells them apart is **who owns the prefix root** —
+not the path, and not the failing file. The path proves nothing: Homebrew's prefix
+is `/usr/local` on Intel and `/opt/homebrew` on Apple Silicon, and is yours in both
+cases. The failing file proves nothing either: an earlier `sudo npm` leaves
+root-owned files *inside* a prefix that is still yours.
 
 ```bash
-ls -ld "$(npm prefix -g)/lib/node_modules"   # and the path named in the error
+ls -ld "$(npm prefix -g)"     # the prefix ROOT — this is the deciding one
 ```
 
-- **Owned by `root`** — a genuinely system-managed Node (distro packages, `/usr`).
-  Re-run with `sudo`.
-- **Owned by you** — an earlier `sudo npm` left root-owned files inside a prefix
-  that is yours (Homebrew, fnm, nvm, volta) or in the cache (`~/.npm`). Another
-  `sudo` deepens it. Take the path back instead:
-  `sudo chown -R "$(id -u):$(id -g)" <the path npm named>`.
+- **Prefix root owned by `root`** — a genuinely system-managed Node (distro
+  packages under `/usr`). Re-run with `sudo`.
+- **Prefix root owned by you** — the prefix is yours (Homebrew, fnm, nvm, volta),
+  so whatever root-owned file npm tripped on is a stray from an earlier `sudo npm`.
+  Another `sudo` adds more of them. Repair just that path:
+  `sudo chown -R "$(id -u):$(id -g)" <the path npm named>`. The same applies to the
+  cache (`~/.npm`).
 
 To try it without installing, npx takes the same flag — it has to come before the
 package name:
