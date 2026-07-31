@@ -378,8 +378,20 @@ async function cmdDoctor() {
   } catch { add(false, 'identity stamping', 'schema missing?'); }
   let adapterErrors = [];
   try {
-    const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
-    const seen = getAllChats().length;
+    const { getAllChats, getAdapterErrors, getMessages } = require(path.join(REPO_ROOT, 'editors'));
+    const chats = getAllChats();
+    const seen = chats.length;
+    // Listing sessions is not the same as being able to read them. Goose, for one,
+    // can query `sessions` while its `messages` rows use a schema this parser cannot
+    // decode — the shipper would then withhold every one of those sessions while
+    // doctor reported a clean bill of health. Read the newest session per source so
+    // the message readers actually run; that is one parse per editor, not a full scan.
+    const probed = new Set();
+    for (const chat of chats) {
+      if (probed.has(chat.source)) continue;
+      probed.add(chat.source);
+      try { getMessages(chat); } catch { /* recorded below, or surfaced by the count */ }
+    }
     adapterErrors = getAdapterErrors();
     // Any adapter that could not be read is a failure, whatever the cause — a
     // locked or corrupt store loses just as many sessions as a missing binding.

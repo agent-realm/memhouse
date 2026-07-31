@@ -189,8 +189,15 @@ function getMessagesFromDb(chat) {
   const result = [];
   for (const row of rows) {
     let parts;
-    try { parts = JSON.parse(row.content_json); } catch { continue; }
-    if (!Array.isArray(parts)) continue;
+    // A row we cannot decode drops a message from the transcript. Silently, that is
+    // a truncation that looks complete, and a re-ship would replace the stored
+    // transcript with it. Report so the shipper withholds and retries instead.
+    try { parts = JSON.parse(row.content_json); }
+    catch (e) { adapterErrors.record('goose', e, `session ${chat.composerId}`); continue; }
+    if (!Array.isArray(parts)) {
+      adapterErrors.record('goose', new Error('message content_json is not an array'), `session ${chat.composerId}`);
+      continue;
+    }
 
     const role = row.role;
     const contentParts = [];
