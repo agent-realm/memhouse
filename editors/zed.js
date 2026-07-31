@@ -81,6 +81,27 @@ function queryDb(sql) {
   }
 }
 
+// Zed's `threads` schema varies by version: `worktree_branch` exists in some builds
+// and not others, and older builds lack `created_at`. Naming a column that is not
+// there fails the WHOLE query with "no such column", which cost every Zed thread on
+// this machine — silently, until the adapter started reporting. So ask the table what
+// it has rather than assuming. Cached: the schema cannot change while we scan.
+let threadColumns = null;
+function getThreadColumns() {
+  if (threadColumns) return threadColumns;
+  if (!fs.existsSync(THREADS_DB)) return new Set();
+  try {
+    const db = new Database(THREADS_DB, { readonly: true });
+    const cols = db.prepare('PRAGMA table_info(threads)').all().map((r) => r.name);
+    db.close();
+    threadColumns = new Set(cols);
+    return threadColumns;
+  } catch (e) {
+    adapterErrors.record('zed', e, THREADS_DB);
+    return new Set();
+  }
+}
+
 function queryBlob(id) {
   if (!fs.existsSync(THREADS_DB)) return null;
   try {
@@ -103,22 +124,33 @@ function queryBlob(id) {
 const name = 'zed';
 
 function getChats() {
-  const rows = queryDb(
-    'SELECT id, summary, updated_at, data_type, length(data) as data_size, parent_id, worktree_branch FROM threads ORDER BY updated_at DESC'
-  );
+  const cols = getThreadColumns();
+  if (cols.size === 0) return [];
+
+  // Only these are relied on. Anything else is taken when the build provides it.
+  const select = ['id', 'summary', 'updated_at', 'data_type', 'length(data) as data_size', 'parent_id'];
+  const hasBranch = cols.has('worktree_branch');
+  const hasCreated = cols.has('created_at');
+  if (hasBranch) select.push('worktree_branch');
+  if (hasCreated) select.push('created_at');
+
+  const rows = queryDb(`SELECT ${select.join(', ')} FROM threads ORDER BY updated_at DESC`);
 
   return rows.map(row => ({
     source: 'zed',
     composerId: row.id,
     name: row.summary || null,
-    createdAt: row.updated_at ? new Date(row.updated_at).getTime() : null,
+    // created_at when the build has it. Falling back to updated_at is not a
+    // creation time — it just keeps the field non-null on builds that lack it.
+    createdAt: (hasCreated && row.created_at) ? new Date(row.created_at).getTime()
+      : (row.updated_at ? new Date(row.updated_at).getTime() : null),
     lastUpdatedAt: row.updated_at ? new Date(row.updated_at).getTime() : null,
     mode: 'thread',
     folder: null,
     encrypted: false,
     bubbleCount: 0,
     _dataType: row.data_type,
-    _gitBranch: row.worktree_branch,
+    _gitBranch: hasBranch ? row.worktree_branch : null,
   }));
 }
 

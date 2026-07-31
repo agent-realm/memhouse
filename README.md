@@ -42,6 +42,11 @@ install scripts by default, so without the flag those five read nothing and you
 silently ship a partial history. `memhouse discover` and `memhouse doctor` both
 say so when the binding is missing.
 
+If that install fails with `EACCES`, npm's global prefix is a system directory and
+needs `sudo npm install -g …`. Distro and `apt`/`brew`-installed Node usually land
+there; a version manager (fnm, nvm, volta) puts the prefix under your home, where no
+`sudo` is required. `npm prefix -g` says which you have.
+
 To try it without installing, npx takes the same flag — it has to come before the
 package name:
 

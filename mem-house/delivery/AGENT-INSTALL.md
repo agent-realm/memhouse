@@ -17,6 +17,11 @@ the install script that builds the native binding. Without it those five silentl
 return zero sessions and you ship a partial history. Verify with step 4 —
 `memhouse discover` names any adapter it had to skip.
 
+On `EACCES`, npm's global prefix is a system directory — re-run as
+`sudo npm install -g memhouse --allow-scripts=better-sqlite3`. System-packaged Node
+installs land there; a version manager (fnm, nvm, volta) does not. `npm prefix -g`
+tells you which this machine has.
+
 From a checkout instead (contributors): `npm install --no-audit --no-fund` in the
 repo root — its `allowScripts` field already covers the binding — then substitute
 `node bin/memhouse.js` for `memhouse` below.
