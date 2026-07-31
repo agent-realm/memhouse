@@ -386,11 +386,32 @@ async function cmdDoctor() {
     // decode — the shipper would then withhold every one of those sessions while
     // doctor reported a clean bill of health. Read the newest session per source so
     // the message readers actually run; that is one parse per editor, not a full scan.
-    const probed = new Set();
-    const thrown = [];
+    // One chat per source is not enough coverage: several adapters mix storage
+    // paths, and a probe only exercises the one the sampled chat happens to use.
+    // Cursor declares its split as _type (agent-store vs workspace) and Goose as
+    // _storage (sqlite vs jsonl), so every declared variant gets probed. OpenCode
+    // declares nothing — it decides file-store vs opencode.db at read time — so the
+    // spread below (newest, middle, oldest per source) is what covers it. That is
+    // sampling, not a guarantee; adapters declaring their storage path is the real
+    // fix, and is out of scope here.
+    const picks = new Map();
+    const bySource = new Map();
     for (const chat of chats) {
-      if (probed.has(chat.source)) continue;
-      probed.add(chat.source);
+      if (!bySource.has(chat.source)) bySource.set(chat.source, []);
+      bySource.get(chat.source).push(chat);
+    }
+    for (const [source, list] of bySource) {
+      for (const i of new Set([0, Math.floor(list.length / 2), list.length - 1])) {
+        picks.set(`${source}#${i}`, list[i]);
+      }
+      for (const chat of list) {
+        const variant = `${source}|${chat._type || ''}|${chat._storage || ''}`;
+        if (!picks.has(variant)) picks.set(variant, chat);
+      }
+    }
+
+    const thrown = [];
+    for (const chat of picks.values()) {
       // Not every reader reports through the sink — some throw instead, e.g.
       // Cursor's agent-store path, where discovery reads `meta` fine but
       // collectStoreMessages() can throw on a corrupt `blobs` table. Swallowing
