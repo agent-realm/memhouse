@@ -388,12 +388,13 @@ async function cmdDoctor() {
     // the message readers actually run; that is one parse per editor, not a full scan.
     // One chat per source is not enough coverage: several adapters mix storage
     // paths, and a probe only exercises the one the sampled chat happens to use.
-    // Cursor declares its split as _type (agent-store vs workspace) and Goose as
-    // _storage (sqlite vs jsonl), so every declared variant gets probed. OpenCode
-    // declares nothing — it decides file-store vs opencode.db at read time — so the
-    // spread below (newest, middle, oldest per source) is what covers it. That is
-    // sampling, not a guarantee; adapters declaring their storage path is the real
-    // fix, and is out of scope here.
+    // Each such adapter declares which store a chat came from — Cursor as _type
+    // (agent-store vs workspace), Goose as _storage (sqlite vs jsonl), OpenCode as
+    // _storageType (file vs sqlite) — so probing one chat per declared variant
+    // covers every path deterministically.
+    //
+    // The newest/middle/oldest spread is kept on top of that as a cheap hedge for
+    // any split an adapter does NOT declare.
     const picks = new Map();
     const bySource = new Map();
     for (const chat of chats) {
@@ -405,7 +406,7 @@ async function cmdDoctor() {
         picks.set(`${source}#${i}`, list[i]);
       }
       for (const chat of list) {
-        const variant = `${source}|${chat._type || ''}|${chat._storage || ''}`;
+        const variant = `${source}|${chat._type || ''}|${chat._storage || ''}|${chat._storageType || ''}`;
         if (!picks.has(variant)) picks.set(variant, chat);
       }
     }
