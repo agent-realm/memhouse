@@ -94,12 +94,29 @@ function getThreadColumns() {
     const db = new Database(THREADS_DB, { readonly: true });
     const cols = db.prepare('PRAGMA table_info(threads)').all().map((r) => r.name);
     db.close();
+    // PRAGMA on a missing or renamed table SUCCEEDS with zero rows rather than
+    // throwing. Left unreported, that would cache an empty set, return no sessions,
+    // and look exactly like an unused Zed install — the same silent whole-adapter
+    // drop this function exists to end. Do not cache it either: the next scan should
+    // look again rather than inherit the verdict.
+    if (cols.length === 0) {
+      adapterErrors.record('zed', new Error('threads table missing or unreadable — incompatible Zed schema'), THREADS_DB);
+      return new Set();
+    }
     threadColumns = new Set(cols);
     return threadColumns;
   } catch (e) {
     adapterErrors.record('zed', e, THREADS_DB);
     return new Set();
   }
+}
+
+// index.js calls this between passes of a long-running `ship --loop`. Without it the
+// column set would be fixed for the life of the process, so a Zed upgrade mid-run
+// would keep querying a column that no longer exists — or keep ignoring one newly
+// added — until someone restarted the shipper.
+function resetCache() {
+  threadColumns = null;
 }
 
 function queryBlob(id) {
@@ -258,4 +275,4 @@ function getMCPServers() {
   return results;
 }
 
-module.exports = { name, labels, getChats, getMessages, getMCPServers };
+module.exports = { name, labels, getChats, getMessages, getMCPServers, resetCache };

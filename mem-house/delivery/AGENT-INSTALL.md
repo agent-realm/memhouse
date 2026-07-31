@@ -17,10 +17,20 @@ the install script that builds the native binding. Without it those five silentl
 return zero sessions and you ship a partial history. Verify with step 4 —
 `memhouse discover` names any adapter it had to skip.
 
-On `EACCES`, npm's global prefix is a system directory — re-run as
-`sudo npm install -g memhouse --allow-scripts=better-sqlite3`. System-packaged Node
-installs land there; a version manager (fnm, nvm, volta) does not. `npm prefix -g`
-tells you which this machine has.
+On `EACCES`, read the path in the error before using `sudo` — it is only the right
+answer for one of the two causes.
+
+```bash
+npm prefix -g     # the global prefix; compare it with the path npm named
+```
+
+If the failing path is under a system prefix (`/usr`, `/usr/local` — where
+distro-packaged Node installs), re-run as
+`sudo npm install -g memhouse --allow-scripts=better-sqlite3`. If it is under a
+home/version-manager prefix (`~/.nvm`, `~/.local/share/fnm`, `~/.volta`) or the npm
+cache (`~/.npm`), an earlier root-run npm left root-owned files there; `sudo` makes
+that worse. Fix the ownership instead:
+`sudo chown -R "$(id -u):$(id -g)" <path npm named>`.
 
 From a checkout instead (contributors): `npm install --no-audit --no-fund` in the
 repo root — its `allowScripts` field already covers the binding — then substitute

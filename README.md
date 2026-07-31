@@ -42,10 +42,18 @@ install scripts by default, so without the flag those five read nothing and you
 silently ship a partial history. `memhouse discover` and `memhouse doctor` both
 say so when the binding is missing.
 
-If that install fails with `EACCES`, npm's global prefix is a system directory and
-needs `sudo npm install -g …`. Distro and `apt`/`brew`-installed Node usually land
-there; a version manager (fnm, nvm, volta) puts the prefix under your home, where no
-`sudo` is required. `npm prefix -g` says which you have.
+If that install fails with `EACCES`, read the path npm names in the error before
+reaching for `sudo`. Only one cause actually warrants it:
+
+- The path is under a **system prefix** (`/usr`, `/usr/local`) — that is where
+  distro and `apt`-packaged Node install. Re-run with `sudo`.
+- The path is under **your home** (`~/.nvm`, `~/.local/share/fnm`, `~/.volta`) or is
+  the **npm cache** (`~/.npm`). Something earlier ran npm as root and left
+  root-owned files there. `sudo` would deepen that; fix the ownership instead —
+  `sudo chown -R "$(id -u):$(id -g)" <the path npm named>`.
+
+`npm prefix -g` prints the prefix so you can tell the two apart. It only prints the
+path — it does not test writability, so compare it against the failing path yourself.
 
 To try it without installing, npx takes the same flag — it has to come before the
 package name:
