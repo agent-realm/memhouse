@@ -143,7 +143,14 @@ function getMessages(chat) {
   }
 
   let data;
-  try { data = JSON.parse(json); } catch { return []; }
+  try { data = JSON.parse(json); }
+  catch (e) {
+    // Decompressed but undecodable — malformed, or a thread schema this parser does
+    // not know. The thread has content, so returning [] unreported would let a
+    // re-ship replace the stored transcript with nothing.
+    adapterErrors.record('zed', e, THREADS_DB);
+    return [];
+  }
 
   const model = data.model?.model || null;
   const messages = [];

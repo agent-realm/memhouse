@@ -94,7 +94,12 @@ function getSqliteMessages(sessionId) {
     const result = [];
     for (const msg of messages) {
       let msgData;
-      try { msgData = JSON.parse(msg.msg_data); } catch { continue; }
+      // A record we cannot decode is dropped from the transcript. Silently, that
+      // yields a TRUNCATED history that looks complete — and a re-ship would replace
+      // the full stored transcript with the shortened one. Report it so the shipper
+      // refuses to overwrite good data with a partial read.
+      try { msgData = JSON.parse(msg.msg_data); }
+      catch (e) { adapterErrors.record('opencode', e, `message ${msg.msg_id}`); continue; }
 
       const role = msgData.role;
       if (!role) continue;
@@ -106,7 +111,8 @@ function getSqliteMessages(sessionId) {
       const contentParts = [];
       for (const part of parts) {
         let partData;
-        try { partData = JSON.parse(part.data); } catch { continue; }
+        try { partData = JSON.parse(part.data); }
+        catch (e) { adapterErrors.record('opencode', e, `part of message ${msg.msg_id}`); continue; }
         const type = partData.type;
 
         if (type === 'text' && partData.text) {
@@ -213,7 +219,10 @@ function getMessagesForSession(sessionId) {
   for (const file of files) {
     const msgPath = path.join(sessionMsgDir, file);
     const msg = readJson(msgPath);
-    if (!msg || !msg.id) continue;
+    // The file was listed, so it exists; failing to decode it drops a message from
+    // the transcript and would let a re-ship overwrite the stored copy with less.
+    if (!msg) { adapterErrors.record('opencode', new Error('unreadable message file'), msgPath); continue; }
+    if (!msg.id) continue;
     rawMsgs.push(msg);
   }
 
@@ -229,8 +238,10 @@ function getMessagesForSession(sessionId) {
       try {
         const partFiles = fs.readdirSync(msgPartDir).filter(f => f.startsWith('prt_') && f.endsWith('.json'));
         for (const partFile of partFiles) {
-          const part = readJson(path.join(msgPartDir, partFile));
+          const partPath = path.join(msgPartDir, partFile);
+          const part = readJson(partPath);
           if (part) parts.push(part);
+          else adapterErrors.record('opencode', new Error('unreadable part file'), partPath);
         }
       } catch { /* skip */ }
     }

@@ -616,13 +616,11 @@ function callRpc(method, body) {
       { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }
     );
     return JSON.parse(result);
-  } catch (e) {
-    // Reached only when the language server was found (see the !ls return above),
-    // so this is a real RPC failure, not "Antigravity isn't installed". Both the
-    // trajectory list and the per-session message reads come through here.
-    adapterErrors.record('antigravity', e, `rpc ${method}`);
-    return null;
-  }
+  } catch { return null; }
+  // Deliberately does NOT record. One failed call is not a failed read: getSteps()
+  // falls back from GetCascadeTrajectorySteps to GetCascadeTrajectory, and the tail
+  // lookup is optional. Recording per attempt would reject chats whose fallback
+  // succeeded. The read paths record once their fallbacks are exhausted.
 }
 
 // ============================================================
@@ -669,6 +667,15 @@ function getSteps(chat) {
   const resp2 = callRpc('GetCascadeTrajectory', { cascadeId: chat.composerId });
   if (resp2 && resp2.trajectory && resp2.trajectory.steps) return resp2.trajectory.steps;
 
+  // Both exhausted. A null from each means the calls themselves failed — the
+  // language server is stopped or the endpoints are unsupported — which is very
+  // different from a cascade that genuinely has no steps. It matters because
+  // getChats() still lists offline chats out of SQLite when the server is down, so
+  // without this the shipper would see a legitimate-looking empty transcript and
+  // overwrite the stored one.
+  if (resp === null && resp2 === null) {
+    adapterErrors.record('antigravity', new Error('language server unreachable — cannot read messages'), chat.composerId);
+  }
   return [];
 }
 
