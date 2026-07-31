@@ -39,9 +39,12 @@ const LEGACY_EXAMPLES = [
 
 export default function SqlViewer() {
   const { dark } = useTheme()
-  // null = flavor not established yet. Guessing wrong offers queries against tables
-  // that do not exist, so nothing is offered until /api/schema says which house this is.
-  const [examples, setExamples] = useState(null)
+  // Three states, and they must stay distinguishable: 'loading' while /api/schema is
+  // in flight, an array once the house's flavor is known, and null when the request
+  // finished without telling us. Guessing wrong offers queries against tables that do
+  // not exist, so nothing is offered until the answer is in — but a page that is
+  // merely still loading must not claim detection failed.
+  const [examples, setExamples] = useState('loading')
   const [sql, setSql] = useState('')
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
@@ -64,14 +67,17 @@ export default function SqlViewer() {
         : tables.includes('sessions_v') ? TYPED_EXAMPLES
           : tables.includes('chats') ? LEGACY_EXAMPLES
             : null
-      if (!ex) return
       setExamples(ex)
+      if (!ex) return
       // Swap the prefilled query only if the user hasn't edited it yet.
       setSql(prev => (prev === '' || prev === TYPED_EXAMPLES[0].sql || prev === LEGACY_EXAMPLES[0].sql) ? ex[0].sql : prev)
-    }).catch(() => {})
+    }).catch(() => setExamples(null))
   }, [])
 
   const runQuery = async () => {
+    // Guard here, not only on the button: ⌘+Enter reaches this directly, and an
+    // empty submit comes back as a bare "sql string required" from /api/query.
+    if (!sql.trim() || loading) return
     setLoading(true)
     setError(null)
     setResult(null)
@@ -211,7 +217,9 @@ export default function SqlViewer() {
       {/* Example queries — withheld until the schema flavor is known, since the
           typed and legacy sets target entirely different tables. */}
       <div className="flex flex-wrap gap-1">
-        {examples === null ? (
+        {examples === 'loading' ? (
+          <span className="text-[11px]" style={txt2Style}>loading examples…</span>
+        ) : examples === null ? (
           <span className="text-[11px]" style={txt2Style}>
             examples unavailable — could not determine the schema from /api/schema
           </span>
