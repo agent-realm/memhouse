@@ -381,9 +381,15 @@ async function cmdDoctor() {
     const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
     const seen = getAllChats().length;
     adapterErrors = getAdapterErrors();
+    // Any adapter that could not be read is a failure, whatever the cause — a
+    // locked or corrupt store loses just as many sessions as a missing binding.
     const blocked = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
-    add(blocked.length === 0, `adapters: ${seen} sessions visible locally${blocked.length ? ` (${blocked.length} adapter${blocked.length > 1 ? 's' : ''} skipped: ${blocked.join(', ')})` : ''}`,
-      blocked.length ? 'npm install -g memhouse --allow-scripts=better-sqlite3' : undefined);
+    const failed = adapterErrors.map((e) => e.source);
+    add(adapterErrors.length === 0,
+      `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''}`,
+      blocked.length ? 'npm install -g memhouse --allow-scripts=better-sqlite3'
+        : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
+          : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
   add(!!pidOf('shipper'), 'shipper daemon', 'memhouse start');
   add(!!pidOf('dashboard'), 'dashboard daemon', 'memhouse start');

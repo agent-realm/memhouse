@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { getAppDataPath } = require('./base');
+const adapterErrors = require('./adapter-errors');
 
 const HOME = os.homedir();
 const CURSOR_CHATS_DIR = path.join(HOME, '.cursor', 'chats');
@@ -273,12 +274,16 @@ function getChats() {
           _type: 'agent-store',
         });
       }
-    } catch { /* skip */ }
+    } catch (e) { adapterErrors.record('cursor', e, dbPath); }
   }
 
   // Source 2: workspaceStorage composers
   let globalDb = null;
-  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); } catch { /* no global db */ }
+  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); }
+  catch (e) {
+    // Absent is normal — Cursor may simply not be installed. Unreadable is not.
+    if (fs.existsSync(GLOBAL_STORAGE_DB)) adapterErrors.record('cursor', e, GLOBAL_STORAGE_DB);
+  }
 
   const modelPref = globalDb ? getModelPreference(globalDb) : null;
 

@@ -35,13 +35,12 @@ npm install -g memhouse --allow-scripts=better-sqlite3
 memhouse onboard          # wizard: discover → configure → ship → start
 ```
 
-**Do not drop `--allow-scripts=better-sqlite3`.** Six adapters — antigravity,
-cursor, goose, opencode, zed, and windsurf (which reports itself as `devin`) —
-read their sessions out of SQLite files,
-and `better-sqlite3` builds its native binding from an install script. npm 12
-blocks install scripts by default, so without the flag those six read nothing and
-you silently ship a partial history. `memhouse discover` and `memhouse doctor`
-both say so when the binding is missing.
+**Do not drop `--allow-scripts=better-sqlite3`.** Five adapters — cursor, goose,
+opencode, zed, and antigravity — read sessions out of SQLite files, and
+`better-sqlite3` builds its native binding from an install script. npm 12 blocks
+install scripts by default, so without the flag those five read nothing and you
+silently ship a partial history. `memhouse discover` and `memhouse doctor` both
+say so when the binding is missing.
 
 To try it without installing, npx takes the same flag — it has to come before the
 package name:

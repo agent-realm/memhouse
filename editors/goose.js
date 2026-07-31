@@ -2,6 +2,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+const adapterErrors = require('./adapter-errors');
+
 const GOOSE_DIR = path.join(os.homedir(), '.local', 'share', 'goose', 'sessions');
 const DB_PATH = path.join(GOOSE_DIR, 'sessions.db');
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'goose', 'config.yaml');
@@ -25,13 +27,19 @@ function getDatabase() {
 function queryDb(sql) {
   if (!fs.existsSync(DB_PATH)) return [];
   const Db = getDatabase();
-  if (!Db) return []; // Fallback if better-sqlite3 not available
+  if (!Db) {
+    adapterErrors.record('goose', new Error('better-sqlite3 unavailable'), DB_PATH);
+    return [];
+  }
   try {
     const db = new Db(DB_PATH, { readonly: true });
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
-  } catch { return []; }
+  } catch (e) {
+    adapterErrors.record('goose', e, DB_PATH);
+    return [];
+  }
 }
 
 // ============================================================

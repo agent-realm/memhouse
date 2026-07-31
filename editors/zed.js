@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 
 const Database = require('better-sqlite3');
+const adapterErrors = require('./adapter-errors');
 
 // Zed stores data in different locations depending on the platform
 // - Windows: %LOCALAPPDATA%\Zed (not Roaming)
@@ -73,7 +74,9 @@ function queryDb(sql) {
     db.close();
     return rows;
   } catch (e) {
-    // Silently fail if database is locked or inaccessible
+    // Locked, inaccessible, or corrupt. Keep the scan alive but say so — silence
+    // here reads as "the user does not use Zed".
+    adapterErrors.record('zed', e, THREADS_DB);
     return [];
   }
 }

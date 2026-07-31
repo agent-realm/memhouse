@@ -11,12 +11,11 @@ ClickHouse >= 26.2 (local server, Cloud, or a kernel house — see
 npm install -g memhouse --allow-scripts=better-sqlite3
 ```
 
-`--allow-scripts=better-sqlite3` is required, not cosmetic. Six adapters
-(antigravity, cursor, goose, opencode, zed, and windsurf — which reports itself as
-`devin`) read SQLite session stores,
-and npm 12 blocks the install script that builds the native binding. Without it
-those six silently return zero sessions and you ship a partial history. Verify with
-step 4 — `memhouse discover` names any adapter it had to skip.
+`--allow-scripts=better-sqlite3` is required, not cosmetic. Five adapters (cursor,
+goose, opencode, zed, antigravity) read SQLite session stores, and npm 12 blocks
+the install script that builds the native binding. Without it those five silently
+return zero sessions and you ship a partial history. Verify with step 4 —
+`memhouse discover` names any adapter it had to skip.
 
 From a checkout instead (contributors): `npm install --no-audit --no-fund` in the
 repo root — its `allowScripts` field already covers the binding — then substitute

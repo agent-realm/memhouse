@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const Database = require('better-sqlite3');
 const { getAppDataPath } = require('./base');
+const adapterErrors = require('./adapter-errors');
 
 const HOME = os.homedir();
 const ANTIGRAVITY_USER_DIR = path.join(getAppDataPath('Antigravity'), 'User');
@@ -241,7 +242,10 @@ function readGlobalStateValue(key) {
     if (typeof v === 'string') return v;
     if (Buffer.isBuffer(v) || v instanceof Uint8Array) return Buffer.from(v).toString('utf-8');
     return v == null ? null : String(v);
-  } catch {
+  } catch (e) {
+    // Only the offline half of getChats() reads this store; live cascades come over
+    // RPC. So a failure here costs some sessions, not all of them.
+    adapterErrors.record('antigravity', e, ANTIGRAVITY_GLOBAL_STORAGE_DB);
     return null;
   } finally {
     if (db) db.close();

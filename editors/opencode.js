@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
+const adapterErrors = require('./adapter-errors');
 
 // OpenCode stores data in XDG-style paths across all platforms
 function getOpenCodeStoragePath() {
@@ -31,7 +32,10 @@ function queryDb(sql) {
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
-  } catch {
+  } catch (e) {
+    // The store exists but could not be read. Returning [] keeps one bad database
+    // from killing the scan, but staying quiet would hide missing sessions.
+    adapterErrors.record('opencode', e, DB_PATH);
     return [];
   }
 }

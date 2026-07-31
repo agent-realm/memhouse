@@ -14,6 +14,7 @@ const commandcode = require('./commandcode');
 const goose = require('./goose');
 const kiro = require('./kiro');
 const codebuff = require('./codebuff');
+const adapterErrorSink = require('./adapter-errors');
 
 const editors = [cursor, devin, antigravity, claude, vscode, zed, opencode, codex, gemini, copilot, copilotJetbrains, cursorAgent, commandcode, goose, kiro, codebuff];
 
@@ -35,16 +36,24 @@ let adapterErrors = [];
 // every SQLite-backed adapter reads zero sessions.
 const MISSING_BINDING = /Could not locate the bindings file|Cannot find module 'better-sqlite3'/;
 
-// Adapters whose session store is a SQLite file. Listed explicitly because each of
-// them swallows its own open() failure and returns [] (e.g. opencode.js queryDb), so
-// a broken binding is invisible from the outside — nothing throws, sessions just
-// vanish. Membership check: grep -l "better-sqlite3" editors/*.js
+// Adapters that read sessions out of a SQLite store, so a dead binding costs
+// sessions. Membership is narrower than `grep -l better-sqlite3 editors/*.js`:
+// windsurf/devin also requires better-sqlite3, but only in getDevinApiKey() for
+// usage — its getChats() is pure language-server RPC, so its sessions survive a
+// broken binding and listing it here would raise a false alarm. antigravity is
+// listed because its *offline* chats come from SQLite, though its live cascades,
+// like devin's, come over RPC — a failure there is partial.
 // Held as module references, not strings, so the reported name always matches the
-// adapter's own `name` (windsurf.js, for one, calls itself "devin").
-const SQLITE_BACKED = [antigravity, cursor, goose, opencode, zed, devin].map((m) => m.name);
+// adapter's own `name`.
+const SQLITE_BACKED = [antigravity, cursor, goose, opencode, zed].map((m) => m.name);
 
-// Probe once: construct an in-memory database. Loading the module is not enough —
-// better-sqlite3's lib/index.js resolves the native binding lazily, on first open.
+// Construct an in-memory database. Loading the module is not enough — better-sqlite3
+// resolves the native binding lazily, on first open.
+//
+// This only answers "can SQLite work at all". It deliberately cannot tell whether a
+// given editor's real store is readable: permissions, locking, corruption, and
+// SQLCipher all pass this probe and fail later. Those are reported by the adapters
+// themselves through adapter-errors.
 function probeSqlite() {
   try {
     const Database = require('better-sqlite3');
@@ -57,7 +66,18 @@ function probeSqlite() {
   }
 }
 
+// Cache only success. A failed probe must be retried: a long-running shipper daemon
+// that warned about a missing binding should notice once the user installs it,
+// rather than repeating the warning for the life of the process.
 let sqliteProbe = null;
+function sqliteStatus() {
+  if (sqliteProbe === null) {
+    const result = probeSqlite();
+    if (result.available) sqliteProbe = result;
+    return result;
+  }
+  return sqliteProbe;
+}
 
 /**
  * Get all chats from all editor adapters, sorted by most recent first.
@@ -65,6 +85,7 @@ let sqliteProbe = null;
 function getAllChats() {
   const chats = [];
   adapterErrors = [];
+  adapterErrorSink.reset();
   for (const editor of editors) {
     try {
       const editorChats = editor.getChats();
@@ -98,17 +119,24 @@ function getAllChats() {
  * for directly and reported against every SQLite-backed adapter at once.
  */
 function getAdapterErrors() {
-  if (sqliteProbe === null) sqliteProbe = probeSqlite();
   const errors = adapterErrors.slice();
-  if (!sqliteProbe.available) {
+  for (const e of adapterErrorSink.recorded()) {
+    errors.push({ source: e.source, message: e.message, detail: e.detail, missingBinding: MISSING_BINDING.test(e.message) });
+  }
+  const sqlite = sqliteStatus();
+  if (!sqlite.available) {
     const already = new Set(errors.map((e) => e.source));
     for (const source of SQLITE_BACKED) {
       if (!already.has(source)) {
-        errors.push({ source, message: sqliteProbe.message, missingBinding: sqliteProbe.missingBinding });
+        errors.push({ source, message: sqlite.message, missingBinding: sqlite.missingBinding });
       }
     }
   }
-  return errors;
+  // One line per adapter, not one per failed query — a broken store is usually hit
+  // many times in a single scan.
+  const bySource = new Map();
+  for (const e of errors) if (!bySource.has(e.source)) bySource.set(e.source, e);
+  return Array.from(bySource.values());
 }
 
 /**

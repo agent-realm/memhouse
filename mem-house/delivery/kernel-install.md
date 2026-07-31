@@ -38,7 +38,7 @@ That writes `~/.memhouse/env`, applies the schema, and runs the first ship.
 `memhouse start` then keeps it fresh on a 300s loop.
 
 Keep `--allow-scripts=better-sqlite3`: without it npm 12 leaves `better-sqlite3`
-with no native binding and the six SQLite-backed adapters ship nothing, silently.
+with no native binding and the five SQLite-backed adapters ship nothing, silently.
 `memhouse discover` names any adapter it had to skip.
 
 The kernel never runs or reads any of this — it is content-blind; the shipper is
