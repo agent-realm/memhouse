@@ -1,21 +1,31 @@
 # mem-house — agent install
 
 Imperative steps for an AI coding agent installing mem-house on a machine. Execute
-in order; every command is copy-pasteable. Prereqs: Node >= 20.19, a reachable
+in order; every command is copy-pasteable. Prereqs: Node >= 20.19 and a reachable
 ClickHouse >= 26.2 (local server, Cloud, or a kernel house — see
-`kernel-install.md` for the kernel path), and this repo checked out.
+`kernel-install.md` for the kernel path). No checkout required — memhouse is on npm.
 
 ## 1. Install
 
 ```bash
-cd <repo>            # the memhouse checkout
-npm install --no-audit --no-fund
+npm install -g memhouse --allow-scripts=better-sqlite3
 ```
+
+`--allow-scripts=better-sqlite3` is required, not cosmetic. Six adapters
+(antigravity, cursor, goose, opencode, zed, and windsurf — which reports itself as
+`devin`) read SQLite session stores,
+and npm 12 blocks the install script that builds the native binding. Without it
+those six silently return zero sessions and you ship a partial history. Verify with
+step 4 — `memhouse discover` names any adapter it had to skip.
+
+From a checkout instead (contributors): `npm install --no-audit --no-fund` in the
+repo root — its `allowScripts` field already covers the binding — then substitute
+`node bin/memhouse.js` for `memhouse` below.
 
 ## 2. Configure the connection
 
-Write `~/.memhouse/env` (the installer can do this interactively — `bash
-mem-house/delivery/install.sh` — or write it yourself):
+Write `~/.memhouse/env` (or run `memhouse install --yes --url … --user … --password
+… --db …`, which writes it for you):
 
 ```bash
 mkdir -p ~/.memhouse
@@ -31,9 +41,7 @@ chmod 600 ~/.memhouse/env
 ## 3. Create the schema and run the first ship
 
 ```bash
-set -a; source ~/.memhouse/env; set +a
-node mem-house/shipper/ship.js --ensure-schema
-node mem-house/shipper/ship.js            # first full parse-on-client ship
+memhouse install --yes     # applies the schema, then runs the first full ship
 ```
 
 Expected output shape: `[mem-house] shipped N sessions (0 skipped) → M msg rows, T
@@ -42,34 +50,39 @@ tool rows in Xs` with N in the hundreds on a machine with real agent usage.
 ## 4. Verify
 
 ```bash
-node mem-house/shipper/ship.js --stats
+memhouse discover     # which adapters were read, and which were SKIPPED
+memhouse stats        # per-source counts now in the house
 ```
 
-Expect one row per source (claude-code, codex, gemini-cli, …) with non-zero
-sessions/messages. Or verify by SQL:
+Read `discover` first. It prints one line per editor it found sessions for, and
+warns by name about any adapter it had to skip — that warning is the only signal
+that step 1's `--allow-scripts` flag was missed and six editors are dark.
+
+`stats` should show one row per source (claude-code, codex, gemini-cli, …) with
+non-zero sessions/messages. Or verify by SQL:
 
 ```bash
 curl -s -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" "$MEMHOUSE_URL/?database=$MEMHOUSE_DB" \
   --data-binary "SELECT source, count() FROM sessions_v GROUP BY source SETTINGS final=1 FORMAT PrettyCompact"
 ```
 
-## 5. Start the dashboard (optional)
+## 5. Start the dashboard and the shipper loop
 
 ```bash
-cd ui && npm install && npm run build && cd ..   # first time only (builds public/)
-node mem-house/server/server.js                  # → http://localhost:4640
+memhouse start        # both as background daemons; UI is prebuilt in the package
+memhouse status       # daemons, connection, counts, freshness (--json for agents)
 ```
 
-## 6. Keep it fresh
+The dashboard comes up on http://localhost:4640. `start` also runs the incremental
+re-ship loop, so this replaces any separate cron. `memhouse stop` ends both.
 
-Re-ship on a schedule (incremental — cheap):
+## 6. Install the skills (optional, for Claude Code)
 
 ```bash
-node mem-house/shipper/ship.js --loop 300 &
+memhouse plugins install claude
 ```
 
-## 7. Install the skills (optional, for Claude Code)
-
-Copy `mem-house/delivery/skills/*` into the target agent's skills directory
-(e.g. `$CLAUDE_CONFIG_DIR/skills/`), or install `mem-house/delivery/plugin/` as a
-Claude Code plugin. The skills read the connection from `~/.memhouse/env`.
+Installs the `memhouse-search` / `memhouse-sessions` / `memhouse-sql` skills into
+the agent's skills directory; they read the connection from `~/.memhouse/env`.
+`memhouse plugins list` shows what is installed, `memhouse plugins remove claude`
+undoes it.

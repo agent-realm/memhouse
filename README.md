@@ -31,13 +31,27 @@ memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
 ## Quickstart — the `memhouse` CLI
 
 ```bash
-npx memhouse onboard      # wizard: discover → configure → ship → start
+npm install -g memhouse --allow-scripts=better-sqlite3
+memhouse onboard          # wizard: discover → configure → ship → start
 ```
 
-While the package is private, run it from the repo (`npm install` once, then
-`node bin/memhouse.js …` or `npm link` for a global `memhouse`), or
-`npx github:agent-realm/memhouse …` with git auth. The public npm
-name `memhouse` is reserved for release.
+**Do not drop `--allow-scripts=better-sqlite3`.** Six adapters — antigravity,
+cursor, goose, opencode, zed, and windsurf (which reports itself as `devin`) —
+read their sessions out of SQLite files,
+and `better-sqlite3` builds its native binding from an install script. npm 12
+blocks install scripts by default, so without the flag those six read nothing and
+you silently ship a partial history. `memhouse discover` and `memhouse doctor`
+both say so when the binding is missing.
+
+To try it without installing, npx takes the same flag — it has to come before the
+package name:
+
+```bash
+npx --allow-scripts=better-sqlite3 -y memhouse discover
+```
+
+Working from a checkout instead: `npm install` (the repo's `allowScripts` field
+covers the binding), then `node bin/memhouse.js …`.
 
 ```text
 memhouse onboard | install | setup | discover | uninstall | reset

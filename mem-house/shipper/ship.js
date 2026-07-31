@@ -28,7 +28,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
-const { getAllChats, getMessages, resetCaches } = require('../../editors');
+const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -262,6 +262,19 @@ async function runShip(client, opts = {}) {
   // otherwise: ReplacingMergeTree collapses same-key rows only).
   const existing = await loadExisting(client);
   const chats = getAllChats();
+
+  // An adapter that cannot load contributes zero sessions, which is indistinguishable
+  // from an editor the user does not have — so the shipper would silently ship a
+  // partial history forever. Say so on every pass.
+  const adapterErrors = getAdapterErrors();
+  const noBinding = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
+  if (noBinding.length) {
+    console.log(`[mem-house] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
+    console.log('[mem-house]          fix: npm install -g memhouse --allow-scripts=better-sqlite3');
+  }
+  for (const e of adapterErrors.filter((x) => !x.missingBinding)) {
+    console.log(`[mem-house] WARNING: ${e.source} skipped — ${e.message}`);
+  }
 
   const batches = { sessions: [], messages: [], tool_calls: [] };
   const flush = async (table) => {

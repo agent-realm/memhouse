@@ -186,14 +186,30 @@ Agents       plugins              list | install claude [--target DIR] | remove 
 Config: flags > MEMHOUSE_* env > ${ENV_FILE.replace(os.homedir(), '~')} > defaults.
 `;
 
+// A skipped adapter and an editor the user does not have look identical — both
+// contribute zero sessions. Say which happened, and how to fix the one that is fixable.
+function printAdapterErrors(errors) {
+  if (!errors || errors.length === 0) return;
+  const blocked = errors.filter((e) => e.missingBinding);
+  const other = errors.filter((e) => !e.missingBinding);
+  if (blocked.length) {
+    console.log(warn(`${blocked.length} adapter${blocked.length > 1 ? 's' : ''} skipped — better-sqlite3 has no native binding: ${blocked.map((e) => e.source).join(', ')}`));
+    console.log('  their sessions are NOT being shipped. npm >= 12 blocks install scripts by default; rebuild with:');
+    console.log('    npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log('  (from a checkout: npm install --no-audit --no-fund, which package.json already allows)');
+  }
+  for (const e of other) console.log(warn(`${e.source.padEnd(16)} skipped: ${e.message}`));
+}
+
 async function cmdDiscover() {
   const out = { editors: [], clickhouse: [], config: null, memoryHouse: false };
   process.stdout.write(JSON_OUT ? '' : 'Scanning editors (reading local session stores)…\n');
   try {
-    const { getAllChats } = require(path.join(REPO_ROOT, 'editors'));
+    const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
     const counts = {};
     for (const c of getAllChats()) counts[c.source] = (counts[c.source] || 0) + 1;
     out.editors = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([source, sessions]) => ({ source, sessions }));
+    out.adapterErrors = getAdapterErrors();
   } catch (e) { out.editorsError = e.message; }
 
   for (const url of [...new Set([resolveConfig().url, 'http://localhost:8123'])]) {
@@ -220,6 +236,7 @@ async function cmdDiscover() {
   console.log('\nEditors with sessions on this machine:');
   if (out.editors.length === 0) console.log(warn('none found' + (out.editorsError ? ` (${out.editorsError})` : '')));
   for (const e of out.editors) console.log(ok(`${e.source.padEnd(16)} ${e.sessions} sessions`));
+  printAdapterErrors(out.adapterErrors);
   console.log('\nClickHouse endpoints:');
   for (const p of out.clickhouse) {
     if (!p.reachable) console.log(bad(`${p.url} — unreachable`));
@@ -359,9 +376,14 @@ async function cmdDoctor() {
     add((u[0]?.u ?? '') !== '' || (await chRows(cfg, 'SELECT count() AS c FROM sessions'))[0].c === 0,
       `identity stamping (user_id='${u[0]?.u ?? ''}')`, 'writers must use async_insert=0');
   } catch { add(false, 'identity stamping', 'schema missing?'); }
+  let adapterErrors = [];
   try {
-    const { getAllChats } = require(path.join(REPO_ROOT, 'editors'));
-    add(true, `adapters: ${getAllChats().length} sessions visible locally`);
+    const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
+    const seen = getAllChats().length;
+    adapterErrors = getAdapterErrors();
+    const blocked = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
+    add(blocked.length === 0, `adapters: ${seen} sessions visible locally${blocked.length ? ` (${blocked.length} adapter${blocked.length > 1 ? 's' : ''} skipped: ${blocked.join(', ')})` : ''}`,
+      blocked.length ? 'npm install -g memhouse --allow-scripts=better-sqlite3' : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
   add(!!pidOf('shipper'), 'shipper daemon', 'memhouse start');
   add(!!pidOf('dashboard'), 'dashboard daemon', 'memhouse start');
