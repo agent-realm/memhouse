@@ -132,7 +132,15 @@ function getWorkspaceMap() {
       const ws = JSON.parse(fs.readFileSync(wsJson, 'utf-8'));
       const folder = (ws.folder || '').replace('file://', '');
       map.push({ hash, folder, stateDb });
-    } catch { /* skip */ }
+    } catch (e) {
+      // The descriptor is only where the folder NAME comes from — state.vscdb holds
+      // the sessions and was already confirmed present. Dropping the whole workspace
+      // over an unreadable workspace.json would take every composer in it out of
+      // discovery, where nothing downstream can notice them missing. Keep the
+      // workspace with no folder, and record why the name is absent.
+      adapterErrors.record('cursor', e, wsJson);
+      map.push({ hash, folder: '', stateDb });
+    }
   }
   return map;
 }
@@ -182,7 +190,12 @@ function getComposerBubbles(globalDb, composerId) {
     try {
       const obj = JSON.parse(row.value);
       bubbles.push(obj);
-    } catch { /* binary blob, skip */ }
+    } catch (e) {
+      // Historically treated as "binary blob, skip", but a row that will not decode
+      // is a message missing from the transcript either way. Unreported, the
+      // shortened result overwrites the stored one on a re-ship.
+      adapterErrors.record('cursor', e, `bubble ${row.key || '(unknown)'}`);
+    }
   }
   return bubbles;
 }
@@ -310,7 +323,12 @@ function getChats() {
             "SELECT count(*) as cnt FROM cursorDiskKV WHERE key LIKE ?"
           ).get(`bubbleId:${h.composerId}:%`);
           bubbleCount = countRow ? countRow.cnt : 0;
-        } catch { /* skip */ }
+        } catch (e) {
+          // Silently falling back to 0 is not harmless: bubbleCount feeds the
+          // shipper's skip predicate (prev.bc >= chat.bubbleCount), so a zero makes
+          // a grown session look complete.
+          adapterErrors.record('cursor', e, `bubble count for ${h.composerId}`);
+        }
       }
       chats.push({
         source: 'cursor',
