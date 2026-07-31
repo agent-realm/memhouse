@@ -55,7 +55,7 @@ memhouse stats        # per-source counts now in the house
 
 Read `discover` first. It prints one line per editor it found sessions for, and
 warns by name about any adapter it had to skip — that warning is the only signal
-that step 1's `--allow-scripts` flag was missed and six editors are dark.
+that step 1's `--allow-scripts` flag was missed and five editors are dark.
 
 `stats` should show one row per source (claude-code, codex, gemini-cli, …) with
 non-zero sessions/messages. Or verify by SQL:
