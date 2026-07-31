@@ -180,7 +180,10 @@ function getAllSessions() {
     if (!fs.statSync(projectDir).isDirectory()) continue;
 
     let files;
-    try { files = fs.readdirSync(projectDir).filter(f => f.startsWith('ses_') && f.endsWith('.json')); } catch { continue; }
+    // Discovery-time drop: the project directory is there but will not enumerate, so
+    // every session under it vanishes before anything downstream can miss it.
+    try { files = fs.readdirSync(projectDir).filter(f => f.startsWith('ses_') && f.endsWith('.json')); }
+    catch (e) { adapterErrors.record('opencode', e, projectDir); continue; }
 
     for (const file of files) {
       const filePath = path.join(projectDir, file);
@@ -193,13 +196,20 @@ function getAllSessions() {
   return sessions;
 }
 
+// Returns the message count, or null when it could not be determined. Null and 0
+// are NOT interchangeable: bubbleCount feeds the shipper's skip predicate, and a
+// zero standing in for "unknown" makes `prev.bc >= 0` trivially true, so the session
+// is skipped before anything can read it — stale forever, on every incremental pass.
 function getMessageCount(sessionId) {
   const sessionMsgDir = path.join(MESSAGE_DIR, sessionId);
   if (!fs.existsSync(sessionMsgDir)) return 0;
 
   try {
     return fs.readdirSync(sessionMsgDir).filter(f => f.startsWith('msg_') && f.endsWith('.json')).length;
-  } catch { return 0; }
+  } catch (e) {
+    adapterErrors.record('opencode', e, sessionMsgDir);
+    return null;
+  }
 }
 
 function getMessagesForSession(sessionId) {
@@ -314,6 +324,7 @@ function getChats() {
   const fileSessions = getAllSessions();
   for (const s of fileSessions) {
     seen.add(s.id);
+    const msgCount = getMessageCount(s.id);
     chats.push({
       source: 'opencode',
       composerId: s.id,
@@ -323,7 +334,8 @@ function getChats() {
       mode: s.mode || 'opencode',
       folder: s.directory || null,
       encrypted: false,
-      bubbleCount: getMessageCount(s.id),
+      bubbleCount: msgCount ?? 0,
+      _countUnknown: msgCount === null,
       _agent: s.agent,
       _model: s.modelID,
       _provider: s.providerID,
