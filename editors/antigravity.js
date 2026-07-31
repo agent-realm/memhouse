@@ -665,16 +665,28 @@ function getSteps(chat) {
 
   // Fallback to old method
   const resp2 = callRpc('GetCascadeTrajectory', { cascadeId: chat.composerId });
-  if (resp2 && resp2.trajectory && resp2.trajectory.steps) return resp2.trajectory.steps;
+  const fallbackSteps = (resp2 && resp2.trajectory && Array.isArray(resp2.trajectory.steps))
+    ? resp2.trajectory.steps
+    : null;
+  if (fallbackSteps && fallbackSteps.length > 0) return fallbackSteps;
 
-  // Both exhausted. A null from each means the calls themselves failed — the
-  // language server is stopped or the endpoints are unsupported — which is very
-  // different from a cascade that genuinely has no steps. It matters because
-  // getChats() still lists offline chats out of SQLite when the server is down, so
-  // without this the shipper would see a legitimate-looking empty transcript and
-  // overwrite the stored one.
-  if (resp === null && resp2 === null) {
+  // Nothing produced steps. Two distinct ways that happens, and both must be
+  // reported, because either one yields an empty transcript that would overwrite
+  // the stored one on a re-ship:
+  //
+  //   - Both calls returned null: the calls themselves failed. The language server
+  //     is stopped or neither endpoint is supported. This matters even when
+  //     Antigravity is closed, because getChats() still lists offline cascades out
+  //     of SQLite, so the chat looks live while its messages are unreachable.
+  //   - A call answered but carried no steps, for a cascade the listing said HAS
+  //     steps. getChats() preserves summary.stepCount as _stepCount, which is what
+  //     separates this from a cascade that is legitimately empty.
+  const rpcFailed = resp === null && resp2 === null;
+  const expected = Number(chat._stepCount) || 0;
+  if (rpcFailed) {
     adapterErrors.record('antigravity', new Error('language server unreachable — cannot read messages'), chat.composerId);
+  } else if (expected > 0) {
+    adapterErrors.record('antigravity', new Error(`no steps returned for a cascade reporting ${expected} steps`), chat.composerId);
   }
   return [];
 }

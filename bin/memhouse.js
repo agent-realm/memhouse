@@ -387,12 +387,22 @@ async function cmdDoctor() {
     // doctor reported a clean bill of health. Read the newest session per source so
     // the message readers actually run; that is one parse per editor, not a full scan.
     const probed = new Set();
+    const thrown = [];
     for (const chat of chats) {
       if (probed.has(chat.source)) continue;
       probed.add(chat.source);
-      try { getMessages(chat); } catch { /* recorded below, or surfaced by the count */ }
+      // Not every reader reports through the sink — some throw instead, e.g.
+      // Cursor's agent-store path, where discovery reads `meta` fine but
+      // collectStoreMessages() can throw on a corrupt `blobs` table. Swallowing
+      // that here would discard the only signal and leave doctor green while the
+      // shipper withholds every one of those sessions.
+      try { getMessages(chat); }
+      catch (e) { thrown.push({ source: chat.source, message: ((e && e.message) || String(e)).split('\n')[0] }); }
     }
     adapterErrors = getAdapterErrors();
+    for (const t of thrown) {
+      if (!adapterErrors.some((e) => e.source === t.source)) adapterErrors.push({ ...t, missingBinding: false });
+    }
     // Any adapter that could not be read is a failure, whatever the cause — a
     // locked or corrupt store loses just as many sessions as a missing binding.
     const blocked = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
