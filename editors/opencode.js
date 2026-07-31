@@ -243,7 +243,12 @@ function getMessagesForSession(sessionId) {
           if (part) parts.push(part);
           else adapterErrors.record('opencode', new Error('unreadable part file'), partPath);
         }
-      } catch { /* skip */ }
+      } catch (e) {
+        // The directory exists (checked above) but cannot be enumerated, so none of
+        // the per-file records above ran and the message collapses to a bare [role]
+        // placeholder. Unreported, that truncation would overwrite stored content.
+        adapterErrors.record('opencode', e, msgPartDir);
+      }
     }
 
     // Build content from parts

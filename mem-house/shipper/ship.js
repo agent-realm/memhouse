@@ -322,14 +322,17 @@ async function runShip(client, opts = {}) {
     const errsBefore = adapterErrorSink.recorded().length;
     const rows = rowsForChat(chat, host);
     const failedHere = adapterErrorSink.recorded().slice(errsBefore).some((e) => e.source === chat.source);
-    if (!rows) { unreadable++; continue; } // write nothing → retried next pass
-    // A failed read yields a short or empty transcript. The damage is doing that to
-    // a session already in the house, because the re-ship below deletes its rows
-    // first: complete history replaced by a partial one. So refuse only then.
-    // A session with nothing stored yet has nothing to lose — ship what was readable
-    // rather than withholding it forever over a record that may never decode. Either
-    // way the failure is warned about at the end of the pass.
-    if (failedHere && prev) { unreadable++; continue; }
+    // Write nothing on a failed read, whether or not the session is already stored.
+    //
+    // Shipping a partial first read looks tempting — nothing is there to destroy —
+    // but it is a trap: message_count would be written from the partial rows, so
+    // prev.intact becomes true, prev.bc already matches the source, the timestamp is
+    // unchanged, and the skip predicate above then withholds the session forever.
+    // The truncation would become permanent AND the warning would stop, because the
+    // adapter is never asked to read it again. Withholding keeps the session out of
+    // the skip predicate entirely, so every pass retries it and re-reports it until
+    // the underlying store is readable.
+    if (!rows || failedHere) { unreadable++; continue; }
     if (prev) {
       // Known session being re-shipped: clear its old rows BEFORE inserting so a
       // shorter re-parse can't leave stale seq/idx tails. A crash between the
