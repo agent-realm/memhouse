@@ -280,6 +280,12 @@ function getChats() {
           _lastUsedModel: meta.lastUsedModel || null,
           _type: 'agent-store',
         });
+      } else {
+        // The database opened but its meta row would not decode, so this session is
+        // dropped here at discovery — before doctor's probes or the shipper ever see
+        // it. Nothing downstream can notice a chat that was never listed, which is
+        // why it has to be recorded at the point of omission.
+        adapterErrors.record('cursor', new Error('agent-store meta row could not be decoded'), dbPath);
       }
     } catch (e) { adapterErrors.record('cursor', e, dbPath); }
   }

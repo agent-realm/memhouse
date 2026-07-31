@@ -97,7 +97,11 @@ function getChats() {
   // --- Legacy JSONL files ---
   if (fs.existsSync(GOOSE_DIR)) {
     let files;
-    try { files = fs.readdirSync(GOOSE_DIR).filter(f => f.endsWith('.jsonl')); } catch { files = []; }
+    // The directory exists (checked above); if it will not enumerate, every legacy
+    // jsonl session disappears at discovery and nothing downstream can miss what it
+    // never saw.
+    try { files = fs.readdirSync(GOOSE_DIR).filter(f => f.endsWith('.jsonl')); }
+    catch (e) { adapterErrors.record('goose', e, GOOSE_DIR); files = []; }
 
     for (const file of files) {
       const sessionId = file.replace('.jsonl', '');
@@ -120,7 +124,12 @@ function getChats() {
           _fullPath: fullPath,
           _model: configModel,
         });
-      } catch { /* skip */ }
+      } catch (e) {
+        // Same shape one level down: an unstattable or unparseable session file is
+        // omitted from the listing entirely, so it is invisible to doctor and the
+        // shipper alike.
+        adapterErrors.record('goose', e, fullPath);
+      }
     }
   }
 
