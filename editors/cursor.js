@@ -317,6 +317,7 @@ function getChats() {
     const headers = getComposerHeaders(stateDb);
     for (const h of headers) {
       let bubbleCount = 0;
+      let countUnknown = false;
       if (globalDb) {
         try {
           const countRow = globalDb.prepare(
@@ -324,10 +325,15 @@ function getChats() {
           ).get(`bubbleId:${h.composerId}:%`);
           bubbleCount = countRow ? countRow.cnt : 0;
         } catch (e) {
-          // Silently falling back to 0 is not harmless: bubbleCount feeds the
-          // shipper's skip predicate (prev.bc >= chat.bubbleCount), so a zero makes
-          // a grown session look complete.
+          // A failed count is NOT a count of zero, and the difference decides
+          // whether this session ever updates again. bubbleCount feeds the shipper's
+          // skip predicate (prev.bc >= chat.bubbleCount); left at 0 that is
+          // trivially true, so a grown transcript stays stale on every incremental
+          // pass. Recording alone does not save it either — the skip is evaluated
+          // before any per-chat error guard, so the chat is dropped before the guard
+          // can see it. Flag it instead, and let the predicate refuse to skip.
           adapterErrors.record('cursor', e, `bubble count for ${h.composerId}`);
+          countUnknown = true;
         }
       }
       chats.push({
@@ -339,6 +345,7 @@ function getChats() {
         mode: h.mode,
         folder,
         bubbleCount,
+        _countUnknown: countUnknown,
         _type: 'workspace',
         _modelPref: modelPref,
       });

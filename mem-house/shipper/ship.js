@@ -159,7 +159,15 @@ const TOOL_CALL_RE = /\[tool-call: ([^(\]]+)/g;
 // absorbs the incremental skip for stable-empty chats).
 function rowsForChat(chat, host) {
   let messages;
-  try { messages = getMessages(chat) || []; } catch { return null; }
+  try { messages = getMessages(chat) || []; }
+  catch (e) {
+    // Some readers throw instead of reporting through adapter-errors — Cursor's
+    // agent-store path on a bad blobs table, for one. Converting that to a bare
+    // `unreadable` count would leave the end-of-pass report with nothing to print,
+    // so operators would see a number rising every pass and no cause anywhere.
+    adapterErrorSink.record(chat.source, e, chat.composerId);
+    return null;
+  }
 
   const source = chat.source;
   // Canonical globally-unique session id: '<source>:<adapter-local id>'.
@@ -310,7 +318,11 @@ async function runShip(client, opts = {}) {
       // row count == recorded message_count) so an interrupted re-ship — even one
       // that died mid-flush leaving a partial transcript — repairs itself on the
       // next pass instead of being skipped forever.
-      if (notNewer && prev.bc >= (chat.bubbleCount || 0) && prev.intact) { skipped++; continue; }
+      // _countUnknown means the adapter could not determine this chat's message
+      // count, so bubbleCount is a placeholder rather than a measurement. Skipping on
+      // it would compare against a number that means nothing — `prev.bc >= 0` is
+      // trivially true — and the session would stay stale forever. Re-read instead.
+      if (notNewer && !chat._countUnknown && prev.bc >= (chat.bubbleCount || 0) && prev.intact) { skipped++; continue; }
     }
 
     // rowsForChat returns null only when getMessages() *throws*. An adapter that
