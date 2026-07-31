@@ -23,16 +23,23 @@ the executor (running as the ego, the `kernel` user) creates database `memhouse`
 (`realm_user` profile), and owner grants. It returns a one-time **credential** —
 rotate on first connect (`issue-credential{user:'memhouse_root'}`).
 
-## 2. Owner sets up the house (from this repo)
+## 2. Owner sets up the house
 
 ```bash
-export MEMHOUSE_URL=https://<kernel-host>:8443
-export MEMHOUSE_USER=memhouse_root
-export MEMHOUSE_PASSWORD=<credential-from-provision>
-export MEMHOUSE_DB=memhouse
-node mem-house/shipper/ship.js --ensure-schema
-node mem-house/shipper/ship.js          # first ship; then --loop 300 to keep fresh
+npm install -g memhouse --allow-scripts=better-sqlite3
+memhouse install --yes \
+  --url https://<kernel-host>:8443 \
+  --user memhouse_root \
+  --password <credential-from-provision> \
+  --db memhouse
 ```
+
+That writes `~/.memhouse/env`, applies the schema, and runs the first ship.
+`memhouse start` then keeps it fresh on a 300s loop.
+
+Keep `--allow-scripts=better-sqlite3`: without it npm 12 leaves `better-sqlite3`
+with no native binding and the five SQLite-backed adapters ship nothing, silently.
+`memhouse discover` names any adapter it had to skip.
 
 The kernel never runs or reads any of this — it is content-blind; the shipper is
 the agency's own resident, a deterministic `worker` on a loop (no LLM, not an
@@ -69,7 +76,7 @@ Pick one; do not mix on the same role.
 ## 5. Verify
 
 ```bash
-node mem-house/shipper/ship.js --stats      # per-source counts as the owner
+memhouse stats                              # per-source counts as the owner
 # as a member (own-only): counts reflect only that member's rows
 curl -s -u "alice:<pw>" "$MEMHOUSE_URL/?database=memhouse" \
   --data-binary "SELECT count() FROM sessions_v SETTINGS final=1"

@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
+const adapterErrors = require('./adapter-errors');
 
 // OpenCode stores data in XDG-style paths across all platforms
 function getOpenCodeStoragePath() {
@@ -31,7 +32,10 @@ function queryDb(sql) {
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
-  } catch {
+  } catch (e) {
+    // The store exists but could not be read. Returning [] keeps one bad database
+    // from killing the scan, but staying quiet would hide missing sessions.
+    adapterErrors.record('opencode', e, DB_PATH);
     return [];
   }
 }
@@ -90,7 +94,12 @@ function getSqliteMessages(sessionId) {
     const result = [];
     for (const msg of messages) {
       let msgData;
-      try { msgData = JSON.parse(msg.msg_data); } catch { continue; }
+      // A record we cannot decode is dropped from the transcript. Silently, that
+      // yields a TRUNCATED history that looks complete — and a re-ship would replace
+      // the full stored transcript with the shortened one. Report it so the shipper
+      // refuses to overwrite good data with a partial read.
+      try { msgData = JSON.parse(msg.msg_data); }
+      catch (e) { adapterErrors.record('opencode', e, `message ${msg.msg_id}`); continue; }
 
       const role = msgData.role;
       if (!role) continue;
@@ -102,7 +111,8 @@ function getSqliteMessages(sessionId) {
       const contentParts = [];
       for (const part of parts) {
         let partData;
-        try { partData = JSON.parse(part.data); } catch { continue; }
+        try { partData = JSON.parse(part.data); }
+        catch (e) { adapterErrors.record('opencode', e, `part of message ${msg.msg_id}`); continue; }
         const type = partData.type;
 
         if (type === 'text' && partData.text) {
@@ -143,7 +153,10 @@ function getSqliteMessages(sessionId) {
 
     db.close();
     return result;
-  } catch {
+  } catch (e) {
+    // Message reads must report too, not just the session scan: an empty transcript
+    // is written over the stored one on re-ship.
+    adapterErrors.record('opencode', e, DB_PATH);
     return [];
   }
 }
@@ -167,26 +180,41 @@ function getAllSessions() {
     if (!fs.statSync(projectDir).isDirectory()) continue;
 
     let files;
-    try { files = fs.readdirSync(projectDir).filter(f => f.startsWith('ses_') && f.endsWith('.json')); } catch { continue; }
+    // Discovery-time drop: the project directory is there but will not enumerate, so
+    // every session under it vanishes before anything downstream can miss it.
+    try { files = fs.readdirSync(projectDir).filter(f => f.startsWith('ses_') && f.endsWith('.json')); }
+    catch (e) { adapterErrors.record('opencode', e, projectDir); continue; }
 
     for (const file of files) {
       const filePath = path.join(projectDir, file);
       const data = readJson(filePath);
       if (data && data.id) {
         sessions.push({ ...data, _filePath: filePath });
+      } else {
+        // The file was listed, so it exists. Failing to decode it drops the session
+        // from discovery entirely — it reaches neither doctor nor the shipper, and
+        // nothing downstream can miss what it never saw.
+        adapterErrors.record('opencode', new Error('unreadable session metadata file'), filePath);
       }
     }
   }
   return sessions;
 }
 
+// Returns the message count, or null when it could not be determined. Null and 0
+// are NOT interchangeable: bubbleCount feeds the shipper's skip predicate, and a
+// zero standing in for "unknown" makes `prev.bc >= 0` trivially true, so the session
+// is skipped before anything can read it — stale forever, on every incremental pass.
 function getMessageCount(sessionId) {
   const sessionMsgDir = path.join(MESSAGE_DIR, sessionId);
   if (!fs.existsSync(sessionMsgDir)) return 0;
 
   try {
     return fs.readdirSync(sessionMsgDir).filter(f => f.startsWith('msg_') && f.endsWith('.json')).length;
-  } catch { return 0; }
+  } catch (e) {
+    adapterErrors.record('opencode', e, sessionMsgDir);
+    return null;
+  }
 }
 
 function getMessagesForSession(sessionId) {
@@ -194,13 +222,22 @@ function getMessagesForSession(sessionId) {
   if (!fs.existsSync(sessionMsgDir)) return [];
 
   let files;
-  try { files = fs.readdirSync(sessionMsgDir).filter(f => f.startsWith('msg_') && f.endsWith('.json')); } catch { return []; }
+  try { files = fs.readdirSync(sessionMsgDir).filter(f => f.startsWith('msg_') && f.endsWith('.json')); }
+  catch (e) {
+    // The directory exists (checked above) but is unreadable — report it, or the
+    // empty result overwrites the stored transcript on re-ship.
+    adapterErrors.record('opencode', e, sessionMsgDir);
+    return [];
+  }
 
   const rawMsgs = [];
   for (const file of files) {
     const msgPath = path.join(sessionMsgDir, file);
     const msg = readJson(msgPath);
-    if (!msg || !msg.id) continue;
+    // The file was listed, so it exists; failing to decode it drops a message from
+    // the transcript and would let a re-ship overwrite the stored copy with less.
+    if (!msg) { adapterErrors.record('opencode', new Error('unreadable message file'), msgPath); continue; }
+    if (!msg.id) continue;
     rawMsgs.push(msg);
   }
 
@@ -216,10 +253,17 @@ function getMessagesForSession(sessionId) {
       try {
         const partFiles = fs.readdirSync(msgPartDir).filter(f => f.startsWith('prt_') && f.endsWith('.json'));
         for (const partFile of partFiles) {
-          const part = readJson(path.join(msgPartDir, partFile));
+          const partPath = path.join(msgPartDir, partFile);
+          const part = readJson(partPath);
           if (part) parts.push(part);
+          else adapterErrors.record('opencode', new Error('unreadable part file'), partPath);
         }
-      } catch { /* skip */ }
+      } catch (e) {
+        // The directory exists (checked above) but cannot be enumerated, so none of
+        // the per-file records above ran and the message collapses to a bare [role]
+        // placeholder. Unreported, that truncation would overwrite stored content.
+        adapterErrors.record('opencode', e, msgPartDir);
+      }
     }
 
     // Build content from parts
@@ -285,6 +329,7 @@ function getChats() {
   const fileSessions = getAllSessions();
   for (const s of fileSessions) {
     seen.add(s.id);
+    const msgCount = getMessageCount(s.id);
     chats.push({
       source: 'opencode',
       composerId: s.id,
@@ -294,7 +339,8 @@ function getChats() {
       mode: s.mode || 'opencode',
       folder: s.directory || null,
       encrypted: false,
-      bubbleCount: getMessageCount(s.id),
+      bubbleCount: msgCount ?? 0,
+      _countUnknown: msgCount === null,
       _agent: s.agent,
       _model: s.modelID,
       _provider: s.providerID,
@@ -332,10 +378,22 @@ function cleanTitle(title) {
 }
 
 function getMessages(chat) {
-  // Prefer file-based messages; fall back to SQLite
+  // Prefer file-based messages; fall back to SQLite.
+  //
+  // Failures on the file path are only failures of the READ if the fallback also
+  // comes up empty. An unreadable message directory for a session that opencode.db
+  // still holds in full is not a reason to withhold the session — and leaving those
+  // entries in the sink would make the shipper do exactly that, forever. So they are
+  // retracted once SQLite produces a transcript. Scoped to the file attempt, so any
+  // truncation the SQLite reader reports about itself survives.
+  const beforeFile = adapterErrors.mark();
   const fileMessages = getMessagesForSession(chat.composerId);
+  const afterFile = adapterErrors.mark();
   if (fileMessages.length > 0) return fileMessages;
-  return getSqliteMessages(chat.composerId);
+
+  const sqliteMessages = getSqliteMessages(chat.composerId);
+  if (sqliteMessages.length > 0) adapterErrors.dropRange(beforeFile, afterFile);
+  return sqliteMessages;
 }
 
 const labels = { 'opencode': 'OpenCode' };

@@ -2,6 +2,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+const adapterErrors = require('./adapter-errors');
+
 const GOOSE_DIR = path.join(os.homedir(), '.local', 'share', 'goose', 'sessions');
 const DB_PATH = path.join(GOOSE_DIR, 'sessions.db');
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'goose', 'config.yaml');
@@ -25,13 +27,19 @@ function getDatabase() {
 function queryDb(sql) {
   if (!fs.existsSync(DB_PATH)) return [];
   const Db = getDatabase();
-  if (!Db) return []; // Fallback if better-sqlite3 not available
+  if (!Db) {
+    adapterErrors.record('goose', new Error('better-sqlite3 unavailable'), DB_PATH);
+    return [];
+  }
   try {
     const db = new Db(DB_PATH, { readonly: true });
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
-  } catch { return []; }
+  } catch (e) {
+    adapterErrors.record('goose', e, DB_PATH);
+    return [];
+  }
 }
 
 // ============================================================
@@ -89,7 +97,11 @@ function getChats() {
   // --- Legacy JSONL files ---
   if (fs.existsSync(GOOSE_DIR)) {
     let files;
-    try { files = fs.readdirSync(GOOSE_DIR).filter(f => f.endsWith('.jsonl')); } catch { files = []; }
+    // The directory exists (checked above); if it will not enumerate, every legacy
+    // jsonl session disappears at discovery and nothing downstream can miss what it
+    // never saw.
+    try { files = fs.readdirSync(GOOSE_DIR).filter(f => f.endsWith('.jsonl')); }
+    catch (e) { adapterErrors.record('goose', e, GOOSE_DIR); files = []; }
 
     for (const file of files) {
       const sessionId = file.replace('.jsonl', '');
@@ -112,7 +124,12 @@ function getChats() {
           _fullPath: fullPath,
           _model: configModel,
         });
-      } catch { /* skip */ }
+      } catch (e) {
+        // Same shape one level down: an unstattable or unparseable session file is
+        // omitted from the listing entirely, so it is invisible to doctor and the
+        // shipper alike.
+        adapterErrors.record('goose', e, fullPath);
+      }
     }
   }
 
@@ -181,8 +198,15 @@ function getMessagesFromDb(chat) {
   const result = [];
   for (const row of rows) {
     let parts;
-    try { parts = JSON.parse(row.content_json); } catch { continue; }
-    if (!Array.isArray(parts)) continue;
+    // A row we cannot decode drops a message from the transcript. Silently, that is
+    // a truncation that looks complete, and a re-ship would replace the stored
+    // transcript with it. Report so the shipper withholds and retries instead.
+    try { parts = JSON.parse(row.content_json); }
+    catch (e) { adapterErrors.record('goose', e, `session ${chat.composerId}`); continue; }
+    if (!Array.isArray(parts)) {
+      adapterErrors.record('goose', new Error('message content_json is not an array'), `session ${chat.composerId}`);
+      continue;
+    }
 
     const role = row.role;
     const contentParts = [];
@@ -234,7 +258,11 @@ function getMessagesFromJsonl(chat) {
 
   for (const line of lines) {
     let obj;
-    try { obj = JSON.parse(line); } catch { continue; }
+    // The legacy JSONL store needs the same protection as the SQLite one: a corrupt
+    // line drops a message, and the truncated transcript would overwrite the stored
+    // one when the file's mtime changes or --full is used.
+    try { obj = JSON.parse(line); }
+    catch (e) { adapterErrors.record('goose', e, filePath); continue; }
 
     if (!obj.role) continue;
 

@@ -28,7 +28,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
-const { getAllChats, getMessages, resetCaches } = require('../../editors');
+const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
+const adapterErrorSink = require('../../editors/adapter-errors');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -158,7 +159,15 @@ const TOOL_CALL_RE = /\[tool-call: ([^(\]]+)/g;
 // absorbs the incremental skip for stable-empty chats).
 function rowsForChat(chat, host) {
   let messages;
-  try { messages = getMessages(chat) || []; } catch { return null; }
+  try { messages = getMessages(chat) || []; }
+  catch (e) {
+    // Some readers throw instead of reporting through adapter-errors — Cursor's
+    // agent-store path on a bad blobs table, for one. Converting that to a bare
+    // `unreadable` count would leave the end-of-pass report with nothing to print,
+    // so operators would see a number rising every pass and no cause anywhere.
+    adapterErrorSink.record(chat.source, e, chat.composerId);
+    return null;
+  }
 
   const source = chat.source;
   // Canonical globally-unique session id: '<source>:<adapter-local id>'.
@@ -263,6 +272,15 @@ async function runShip(client, opts = {}) {
   const existing = await loadExisting(client);
   const chats = getAllChats();
 
+  // An adapter that cannot load contributes zero sessions, which is indistinguishable
+  // from an editor the user does not have — so the shipper would silently ship a
+  // partial history forever. Say so on every pass.
+  // Reported once here for what the scan already knows (a dead binding is visible
+  // before any work happens, and this pass may take minutes), and again after the
+  // loop for failures that only surface while reading messages.
+  const warned = new Set();
+  reportAdapterErrors(warned);
+
   const batches = { sessions: [], messages: [], tool_calls: [] };
   const flush = async (table) => {
     if (!batches[table].length) return;
@@ -300,11 +318,33 @@ async function runShip(client, opts = {}) {
       // row count == recorded message_count) so an interrupted re-ship — even one
       // that died mid-flush leaving a partial transcript — repairs itself on the
       // next pass instead of being skipped forever.
-      if (notNewer && prev.bc >= (chat.bubbleCount || 0) && prev.intact) { skipped++; continue; }
+      // _countUnknown means the adapter could not determine this chat's message
+      // count, so bubbleCount is a placeholder rather than a measurement. Skipping on
+      // it would compare against a number that means nothing — `prev.bc >= 0` is
+      // trivially true — and the session would stay stale forever. Re-read instead.
+      if (notNewer && !chat._countUnknown && prev.bc >= (chat.bubbleCount || 0) && prev.intact) { skipped++; continue; }
     }
 
+    // rowsForChat returns null only when getMessages() *throws*. An adapter that
+    // swallows its own failure returns [] instead, which would look like a session
+    // that genuinely has no messages — and for a known session the re-ship below
+    // deletes the old transcript before inserting that emptiness. So treat a
+    // failure recorded while reading THIS chat as unreadable too: write nothing,
+    // delete nothing, retry next pass.
+    const errsBefore = adapterErrorSink.recorded().length;
     const rows = rowsForChat(chat, host);
-    if (!rows) { unreadable++; continue; } // write nothing → retried next pass
+    const failedHere = adapterErrorSink.recorded().slice(errsBefore).some((e) => e.source === chat.source);
+    // Write nothing on a failed read, whether or not the session is already stored.
+    //
+    // Shipping a partial first read looks tempting — nothing is there to destroy —
+    // but it is a trap: message_count would be written from the partial rows, so
+    // prev.intact becomes true, prev.bc already matches the source, the timestamp is
+    // unchanged, and the skip predicate above then withholds the session forever.
+    // The truncation would become permanent AND the warning would stop, because the
+    // adapter is never asked to read it again. Withholding keeps the session out of
+    // the skip predicate entirely, so every pass retries it and re-reports it until
+    // the underlying store is readable.
+    if (!rows || failedHere) { unreadable++; continue; }
     if (prev) {
       // Known session being re-shipped: clear its old rows BEFORE inserting so a
       // shorter re-parse can't leave stale seq/idx tails. A crash between the
@@ -324,7 +364,26 @@ async function runShip(client, opts = {}) {
     for (const r of rows.toolRows) { await push('tool_calls', r); toolRows++; }
   }
   for (const table of Object.keys(batches)) await flush(table);
+  // Anything that only failed while reading messages — the sink is reset by the
+  // next getAllChats(), so unreported here means never reported at all.
+  reportAdapterErrors(warned);
   return { sessions, skipped, msgRows, toolRows, unreadable };
+}
+
+// Warn once per adapter per pass. `warned` carries across the two call sites so a
+// dead binding is not reported twice in the same run.
+function reportAdapterErrors(warned) {
+  const errors = getAdapterErrors().filter((e) => !warned.has(e.source));
+  if (!errors.length) return;
+  for (const e of errors) warned.add(e.source);
+  const noBinding = errors.filter((e) => e.missingBinding).map((e) => e.source);
+  if (noBinding.length) {
+    console.log(`[mem-house] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
+    console.log('[mem-house]          fix: npm install -g memhouse --allow-scripts=better-sqlite3');
+  }
+  for (const e of errors.filter((x) => !x.missingBinding)) {
+    console.log(`[mem-house] WARNING: ${e.source} skipped — ${e.message}`);
+  }
 }
 
 // Per-source rollup straight from sessions_v (final=1 so ReplacingMergeTree collapses).

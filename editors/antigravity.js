@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const Database = require('better-sqlite3');
 const { getAppDataPath } = require('./base');
+const adapterErrors = require('./adapter-errors');
 
 const HOME = os.homedir();
 const ANTIGRAVITY_USER_DIR = path.join(getAppDataPath('Antigravity'), 'User');
@@ -241,7 +242,10 @@ function readGlobalStateValue(key) {
     if (typeof v === 'string') return v;
     if (Buffer.isBuffer(v) || v instanceof Uint8Array) return Buffer.from(v).toString('utf-8');
     return v == null ? null : String(v);
-  } catch {
+  } catch (e) {
+    // Only the offline half of getChats() reads this store; live cascades come over
+    // RPC. So a failure here costs some sessions, not all of them.
+    adapterErrors.record('antigravity', e, ANTIGRAVITY_GLOBAL_STORAGE_DB);
     return null;
   } finally {
     if (db) db.close();
@@ -613,6 +617,10 @@ function callRpc(method, body) {
     );
     return JSON.parse(result);
   } catch { return null; }
+  // Deliberately does NOT record. One failed call is not a failed read: getSteps()
+  // falls back from GetCascadeTrajectorySteps to GetCascadeTrajectory, and the tail
+  // lookup is optional. Recording per attempt would reject chats whose fallback
+  // succeeded. The read paths record once their fallbacks are exhausted.
 }
 
 // ============================================================
@@ -657,8 +665,29 @@ function getSteps(chat) {
 
   // Fallback to old method
   const resp2 = callRpc('GetCascadeTrajectory', { cascadeId: chat.composerId });
-  if (resp2 && resp2.trajectory && resp2.trajectory.steps) return resp2.trajectory.steps;
+  const fallbackSteps = (resp2 && resp2.trajectory && Array.isArray(resp2.trajectory.steps))
+    ? resp2.trajectory.steps
+    : null;
+  if (fallbackSteps && fallbackSteps.length > 0) return fallbackSteps;
 
+  // Nothing produced steps. Two distinct ways that happens, and both must be
+  // reported, because either one yields an empty transcript that would overwrite
+  // the stored one on a re-ship:
+  //
+  //   - Both calls returned null: the calls themselves failed. The language server
+  //     is stopped or neither endpoint is supported. This matters even when
+  //     Antigravity is closed, because getChats() still lists offline cascades out
+  //     of SQLite, so the chat looks live while its messages are unreachable.
+  //   - A call answered but carried no steps, for a cascade the listing said HAS
+  //     steps. getChats() preserves summary.stepCount as _stepCount, which is what
+  //     separates this from a cascade that is legitimately empty.
+  const rpcFailed = resp === null && resp2 === null;
+  const expected = Number(chat._stepCount) || 0;
+  if (rpcFailed) {
+    adapterErrors.record('antigravity', new Error('language server unreachable — cannot read messages'), chat.composerId);
+  } else if (expected > 0) {
+    adapterErrors.record('antigravity', new Error(`no steps returned for a cascade reporting ${expected} steps`), chat.composerId);
+  }
   return [];
 }
 

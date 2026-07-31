@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 
 const Database = require('better-sqlite3');
+const adapterErrors = require('./adapter-errors');
 
 // Zed stores data in different locations depending on the platform
 // - Windows: %LOCALAPPDATA%\Zed (not Roaming)
@@ -73,7 +74,9 @@ function queryDb(sql) {
     db.close();
     return rows;
   } catch (e) {
-    // Silently fail if database is locked or inaccessible
+    // Locked, inaccessible, or corrupt. Keep the scan alive but say so — silence
+    // here reads as "the user does not use Zed".
+    adapterErrors.record('zed', e, THREADS_DB);
     return [];
   }
 }
@@ -85,7 +88,10 @@ function queryBlob(id) {
     const row = db.prepare('SELECT data FROM threads WHERE id = ?').get(id);
     db.close();
     return row ? row.data : null;
-  } catch {
+  } catch (e) {
+    // This is the message-blob read. A silent null here becomes a zero-message
+    // session, which overwrites the stored transcript on re-ship.
+    adapterErrors.record('zed', e, THREADS_DB);
     return null;
   }
 }
@@ -129,12 +135,22 @@ function getMessages(chat) {
       json = blob.toString('utf-8');
     }
   } catch (e) {
-    // Decompression failed - zstd CLI not available
+    // Decompression failed — usually no zstd CLI and no native zstd in this Node.
+    // The thread exists and has content we cannot read, so this must be reported:
+    // silently returning [] would overwrite its stored transcript on re-ship.
+    adapterErrors.record('zed', e, THREADS_DB);
     return [];
   }
 
   let data;
-  try { data = JSON.parse(json); } catch { return []; }
+  try { data = JSON.parse(json); }
+  catch (e) {
+    // Decompressed but undecodable — malformed, or a thread schema this parser does
+    // not know. The thread has content, so returning [] unreported would let a
+    // re-ship replace the stored transcript with nothing.
+    adapterErrors.record('zed', e, THREADS_DB);
+    return [];
+  }
 
   const model = data.model?.model || null;
   const messages = [];

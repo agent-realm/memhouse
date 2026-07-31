@@ -186,14 +186,30 @@ Agents       plugins              list | install claude [--target DIR] | remove 
 Config: flags > MEMHOUSE_* env > ${ENV_FILE.replace(os.homedir(), '~')} > defaults.
 `;
 
+// A skipped adapter and an editor the user does not have look identical — both
+// contribute zero sessions. Say which happened, and how to fix the one that is fixable.
+function printAdapterErrors(errors) {
+  if (!errors || errors.length === 0) return;
+  const blocked = errors.filter((e) => e.missingBinding);
+  const other = errors.filter((e) => !e.missingBinding);
+  if (blocked.length) {
+    console.log(warn(`${blocked.length} adapter${blocked.length > 1 ? 's' : ''} skipped — better-sqlite3 has no native binding: ${blocked.map((e) => e.source).join(', ')}`));
+    console.log('  their sessions are NOT being shipped. npm >= 12 blocks install scripts by default; rebuild with:');
+    console.log('    npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log('  (from a checkout: npm install --no-audit --no-fund, which package.json already allows)');
+  }
+  for (const e of other) console.log(warn(`${e.source.padEnd(16)} skipped: ${e.message}`));
+}
+
 async function cmdDiscover() {
   const out = { editors: [], clickhouse: [], config: null, memoryHouse: false };
   process.stdout.write(JSON_OUT ? '' : 'Scanning editors (reading local session stores)…\n');
   try {
-    const { getAllChats } = require(path.join(REPO_ROOT, 'editors'));
+    const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
     const counts = {};
     for (const c of getAllChats()) counts[c.source] = (counts[c.source] || 0) + 1;
     out.editors = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([source, sessions]) => ({ source, sessions }));
+    out.adapterErrors = getAdapterErrors();
   } catch (e) { out.editorsError = e.message; }
 
   for (const url of [...new Set([resolveConfig().url, 'http://localhost:8123'])]) {
@@ -220,6 +236,7 @@ async function cmdDiscover() {
   console.log('\nEditors with sessions on this machine:');
   if (out.editors.length === 0) console.log(warn('none found' + (out.editorsError ? ` (${out.editorsError})` : '')));
   for (const e of out.editors) console.log(ok(`${e.source.padEnd(16)} ${e.sessions} sessions`));
+  printAdapterErrors(out.adapterErrors);
   console.log('\nClickHouse endpoints:');
   for (const p of out.clickhouse) {
     if (!p.reachable) console.log(bad(`${p.url} — unreachable`));
@@ -359,9 +376,64 @@ async function cmdDoctor() {
     add((u[0]?.u ?? '') !== '' || (await chRows(cfg, 'SELECT count() AS c FROM sessions'))[0].c === 0,
       `identity stamping (user_id='${u[0]?.u ?? ''}')`, 'writers must use async_insert=0');
   } catch { add(false, 'identity stamping', 'schema missing?'); }
+  let adapterErrors = [];
   try {
-    const { getAllChats } = require(path.join(REPO_ROOT, 'editors'));
-    add(true, `adapters: ${getAllChats().length} sessions visible locally`);
+    const { getAllChats, getAdapterErrors, getMessages } = require(path.join(REPO_ROOT, 'editors'));
+    const chats = getAllChats();
+    const seen = chats.length;
+    // Listing sessions is not the same as being able to read them. Goose, for one,
+    // can query `sessions` while its `messages` rows use a schema this parser cannot
+    // decode — the shipper would then withhold every one of those sessions while
+    // doctor reported a clean bill of health. Read the newest session per source so
+    // the message readers actually run; that is one parse per editor, not a full scan.
+    // One chat per source is not enough coverage: several adapters mix storage
+    // paths, and a probe only exercises the one the sampled chat happens to use.
+    // Each such adapter declares which store a chat came from — Cursor as _type
+    // (agent-store vs workspace), Goose as _storage (sqlite vs jsonl), OpenCode as
+    // _storageType (file vs sqlite) — so probing one chat per declared variant
+    // covers every path deterministically.
+    //
+    // The newest/middle/oldest spread is kept on top of that as a cheap hedge for
+    // any split an adapter does NOT declare.
+    const picks = new Map();
+    const bySource = new Map();
+    for (const chat of chats) {
+      if (!bySource.has(chat.source)) bySource.set(chat.source, []);
+      bySource.get(chat.source).push(chat);
+    }
+    for (const [source, list] of bySource) {
+      for (const i of new Set([0, Math.floor(list.length / 2), list.length - 1])) {
+        picks.set(`${source}#${i}`, list[i]);
+      }
+      for (const chat of list) {
+        const variant = `${source}|${chat._type || ''}|${chat._storage || ''}|${chat._storageType || ''}`;
+        if (!picks.has(variant)) picks.set(variant, chat);
+      }
+    }
+
+    const thrown = [];
+    for (const chat of picks.values()) {
+      // Not every reader reports through the sink — some throw instead, e.g.
+      // Cursor's agent-store path, where discovery reads `meta` fine but
+      // collectStoreMessages() can throw on a corrupt `blobs` table. Swallowing
+      // that here would discard the only signal and leave doctor green while the
+      // shipper withholds every one of those sessions.
+      try { getMessages(chat); }
+      catch (e) { thrown.push({ source: chat.source, message: ((e && e.message) || String(e)).split('\n')[0] }); }
+    }
+    adapterErrors = getAdapterErrors();
+    for (const t of thrown) {
+      if (!adapterErrors.some((e) => e.source === t.source)) adapterErrors.push({ ...t, missingBinding: false });
+    }
+    // Any adapter that could not be read is a failure, whatever the cause — a
+    // locked or corrupt store loses just as many sessions as a missing binding.
+    const blocked = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
+    const failed = adapterErrors.map((e) => e.source);
+    add(adapterErrors.length === 0,
+      `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''}`,
+      blocked.length ? 'npm install -g memhouse --allow-scripts=better-sqlite3'
+        : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
+          : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
   add(!!pidOf('shipper'), 'shipper daemon', 'memhouse start');
   add(!!pidOf('dashboard'), 'dashboard daemon', 'memhouse start');

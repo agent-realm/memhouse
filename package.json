@@ -1,7 +1,7 @@
 {
   "name": "memhouse",
   "version": "0.3.0",
-  "description": "memhouse \u2014 agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store, kernel-agency install, and the agentlytics dashboard",
+  "description": "memhouse — agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store, kernel-agency install, and the agentlytics dashboard",
   "main": "bin/memhouse.js",
   "bin": {
     "memhouse": "./bin/memhouse.js",
@@ -55,6 +55,9 @@
   "license": "MIT",
   "engines": {
     "node": ">=20.19.0"
+  },
+  "allowScripts": {
+    "better-sqlite3": true
   },
   "repository": {
     "type": "git",

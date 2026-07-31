@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { getAppDataPath } = require('./base');
+const adapterErrors = require('./adapter-errors');
 
 const HOME = os.homedir();
 const CURSOR_CHATS_DIR = path.join(HOME, '.cursor', 'chats');
@@ -131,7 +132,15 @@ function getWorkspaceMap() {
       const ws = JSON.parse(fs.readFileSync(wsJson, 'utf-8'));
       const folder = (ws.folder || '').replace('file://', '');
       map.push({ hash, folder, stateDb });
-    } catch { /* skip */ }
+    } catch (e) {
+      // The descriptor is only where the folder NAME comes from — state.vscdb holds
+      // the sessions and was already confirmed present. Dropping the whole workspace
+      // over an unreadable workspace.json would take every composer in it out of
+      // discovery, where nothing downstream can notice them missing. Keep the
+      // workspace with no folder, and record why the name is absent.
+      adapterErrors.record('cursor', e, wsJson);
+      map.push({ hash, folder: '', stateDb });
+    }
   }
   return map;
 }
@@ -151,7 +160,14 @@ function getComposerHeaders(stateDbPath) {
       mode: c.unifiedMode || c.forceMode || 'unknown',
       isAgentic: c.unifiedMode === 'agent',
     }));
-  } catch { return []; }
+  } catch (e) {
+    // One workspace's state.vscdb being locked, corrupt, or on an incompatible
+    // ItemTable removes every composer in that workspace. The global database still
+    // opens, so without this Cursor looks healthy while a whole workspace of
+    // sessions quietly disappears.
+    adapterErrors.record('cursor', e, stateDbPath);
+    return [];
+  }
 }
 
 function getModelPreference(globalDb) {
@@ -174,7 +190,12 @@ function getComposerBubbles(globalDb, composerId) {
     try {
       const obj = JSON.parse(row.value);
       bubbles.push(obj);
-    } catch { /* binary blob, skip */ }
+    } catch (e) {
+      // Historically treated as "binary blob, skip", but a row that will not decode
+      // is a message missing from the transcript either way. Unreported, the
+      // shortened result overwrites the stored one on a re-ship.
+      adapterErrors.record('cursor', e, `bubble ${row.key || '(unknown)'}`);
+    }
   }
   return bubbles;
 }
@@ -260,25 +281,46 @@ function getChats() {
       const meta = readStoreMeta(db);
       db.close();
       if (meta) {
+        // The agent store carries no per-chat updated time and no message count, so
+        // the shipper had nothing that changes as the conversation grows: it
+        // compared a fixed createdAt against itself and an absent count against 0,
+        // and skipped every intact session forever. store.db's mtime is the real
+        // change signal — it moves when blobs are appended. If it cannot be read,
+        // fall back to declaring the count unknown so the skip stands down instead
+        // of silently freezing the transcript.
+        let storeMtime = null;
+        try { storeMtime = fs.statSync(dbPath).mtimeMs; } catch { /* fall back below */ }
         chats.push({
           source: 'cursor',
           composerId: chatId,
           name: meta.name || null,
           createdAt: meta.createdAt || null,
+          lastUpdatedAt: storeMtime,
           mode: meta.mode || null,
           folder: null,
+          _countUnknown: storeMtime === null,
           _dbPath: dbPath,
           _rootBlobId: meta.latestRootBlobId,
           _lastUsedModel: meta.lastUsedModel || null,
           _type: 'agent-store',
         });
+      } else {
+        // The database opened but its meta row would not decode, so this session is
+        // dropped here at discovery — before doctor's probes or the shipper ever see
+        // it. Nothing downstream can notice a chat that was never listed, which is
+        // why it has to be recorded at the point of omission.
+        adapterErrors.record('cursor', new Error('agent-store meta row could not be decoded'), dbPath);
       }
-    } catch { /* skip */ }
+    } catch (e) { adapterErrors.record('cursor', e, dbPath); }
   }
 
   // Source 2: workspaceStorage composers
   let globalDb = null;
-  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); } catch { /* no global db */ }
+  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); }
+  catch (e) {
+    // Absent is normal — Cursor may simply not be installed. Unreadable is not.
+    if (fs.existsSync(GLOBAL_STORAGE_DB)) adapterErrors.record('cursor', e, GLOBAL_STORAGE_DB);
+  }
 
   const modelPref = globalDb ? getModelPreference(globalDb) : null;
 
@@ -286,13 +328,24 @@ function getChats() {
     const headers = getComposerHeaders(stateDb);
     for (const h of headers) {
       let bubbleCount = 0;
+      let countUnknown = false;
       if (globalDb) {
         try {
           const countRow = globalDb.prepare(
             "SELECT count(*) as cnt FROM cursorDiskKV WHERE key LIKE ?"
           ).get(`bubbleId:${h.composerId}:%`);
           bubbleCount = countRow ? countRow.cnt : 0;
-        } catch { /* skip */ }
+        } catch (e) {
+          // A failed count is NOT a count of zero, and the difference decides
+          // whether this session ever updates again. bubbleCount feeds the shipper's
+          // skip predicate (prev.bc >= chat.bubbleCount); left at 0 that is
+          // trivially true, so a grown transcript stays stale on every incremental
+          // pass. Recording alone does not save it either — the skip is evaluated
+          // before any per-chat error guard, so the chat is dropped before the guard
+          // can see it. Flag it instead, and let the predicate refuse to skip.
+          adapterErrors.record('cursor', e, `bubble count for ${h.composerId}`);
+          countUnknown = true;
+        }
       }
       chats.push({
         source: 'cursor',
@@ -303,6 +356,7 @@ function getChats() {
         mode: h.mode,
         folder,
         bubbleCount,
+        _countUnknown: countUnknown,
         _type: 'workspace',
         _modelPref: modelPref,
       });
@@ -328,7 +382,13 @@ function getMessages(chat) {
   }
 
   let globalDb;
-  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); } catch { return []; }
+  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); }
+  catch (e) {
+    // Returning [] unreported would let a re-ship overwrite this session's stored
+    // transcript with nothing.
+    adapterErrors.record('cursor', e, GLOBAL_STORAGE_DB);
+    return [];
+  }
   const bubbles = getComposerBubbles(globalDb, chat.composerId);
   globalDb.close();
   const msgs = bubblesToMessages(bubbles);
