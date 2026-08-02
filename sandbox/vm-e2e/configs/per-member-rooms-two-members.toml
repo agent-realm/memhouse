@@ -1,0 +1,71 @@
+# memhouse — per-member rooms, two members in one house.
+#
+# What this proves, on a clone, against a real ClickHouse:
+#   1. a member's memory lands in THEIR OWN rooms (messages_<m>), not a shared table
+#   2. user_id is stamped server-side with the member's own name
+#   3. a second member in the SAME house is isolated — cannot read the first's rooms
+#   4. the Merge room fails closed: each member sees only what they hold grants for
+#   5. whole-room sharing is SELF-SERVE — a member grants a colleague with no operator
+#
+# Assertion grammar and the __HOST__ substitution: see agent-gauntlet's README
+# "Config schema". sql-count runs in-clone via ssh against an explicit endpoint, so it
+# needs no CLI subcommand on the subject.
+#
+# NOTE: this scenario targets the per-member fork (MEM_PER_MEMBER=1, house `mem`), not
+# the shipped shared-room layout. It is expected to FAIL against master.
+#
+# PRECONDITION — the house is NOT reset by the clone. The gauntlet's "hypervisor is the
+# reset" tenet covers the VM, not the external ClickHouse. Before running, the house must
+# be provisioned and free of prior shares:
+#
+#   node mem-house/per-member/provision.js --member alice --merge
+#   node mem-house/per-member/provision.js --member bob
+#   -- and no outstanding `GRANT SELECT ON mem.messages_alice TO bob`
+#
+# The two isolation assertions below (marked PRECONDITION-SENSITIVE) read `=0`, which a
+# legitimate self-serve share would flip to non-zero. That is the feature working, not a
+# regression — but it means a leftover share from a previous run makes this scenario fail
+# for the wrong reason. `REVOKE SELECT ON mem.messages_alice FROM bob` restores it.
+
+[scenario]
+name      = "per-member-rooms-two-members"
+channel   = "plugin"
+server    = "join"
+agent     = "claude-code"
+run_mode  = "run"
+uninstall = "none"
+
+[options]
+ingest = true
+
+[expect]
+assertions = [
+  # --- install landed at all ---
+  "file-exists:~/.memhouse/env",
+
+  # --- 1. memory landed in the MEMBER'S OWN room, not a shared one ---
+  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.messages_alice WHERE host LIKE '__HOST__%'|>0",
+
+  # --- 2. user_id is stamped with the member, server-side ---
+  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.messages_alice WHERE user_id != 'alice'|=0",
+
+  # --- 3. the second member's room did NOT receive this member's rows ---
+  #     structural: nothing can write into bob's room but bob, so this holds
+  #     regardless of any sharing.
+  "sql-count:http://10.10.10.30:18310|bob|bpw|SELECT count() FROM mem.messages_bob WHERE host LIKE '__HOST__%'|=0",
+
+  # --- 4. the Merge room fails closed: bob sees only bob through it ---
+  #     PRECONDITION-SENSITIVE: a live share from alice to bob flips this to >0,
+  #     correctly. See the PRECONDITION note in the header.
+  "sql-count:http://10.10.10.30:18310|bob|bpw|SELECT count() FROM mem.all_messages WHERE user_id = 'alice'|=0",
+  #     and alice sees her own through it
+  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.all_messages WHERE user_id = 'alice'|>0",
+
+  # --- 5. the shipper wrote sessions too, and the incremental state is readable ---
+  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.sessions_alice|>0",
+
+  # --- the transcript should show a successful ship, and no crash ---
+  "text-in-transcript:shipped",
+  "text-not-in-transcript:Traceback",
+  "text-not-in-transcript:Not enough privileges",
+]

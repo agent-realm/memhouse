@@ -30,6 +30,7 @@ const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
+const { resolveRooms } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -121,9 +122,9 @@ async function ensureSchema(client) {
 // NOT message_count — because parsed-message count and bubbleCount are different
 // units in several adapters (claude folds subagents, codex reports 0), and skipping
 // must be decidable WITHOUT calling getMessages on every chat.
-async function loadExisting(client) {
+async function loadExisting(client, rooms) {
   const rs = await client.query({
-    query: 'SELECT session_id, last_updated_at, message_count, extra FROM sessions FINAL WHERE user_id = currentUser()',
+    query: `SELECT session_id, last_updated_at, message_count, extra FROM ${rooms.sessions} FINAL WHERE user_id = currentUser()`,
     format: 'JSONEachRow',
   });
   // Actual message rows per session: an interrupted re-ship (crash between the
@@ -132,7 +133,7 @@ async function loadExisting(client) {
   // must compare the real row count against the recorded message_count, not
   // merely check that some row exists.
   const mr = await client.query({
-    query: 'SELECT session_id, count() AS n FROM messages FINAL WHERE user_id = currentUser() GROUP BY session_id',
+    query: `SELECT session_id, count() AS n FROM ${rooms.messages} FINAL WHERE user_id = currentUser() GROUP BY session_id`,
     format: 'JSONEachRow',
   });
   const msgCounts = new Map();
@@ -269,7 +270,8 @@ async function runShip(client, opts = {}) {
   // only in incremental mode, but re-shipping a KNOWN session must clear its old
   // message/tool rows first (a shrunken re-parse leaves stale higher-seq rows
   // otherwise: ReplacingMergeTree collapses same-key rows only).
-  const existing = await loadExisting(client);
+  const rooms = await resolveRooms(client);
+  const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
 
   // An adapter that cannot load contributes zero sessions, which is indistinguishable
@@ -285,7 +287,7 @@ async function runShip(client, opts = {}) {
   const flush = async (table) => {
     if (!batches[table].length) return;
     await client.insert({
-      table,
+      table: rooms[table],
       values: batches[table],
       format: 'JSONEachRow',
       clickhouse_settings: { async_insert: 0 }, // binding: user_id stamping breaks otherwise
@@ -352,7 +354,7 @@ async function runShip(client, opts = {}) {
       // refuses to skip a non-empty session whose message rows are missing.
       for (const t of ['messages', 'tool_calls']) {
         await client.command({
-          query: `DELETE FROM ${t} WHERE session_id = {id:String} AND user_id = currentUser()`,
+          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = currentUser()`,
           query_params: { id },
           clickhouse_settings: { async_insert: 0 },
         });
