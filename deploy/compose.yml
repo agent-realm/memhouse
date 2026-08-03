@@ -25,7 +25,7 @@ name: memhouse
 
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:${MEMHOUSE_CH_TAG:-25.11}
+    image: docker.io/clickhouse/clickhouse-server:${MEMHOUSE_CH_TAG:-25.11}
     container_name: memhouse-clickhouse
     restart: unless-stopped
     environment:

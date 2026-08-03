@@ -553,39 +553,26 @@ function cmdUninstall() {
     case 'prompt': process.stdout.write(fs.readFileSync(path.join(DELIVERY, 'PROMPT.md'), 'utf-8')); break;
     case 'reset': process.exitCode = await cmdReset(); break;
     case 'deploy': {
-      // The missing first mile: stand up a ClickHouse, then install into it.
-      if (!flags.local && !flags.down) { console.log(bad('usage: memhouse deploy --local | --down')); process.exitCode = 2; break; }
-      const compose = path.join(REPO_ROOT, 'deploy', 'compose.yml');
-      if (!fs.existsSync(compose)) { console.log(bad(`compose file missing: ${compose}`)); process.exitCode = 1; break; }
+      const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
       if (flags.down) {
-        // compose demands MEMHOUSE_PASSWORD for every subcommand, teardown included.
-        // Any value works — the server is never contacted.
-        const d = spawnSync('docker', ['compose', '-f', compose, 'down', '-v'],
-          { env: { ...process.env, MEMHOUSE_PASSWORD: process.env.MEMHOUSE_PASSWORD || 'teardown' }, stdio: 'inherit' });
-        console.log(d.status === 0 ? ok('local ClickHouse removed (volume included)') : bad('teardown failed'));
-        process.exitCode = d.status === 0 ? 0 : 1;
+        const r = dep.down();
+        console.log(r.ok ? ok(`local ClickHouse removed (${r.engine}${r.volumeRemoved ? ', volume included' : ''})`) : bad(r.msg));
+        process.exitCode = r.ok ? 0 : 1;
         break;
       }
+      if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --down')); process.exitCode = 2; break; }
       const pw = process.env.MEMHOUSE_PASSWORD || crypto.randomBytes(16).toString('hex');
       const port = String(flags.port || process.env.MEMHOUSE_PORT || 8123);
-      const env = { ...process.env, MEMHOUSE_PASSWORD: pw, MEMHOUSE_PORT: port };
-      const up = spawnSync('docker', ['compose', '-f', compose, 'up', '-d'], { env, stdio: 'inherit' });
-      if (up.status !== 0) { console.log(bad('docker compose up failed — is Docker running?')); process.exitCode = 1; break; }
-      // Wait for the healthcheck rather than guessing: an install against a
-      // still-starting server fails in a way that looks like a bad credential.
-      const url = `http://localhost:${port}`;
-      let live = false;
-      for (let i = 0; i < 60; i++) {
-        try { const r = await fetch(`${url}/ping`, { signal: AbortSignal.timeout(2000) }); if (r.ok) { live = true; break; } } catch { /* starting */ }
-        await new Promise((r) => setTimeout(r, 2000));
+      const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
+      if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
+      console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));
+      if (!(await dep.waitReady(r.url))) {
+        console.log(bad(`ClickHouse did not answer on ${r.url} — check: ${r.engine} logs ${dep.CONTAINER}`));
+        process.exitCode = 1; break;
       }
-      if (!live) { console.log(bad(`ClickHouse did not answer on ${url} — check: docker logs memhouse-clickhouse`)); process.exitCode = 1; break; }
-      console.log(ok(`ClickHouse up on ${url} (loopback only)`));
-      process.env.MEMHOUSE_URL = url;
-      process.env.MEMHOUSE_USER = 'memhouse_root';
-      process.env.MEMHOUSE_PASSWORD = pw;
-      process.env.MEMHOUSE_DB = process.env.MEMHOUSE_DB || 'memhouse';
-      flags.url = url; flags.user = 'memhouse_root'; flags.password = pw; flags.db = process.env.MEMHOUSE_DB;
+      console.log(ok('ClickHouse ready'));
+      flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
+      flags.db = flags.db || process.env.MEMHOUSE_DB || 'memhouse';
       flags.yes = true;
       process.exitCode = await cmdInstall({ interactive: false });
       break;
@@ -597,7 +584,8 @@ function cmdUninstall() {
         const r = svc.install({ shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval: flags.interval || 300 });
         if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
         console.log(ok(`service installed (${r.kind}): ${r.path}`));
-        console.log('  survives reboot; `memhouse start` is no longer needed');
+        console.log(r.warn ? '  starts at login; `memhouse start` is no longer needed'
+                            : '  survives reboot; `memhouse start` is no longer needed');
         if (r.warn) console.log(warn(r.warn));
       } else if (sub === 'uninstall') {
         const r = svc.uninstall();
