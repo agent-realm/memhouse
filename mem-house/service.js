@@ -350,6 +350,36 @@ function isRunning(kind, unit, label) {
   return runState(kind, unit, label) === 'running';
 }
 
+/**
+ * What the INSTALLED unit actually points at, read from the unit file rather than from
+ * the current config — the two drift the moment anything is redeployed, and callers
+ * asking "does this service care about the house I am removing?" need the unit's answer.
+ *
+ * Returns { installed, url, solo } — `url` null when it cannot be determined.
+ */
+function installedConfig() {
+  const kind = platform();
+  if (!kind) return { installed: false, url: null, solo: false };
+  const p = unitPaths()[kind];
+  if (!fs.existsSync(p)) return { installed: false, url: null, solo: false };
+  let text = '';
+  try { text = fs.readFileSync(p, 'utf-8'); } catch { return { installed: true, url: null, solo: false }; }
+  const env = {};
+  if (kind === 'systemd') {
+    for (const m of text.matchAll(/^Environment=([A-Z0-9_]+)=(.*)$/gm)) {
+      let v = m[2].trim();
+      if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1).replace(/\\(["\\])/g, '$1');
+      env[m[1]] = v;
+    }
+  } else {
+    // <key>NAME</key><newline><string>VALUE</string>
+    for (const m of text.matchAll(/<key>([A-Z0-9_]+)<\/key>\s*<string>([^<]*)<\/string>/g)) {
+      env[m[1]] = m[2].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    }
+  }
+  return { installed: true, url: env.MEMHOUSE_URL || null, solo: env.MEMHOUSE_SOLO === '1' };
+}
+
 function status() {
   const kind = platform();
   if (!kind) return { kind: null, installed: false, running: false };
@@ -372,6 +402,6 @@ function status() {
 // installing anything. A malformed plist or unit is only visible at load time otherwise,
 // and "load it and see" is not available on a machine you must not touch.
 module.exports = {
-  install, uninstall, status, platform, preflight,
+  install, uninstall, status, platform, preflight, installedConfig,
   _render: { systemdUnit, launchdPlist, unitPaths },
 };

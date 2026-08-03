@@ -240,6 +240,15 @@ function volumeExists() {
   return ownership(eng, 'volume', VOLUME) === 'ours';
 }
 
+/** The host port the managed container publishes, or '' if there is none to read. */
+function publishedPort() {
+  const eng = engine();
+  if (!eng) return '';
+  const r = spawnSync(eng, ['inspect', '-f', '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostPort}}{{end}}{{end}}', CONTAINER], { encoding: 'utf-8' });
+  if (r.error || r.status !== 0) return '';
+  return (r.stdout || '').trim();
+}
+
 function ambiguousMsg(o) {
   if (o.indeterminate) {
     return `${o.indeterminate.join(' and ')} could not say whether it holds '${CONTAINER}' or `
@@ -316,7 +325,7 @@ function ensureImage(eng, tag) {
 }
 
 module.exports = {
-  engine, owningEngine, availableEngines, ensureImage, up, down, waitReady, volumeExists, preflight,
+  engine, owningEngine, availableEngines, ensureImage, publishedPort, up, down, waitReady, volumeExists, preflight,
   CONTAINER, VOLUME, DEFAULT_TAG,
   // exported for the unit gate: classifying an engine message wrong is silent
   _NOT_FOUND: NOT_FOUND,

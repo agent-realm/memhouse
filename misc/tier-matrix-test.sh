@@ -341,6 +341,30 @@ else
   assert_exit "and works once it is uninstalled" 0 env MEMHOUSE_HOME="$HP" $CLI deploy --down
 fi
 
+say "the move guards read the effective port, not just the flag"
+HQ="$TMP/home-envport"; mkdir -p "$HQ"
+env MEMHOUSE_HOME="$HQ" $CLI deploy --local --house-port $((PORT_CH+15)) --no-ship >/dev/null 2>&1
+python3 -c "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',$((PORT_CH+16))));s.listen(1);time.sleep(40)" &
+BLOCK3=$!; sleep 1
+assert_exit "MEMHOUSE_CH_PORT onto an occupied port is refused" 2 \
+  env MEMHOUSE_CH_PORT=$((PORT_CH+16)) MEMHOUSE_HOME="$HQ" $CLI deploy --local --no-ship
+assert_out "and the house is still where it was" "connected:" env MEMHOUSE_HOME="$HQ" $CLI status
+kill $BLOCK3 2>/dev/null
+env MEMHOUSE_HOME="$HQ" $CLI deploy --down >/dev/null 2>&1
+
+say "teardown ignores a service that points somewhere else"
+if ! have_systemd; then
+  skip "unrelated-service teardown (no user manager)"
+else
+  HR="$TMP/home-otherservice"; mkdir -p "$HR"
+  env MEMHOUSE_HOME="$HR" MEMHOUSE_SOLO_DATA="$TMP/other-data" $CLI deploy --solo --house-port $((PORT_SOLO+16)) --no-ship >/dev/null 2>&1
+  env MEMHOUSE_HOME="$HR" MEMHOUSE_SOLO_DATA="$TMP/other-data" $CLI service install >/dev/null 2>&1; sleep 2
+  HS="$TMP/home-localside"; mkdir -p "$HS"
+  env MEMHOUSE_HOME="$HS" $CLI deploy --local --house-port $((PORT_CH+17)) --no-ship >/dev/null 2>&1
+  assert_exit "an unrelated service does not block teardown" 0 env MEMHOUSE_HOME="$HS" $CLI deploy --down
+  env MEMHOUSE_HOME="$HR" $CLI uninstall >/dev/null 2>&1
+fi
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"

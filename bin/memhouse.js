@@ -769,12 +769,23 @@ function cmdUninstall() {
         // and volume beneath it leaves the service retrying an endpoint that is gone —
         // and a later bare `deploy --local` mints a NEW password on the same port, which
         // the service will never learn, while `status` still reports it running.
-        let svcDown = { installed: false };
-        try { svcDown = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported */ }
-        if (svcDown.installed) {
-          console.log(bad('a shipper service is installed and points at this house — removing it would leave the service retrying a dead endpoint.'));
-          console.log('  memhouse service uninstall, then memhouse deploy --down');
-          process.exitCode = 2; break;
+        // Only a service that points at THIS house. `service install` is supported for
+        // solo and for external/kernel houses too, and refusing on any installed unit
+        // would make an unrelated production shipper block the cleanup of a stale local
+        // container. Compare the unit's own inlined URL against the port this container
+        // publishes; if that cannot be determined, fail closed.
+        let svcCfg = { installed: false, url: null, solo: false };
+        try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
+        if (svcCfg.installed && !svcCfg.solo) {
+          const pub = dep.publishedPort();
+          const svcPort = portOf(svcCfg.url);
+          const targetsThisHouse = !svcCfg.url || !pub || svcPort === pub;
+          if (targetsThisHouse) {
+            console.log(bad(`a shipper service is installed and points at ${svcCfg.url || 'a house this command cannot identify'} — removing this house would leave it retrying a dead endpoint.`));
+            console.log('  memhouse service uninstall, then memhouse deploy --down');
+            process.exitCode = 2; break;
+          }
+          console.log(warn(`a shipper service is installed but points at ${svcCfg.url} — leaving it alone`));
         }
         const r = dep.down();
         console.log(r.ok ? ok(`local ClickHouse removed (${r.engine}${r.volumeRemoved ? ', volume included' : ''})`) : bad(r.msg));
@@ -876,28 +887,38 @@ function cmdUninstall() {
         // detached-process check below cannot see it. Moving the port anyway would start
         // a second house and repoint the CLI at it while the installed shipper unit kept
         // writing to the old one: two houses, and the memory silently splits between them.
-        if (housePort && String(housePort) !== String(resolveConfig().soloPort || '')) {
+        // The effective port has a precedence chain — flag, env, persisted — and the
+        // guards used to read only the flag, so `MEMHOUSE_SOLO_PORT=<new> deploy --solo`
+        // walked straight past them and started a second house.
+        //
+        // The FROM side has to come from the file, not resolveConfig(): that merges the
+        // same env var, so setting MEMHOUSE_SOLO_PORT made the persisted port equal the
+        // target and the comparison could never fire. The question is "where is the house
+        // that is actually running", and only the file knows that.
+        const persistedSoloPort = String(readEnvFile().MEMHOUSE_SOLO_PORT || '');
+        const soloMoving = persistedSoloPort !== '' && String(port) !== persistedSoloPort;
+        if (soloMoving) {
           let svcSolo = { installed: false };
           try { svcSolo = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status().solo || { installed: false }; } catch { /* unsupported */ }
           if (svcSolo.installed) {
-            console.log(bad(`the solo house is service-managed on port ${resolveConfig().soloPort || '?'} — changing its port here would leave the installed shipper writing to the old one.`));
+            console.log(bad(`the solo house is service-managed on port ${persistedSoloPort || '?'} — moving it to ${port} would leave the installed shipper writing to the old one.`));
             console.log('  memhouse service uninstall, then re-deploy on the new port, then memhouse service install');
             process.exitCode = 2; break;
           }
         }
         const runningPid = pidOf('solo');
-        if (runningPid && housePort && String(housePort) !== String(resolveConfig().soloPort || '')) {
+        if (runningPid && soloMoving) {
           // Check the DESTINATION before demolishing the origin. If something already
           // owns the target port, the replacement dies on EADDRINUSE, the identity check
           // correctly refuses — and the old house is stopped, with the config still
           // pointing at it. The move fails either way; only one way costs the user a
           // running house.
           if (await portInUse(port)) {
-            console.log(bad(`port ${port} is already in use — not moving the solo house off ${resolveConfig().soloPort}.`));
+            console.log(bad(`port ${port} is already in use — not moving the solo house off ${persistedSoloPort}.`));
             console.log('  free that port, or pick another with --house-port.');
             process.exitCode = 2; break;
           }
-          console.log(warn(`solo house is on port ${resolveConfig().soloPort || '?'}; moving it to ${housePort}`));
+          console.log(warn(`solo house is on port ${persistedSoloPort || '?'}; moving it to ${port}`));
           try { process.kill(runningPid, 'SIGTERM'); } catch { /* raced */ }
           try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
           await new Promise((r) => setTimeout(r, 500)); // let the port free before rebinding
@@ -1004,8 +1025,13 @@ function cmdUninstall() {
       // Moving the local house has the same two hazards the solo move has, and they were
       // fixed there first: an occupied destination, and a shipper this loop cannot see.
       {
-        const from = String(priorCfg.solo) === '1' ? '' : portOf(priorCfg.url);
-        const to = String(housePort || '');
+        // Persisted, not merged — same reason as the solo side above.
+        const fileCfg = readEnvFile();
+        const from = String(fileCfg.MEMHOUSE_SOLO) === '1' ? '' : portOf(fileCfg.MEMHOUSE_URL || '');
+        // Same precedence `dep.up()` uses below. Reading only the flag let
+        // `MEMHOUSE_CH_PORT=<occupied> deploy --local` skip the destination probe, remove
+        // the working container, and then fail to bind.
+        const to = String(housePort || process.env.MEMHOUSE_CH_PORT || '');
         if (to && from && to !== from) {
           // A service-managed shipper keeps its own environment. Moving the container and
           // the config out from under it leaves it retrying a dead endpoint forever while
