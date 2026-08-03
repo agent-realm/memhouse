@@ -10,6 +10,9 @@
 //      two ALTER grants are required by the shipper's clear-then-insert, not a
 //      convenience — see the note at the grant itself)
 //   3. --merge: create/refresh the three Merge rooms, borrowing this member's columns
+//   4. grant the member SELECT on whichever Merge rooms exist — a Merge reduces to the
+//      rooms the caller can already read, so this is what makes the team room fail
+//      CLOSED rather than deny outright
 //
 // Grants are explicit, one statement per room. No wildcards are used anywhere; the only
 // pattern in the design is the Merge regex, anchored on a fixed room type.
@@ -19,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@clickhouse/client');
-const { ROOM_TYPES, VIEW_TYPES, viewName, assertUsableMember } = require('./rooms');
+const { ROOM_TYPES, VIEW_TYPES, viewName, mergeRooms, assertUsableMember } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -39,6 +42,17 @@ function statements(sql) {
     .split(/;\s*$/m)
     .map((s) => s.replace(/^\s*--.*$/gm, '').trim())
     .filter(Boolean);
+}
+
+/** Which of the three Merge rooms actually exist — a member may be provisioned first. */
+async function mergeRoomsPresent(client, database) {
+  const names = Object.values(mergeRooms());
+  const rs = await client.query({
+    query: `SELECT name FROM system.tables WHERE database = {db:String} AND name IN ({names:Array(String)}) ORDER BY name`,
+    query_params: { db: database, names },
+    format: 'JSONEachRow',
+  });
+  return (await rs.json()).map((r) => r.name);
 }
 
 async function main() {
@@ -98,6 +112,19 @@ async function main() {
     }
     console.log('[mem] merge rooms ready: all_sessions, all_messages, all_tool_calls');
   }
+
+  // 4. Merge-room grants. Broad on purpose, and safe for the reason the whole layout
+  // rests on: a Merge table reduces to the underlying rooms the CALLER holds grants for.
+  // Measured on 25.11 — bob with SELECT on all_messages and nothing on messages_alice
+  // reads his own row and none of alice's, with `_table` showing only messages_bob, and
+  // no error. Withholding this grant does not make anything safer; it makes the team
+  // room deny outright instead of failing closed, which is a different and worse thing.
+  const merged = await mergeRoomsPresent(client, cfg.database);
+  for (const room of merged) {
+    await client.command({ query: `GRANT SELECT ON ${cfg.database}.${room} TO ${member}` });
+  }
+  if (merged.length) console.log(`[mem] granted SELECT on ${merged.join(', ')} to '${member}'`);
+  else console.log('[mem] no merge rooms yet — run once with --merge to create them');
 
   await client.close();
 }
