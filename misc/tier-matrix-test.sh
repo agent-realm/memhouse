@@ -207,6 +207,10 @@ env MEMHOUSE_HOME="$HC" $CLI reset --yes >/dev/null 2>&1
 ROWS2=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=memhouse&final=1" --data-binary "SELECT count() FROM messages FORMAT TabSeparated" | tr -d "\r")
 [ "$ROWS" = "$ROWS2" ] && [ -n "$ROWS" ] && ok "a reset aimed at the wrong database did not erase the real one" \
   || bad "the real house lost rows ($ROWS -> $ROWS2)"
+# The rollup resolves differently per layout: the stored view's NAME in the shared
+# layout (this home), a subquery in the per-member one (covered by the unit gate).
+assert_out "sessions-query prints the shared view name here" "^sessions_v$" \
+  env MEMHOUSE_HOME="$HC" $CLI sessions-query
 # The bootstrap case must still work: ?database=X on the statement that creates X.
 # A success is EMPTY output, which grep cannot match — assert on the absence of an error.
 BOOT=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=brandnew" --data-binary "CREATE DATABASE brandnew")

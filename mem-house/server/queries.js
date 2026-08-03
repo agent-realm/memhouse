@@ -17,7 +17,7 @@
 
 const { createClient } = require('@clickhouse/client');
 const { calculateCost, normalizeModelName } = require('../../pricing');
-const { resolveRooms } = require('../per-member/rooms');
+const { resolveRooms, READ_SETTINGS } = require('../per-member/rooms');
 
 const config = {
   url: process.env.MEMHOUSE_URL || 'http://localhost:8123',
@@ -36,7 +36,7 @@ function getClient() {
     database: config.database,
     request_timeout: 60000,
     clickhouse_settings: {
-      final: 1,
+      ...READ_SETTINGS,
       output_format_json_quote_64bit_integers: 0,
     },
   });

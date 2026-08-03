@@ -45,26 +45,33 @@ test('per-member layout suffixes rooms with the member', () => {
   assert.strictEqual(r.member, 'alice');
 });
 
-test('the view is PREFIXED, so the Merge selector cannot match it', () => {
-  const r = rooms.roomNames('alice');
-  assert.strictEqual(r.sessions_v, 'v_sessions_alice');
-  // The three selectors from schema-merge.sql.tpl, verbatim.
+test('the session rollup is a QUERY, not a fourth object', () => {
+  const shared = rooms.roomNames(null);
+  const alice = rooms.roomNames('alice');
+  // Shared layout: the stored view schema.sql actually creates, by name.
+  assert.strictEqual(shared.sessions_v, 'sessions_v');
+  // Per-member: SQL text, substituted into the same `FROM ... AS c` position.
+  assert.ok(alice.sessions_v.startsWith('('), 'per-member rollup must be a subquery');
+  assert.ok(alice.sessions_v.includes('FROM sessions_alice AS s'), alice.sessions_v);
+  assert.ok(alice.sessions_v.includes('LEFT JOIN messages_alice AS m'), 'the LEFT JOIN must survive');
+  // No name means nothing for the Merge selectors to swallow — the whole class of
+  // collision a `sessions_v_alice` view created does not exist.
   for (const re of [/^sessions_/, /^messages_/, /^tool_calls_/]) {
-    assert.ok(!re.test(r.sessions_v), `${re} must not match ${r.sessions_v}`);
+    assert.ok(!re.test(alice.sessions_v), `${re} must not match a subquery`);
   }
-  // ...and still matches the room it is supposed to.
-  assert.ok(/^sessions_/.test(r.sessions));
 });
 
-test('the v_ prefix is reserved, so no handle can recreate the collision', () => {
-  assert.throws(() => rooms.roomNames('v_bob'), /reserved/);
-  assert.throws(() => rooms.assertUsableMember('v_'), /reserved/);
-  assert.doesNotThrow(() => rooms.roomNames('victor')); // 'v' alone is fine
+test('the rollup carries no SETTINGS of its own', () => {
+  // A subquery cannot carry a trailing SETTINGS clause, so join_use_nulls has to be a
+  // caller setting. If it drifts back into the text, every read using the rollup breaks.
+  assert.ok(!/SETTINGS/i.test(rooms.roomNames('alice').sessions_v));
+  assert.strictEqual(rooms.READ_SETTINGS.join_use_nulls, 1);
+  assert.strictEqual(rooms.READ_SETTINGS.final, 1);
 });
 
 test('handles that would need quoting are refused', () => {
   for (const bad of ['1alice', 'ali ce', 'ali-ce', "ali'ce", 'ali.ce', '']) {
-    assert.throws(() => rooms.assertUsableMember(bad), /expected|reserved/, `accepted '${bad}'`);
+    assert.throws(() => rooms.assertUsableMember(bad), /expected/, `accepted '${bad}'`);
   }
 });
 

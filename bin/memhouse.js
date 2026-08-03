@@ -113,7 +113,10 @@ function writeEnvFile(cfg) {
 
 // ── ClickHouse over HTTP (small read-only queries; heavy ops go via ship.js) ───
 async function ch(cfg, sql, { database = cfg.db } = {}) {
-  const params = new URLSearchParams({ final: '1' });
+  // Both settings, always: `final` collapses ReplacingMergeTree versions, and
+  // `join_use_nulls` is what the session rollup's coalesce depends on now that it is a
+  // saved query rather than a view carrying its own SETTINGS clause.
+  const params = new URLSearchParams({ final: '1', join_use_nulls: '1' });
   if (database) params.set('database', database);
   const res = await fetch(`${cfg.url.replace(/\/$/, '')}/?${params}`, {
     method: 'POST',
@@ -237,6 +240,7 @@ Setup        onboard              interactive wizard: discover → configure →
 Data         ship                 one incremental pass (--full | --loop [sec])
              stats                per-source session/message/token counts
              search <terms…>      full-text search across all sessions
+             sessions-query       print the session rollup SQL for this credential
              start | stop |       shipper loop + dashboard as background daemons
              status               daemons, connection, counts, freshness (--json)
              doctor               diagnose the whole pipeline
@@ -353,7 +357,8 @@ async function cmdInstall({ interactive }) {
   // the step is a check, not a creation, and it names the command that fixes it.
   if (String(cfg.perMember) === '1') {
     const r = await roomsFor(cfg);
-    const want = ROOM_TYPES.map((t) => r[t]).concat(r.sessions_v);
+    // Three rooms. The session rollup is a saved query over them, not a fourth object.
+    const want = ROOM_TYPES.map((t) => r[t]);
     let present = [];
     try {
       const list = `'${want.join("','")}'`;
@@ -519,14 +524,12 @@ async function cmdDoctor() {
   try { rooms = await roomsFor(cfg); } catch (e) { add(false, 'room resolution', e.message); }
   if (rooms.perMember) add(true, `layout: per-member rooms for '${rooms.member}'`);
   try {
-    // The ROLLUP VIEW counts. Every product read path goes through it — dashboard,
-    // status, search, stats — so a house with three healthy rooms and no view ships fine
-    // and fails every read with UNKNOWN_TABLE, while a rooms-only check calls that a
-    // clean bill of health.
-    const objects = [...ROOM_TYPES.map((t) => rooms[t]), rooms.sessions_v];
+    // Three rooms. The session rollup every read path goes through is a saved query over
+    // exactly these, so if they are here it is too — there is no fourth object to lose.
+    const objects = ROOM_TYPES.map((t) => rooms[t]);
     const want = objects.map((n) => `'${n}'`).join(',');
     const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
-    add(t === objects.length, `schema: ${t}/${objects.length} rooms+view in '${cfg.db}' (${objects.join(', ')})`,
+    add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
       rooms.perMember ? `run, as the owner: node mem-house/per-member/provision.js --member ${rooms.member}` : 'run: memhouse install (ensure-schema)');
   } catch (e) { add(false, 'schema check', e.message); }
   try {
@@ -743,6 +746,18 @@ function cmdUninstall() {
     case 'status': await cmdStatus(); break;
     case 'doctor': process.exitCode = await cmdDoctor(); break;
     case 'search': process.exitCode = await cmdSearch(); break;
+    // The session rollup is a saved query, not an object, so there is no name an agent
+    // or a skill can put in a FROM clause. This prints it, resolved for whoever the
+    // configured credential is — the substitute for that name.
+    case 'sessions-query': {
+      const cfg = resolveConfig();
+      const r = await roomsFor(cfg);
+      console.log(r.sessions_v);
+      if (!JSON_OUT && r.perMember) {
+        console.error(`-- rollup for '${r.member}'. Read with final=1 and join_use_nulls=1.`);
+      }
+      break;
+    }
     case 'plugins': process.exitCode = cmdPlugins(); break;
     case 'prompt': process.stdout.write(fs.readFileSync(path.join(DELIVERY, 'PROMPT.md'), 'utf-8')); break;
     case 'reset': process.exitCode = await cmdReset(); break;

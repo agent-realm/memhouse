@@ -30,7 +30,7 @@ const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
-const { resolveRooms, perMemberEnabled } = require('../per-member/rooms');
+const { resolveRooms, perMemberEnabled, READ_SETTINGS } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -420,7 +420,7 @@ async function printStats(client) {
       GROUP BY source
       ORDER BY sessions DESC`,
     format: 'JSONEachRow',
-    clickhouse_settings: { final: 1 },
+    clickhouse_settings: READ_SETTINGS,
   });
   const rows = await rs.json();
   if (!rows.length) { console.log('[mem-house] house is empty'); return; }

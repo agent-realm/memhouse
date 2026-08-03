@@ -9,6 +9,9 @@
 //      WITH GRANT OPTION (grant-option is what makes whole-room sharing self-serve; the
 //      two ALTER grants are required by the shipper's clear-then-insert, not a
 //      convenience — see the note at the grant itself)
+//
+//      THREE grants, not four: the session rollup is a saved query over these same rooms,
+//      not a stored view, so it needs no object and no grant of its own.
 //   3. --merge: create/refresh the three Merge rooms, borrowing this member's columns
 //   4. grant the member SELECT on whichever Merge rooms exist — a Merge reduces to the
 //      rooms the caller can already read, so this is what makes the team room fail
@@ -22,7 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@clickhouse/client');
-const { ROOM_TYPES, VIEW_TYPES, viewName, mergeRooms, assertUsableMember } = require('./rooms');
+const { ROOM_TYPES, mergeRooms, assertUsableMember } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -93,16 +96,7 @@ async function main() {
       query: `GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON ${cfg.database}.${t}_${member} TO ${member} WITH GRANT OPTION`,
     });
   }
-  // The view is read-only and read by the dashboard/CLI, so SELECT is the whole grant —
-  // with grant option, because sharing a room without its view leaves the recipient able
-  // to read rows and unable to use any of the product's read paths.
-  for (const v of VIEW_TYPES) {
-    await client.command({
-      query: `GRANT SELECT ON ${cfg.database}.${viewName(v, member)} TO ${member} WITH GRANT OPTION`,
-    });
-  }
   console.log(`[mem] granted SELECT, INSERT, ALTER UPDATE, ALTER DELETE WITH GRANT OPTION on 3 rooms to '${member}'`);
-  console.log(`[mem] granted SELECT WITH GRANT OPTION on ${VIEW_TYPES.map((v) => viewName(v, member)).join(', ')}`);
 
   // 3. Merge rooms
   if (flag('merge')) {

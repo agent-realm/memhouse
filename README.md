@@ -114,8 +114,10 @@ unless lingering is on, so install detects that and prints the `loginctl` comman
 
 `MEM_PER_MEMBER=1` (or `install --per-member`) switches the house from three shared
 rooms separated by a row policy to a set of rooms per member — `messages_alice`,
-`sessions_alice`, `tool_calls_alice`, `v_sessions_alice` — where isolation is a
-grant that is simply absent rather than a policy that must be right everywhere.
+`sessions_alice`, `tool_calls_alice` — where isolation is a grant that is simply
+absent rather than a policy that must be right everywhere. The session rollup stays a
+saved query over those rooms rather than a stored view, so there is no fourth object to
+provision, grant or collide with the team rooms; `memhouse sessions-query` prints it.
 Rooms are minted by the house owner (`mem-house/per-member/provision.js`); sharing
 a whole room is then self-serve, with no operator. Design and measurements:
 `mem-house/per-member/`.

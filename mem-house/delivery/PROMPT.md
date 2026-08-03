@@ -25,11 +25,12 @@ FIRST. Only say you don't know after a search comes back empty.
 
 **Table names first.** `~/.memhouse/env` carries `MEM_PER_MEMBER`. If it is `1`,
 this house gives each member their own rooms and every table below takes your
-username as a suffix — `messages_<you>`, `sessions_<you>`, `tool_calls_<you>` — and
-the `sessions_v` rollup becomes `v_sessions_<you>`, prefixed so it stays out of the
-room namespace. The plain names fail with `UNKNOWN_TABLE` rather than returning
-nothing. Get the suffix from `SELECT currentUser()`. If it is unset or `0`, use the names as
-written.
+username as a suffix — `messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. The
+plain names fail with `UNKNOWN_TABLE` rather than returning nothing; get the suffix
+from `SELECT currentUser()`. **There is no `sessions_v` in that layout** — the rollup
+is a saved query over those same rooms, and `memhouse sessions-query` prints it ready
+to drop into a `FROM (...) AS c`. If `MEM_PER_MEMBER` is unset or `0`, use the names
+as written.
 
 - Find sessions about a topic (FTS, lowercase your terms):
   `SELECT DISTINCT session_id, any(project), min(ts) FROM messages

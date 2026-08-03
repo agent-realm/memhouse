@@ -38,11 +38,12 @@ which one this house uses:
 
 - `MEM_PER_MEMBER` unset or `0` — shared rooms. Use the names below as written.
 - `MEM_PER_MEMBER=1` — every member has their own rooms, named for their ClickHouse
-  user — `messages_alice`, `sessions_alice`, `tool_calls_alice` — and the rollup view is
-  prefixed instead: `v_sessions_alice` (it must stay out of the `sessions_` namespace,
-  which the team-wide Merge rooms select on).
-  A member holds no grant on anyone else's, so the unsuffixed names below do not
-  merely return nothing — they fail with `UNKNOWN_TABLE`.
+  user: `messages_alice`, `sessions_alice`, `tool_calls_alice`. A member holds no grant
+  on anyone else's, so the unsuffixed names below do not merely return nothing — they
+  fail with `UNKNOWN_TABLE`.
+  **There is no `sessions_v` in this layout.** The session rollup is a saved query over
+  those same rooms, not a stored object; `memhouse sessions-query` prints it for whoever
+  you are connected as, ready to paste into a `FROM (...) AS c` position.
 
 Resolve the suffix once, then substitute it into every table name:
 
@@ -54,7 +55,7 @@ if [ "${MEM_PER_MEMBER:-0}" = "1" ]; then
     "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
 fi
 # rooms: messages${MEM_SUFFIX}, sessions${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
-# view:  the shared `sessions_v` becomes v_sessions${MEM_SUFFIX}
+# rollup: `sessions_v` in the shared layout; `$(memhouse sessions-query)` per-member
 ```
 
 ## Default listing

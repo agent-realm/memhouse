@@ -11,17 +11,20 @@ per-member is opt-in.
 
 This README is the living index; the design docs are versioned and never rewritten.
 
-## Current — v5 (2026-08-03-16_01)
+## Current — v6 (2026-08-03-20_08)
 
 | File | What |
 |---|---|
-| [`PLAN-v5-2026-08-03-16_01.md`](PLAN-v5-2026-08-03-16_01.md) | the model, why, phases, measured facts |
-| [`PROVISIONING-v5-2026-08-03-16_01.md`](PROVISIONING-v5-2026-08-03-16_01.md) | the grant set, kernel capability, standalone path |
-| [`SCHEMA-v4-2026-08-02-22_58.md`](SCHEMA-v4-2026-08-02-22_58.md) | room naming, shapes, sort keys, Merge rooms (its `sessions_v`-as-a-saved-query section is superseded by v5: it is a stored view per member) |
-| [`SHARING-v4-2026-08-03-17_02.md`](SHARING-v4-2026-08-03-17_02.md) | whole-room self-serve (four grants, including the view), partial rows via the owner |
+| [`PLAN-v6-2026-08-03-20_08.md`](PLAN-v6-2026-08-03-20_08.md) | the model, why, phases, measured facts |
+| [`PROVISIONING-v6-2026-08-03-20_08.md`](PROVISIONING-v6-2026-08-03-20_08.md) | the grant set (three per member), kernel capability, standalone path |
+| [`SCHEMA-v5-2026-08-03-20_08.md`](SCHEMA-v5-2026-08-03-20_08.md) | room naming, shapes, sort keys, Merge rooms, and why `sessions_v` is a saved query |
+| [`SHARING-v5-2026-08-03-20_08.md`](SHARING-v5-2026-08-03-20_08.md) | whole-room self-serve (three grants), partial rows via the owner |
 | [`MIGRATION-v3-2026-08-02-22_49.md`](MIGRATION-v3-2026-08-02-22_49.md) | **deferred**, and not blocked |
 
-Superseded, kept as written: [v3 SHARING](SHARING-v3-2026-08-02-22_49.md) ·
+Superseded, kept as written: [v5 PLAN](PLAN-v5-2026-08-03-16_01.md) ·
+[v5 PROVISIONING](PROVISIONING-v5-2026-08-03-16_01.md) ·
+[v4 SHARING](SHARING-v4-2026-08-03-17_02.md) · [v4 SCHEMA](SCHEMA-v4-2026-08-02-22_58.md) ·
+[v3 SHARING](SHARING-v3-2026-08-02-22_49.md) ·
 [v4 PLAN](PLAN-v4-2026-08-02-22_58.md) ·
 [v4 PROVISIONING](PROVISIONING-v4-2026-08-02-22_58.md) ·
 [v3 PLAN](PLAN-v3-2026-08-02-22_49.md) ·
@@ -36,9 +39,9 @@ Superseded, kept as written: [v3 SHARING](SHARING-v3-2026-08-02-22_49.md) ·
 ## The one-paragraph version
 
 The house is **`mem`**. Each member gets `mem.sessions_<member>`, `mem.messages_<member>`,
-`mem.tool_calls_<member>` and their own `mem.v_sessions_<member>`, with four grants over
-them: `SELECT, INSERT, ALTER UPDATE, ALTER DELETE` on the three rooms and `SELECT` on the
-view, all `WITH GRANT OPTION`. Isolation stops
+`mem.tool_calls_<member>`, with three grants over them —
+`SELECT, INSERT, ALTER UPDATE, ALTER DELETE`, all `WITH GRANT OPTION`. The session rollup
+is a saved query over those same rooms, not a fourth object. Isolation stops
 being a row policy that must be right everywhere and becomes a grant that is simply
 absent — it fails closed. Sharing a whole room needs no operator. Team-wide reads come
 from `Merge` rooms anchored on the room type (`^messages_`), which reduce to each caller's
@@ -49,6 +52,15 @@ room denies instead of narrowing.
 not granted `EXECUTE AS`.
 
 ## Version history
+
+**v6** — reverts the stored `sessions_v`. `SCHEMA-v4` had decided the rollup is a saved
+query; round 1 of the review campaign made it a view instead, reactively, to fix a
+read-layer finding, without going back to the design. That override cost a name inside the
+`^sessions_` Merge namespace (161 sessions counted as 322), a rename, a reserved prefix, a
+fourth grant and a fourth object. The query is back, resolved as SQL text wherever a room
+name is resolved, and `memhouse sessions-query` prints it for ad-hoc use. `SCHEMA-v5`
+records the whole detour.
+
 
 **v5** — three corrections found by running the thing, not by rereading it. The grant set
 needs both `ALTER UPDATE` and `ALTER DELETE`, not just `SELECT, INSERT`; which of the two
@@ -89,3 +101,6 @@ narrower than v2 stated, and migration is not blocked on provenance.
 5. **Should a share be `SELECT`-only?** Grant-option covers the whole grant, so a member can
    hand a colleague the mutation rights on their own room. Convention says read-only; nothing
    enforces it.
+6. **Is a saved rollup enough for agents?** It has no name to type. `memhouse
+   sessions-query` prints it, which is a worse affordance than a name and the price of
+   having nothing to own, grant or collide.
