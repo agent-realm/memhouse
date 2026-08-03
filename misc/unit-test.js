@@ -212,5 +212,21 @@ test('only object-not-found messages mean absent', () => {
   }
 });
 
+test('an engine that cannot answer is never dropped from ownership', () => {
+  const deploy = require('../mem-house/deploy');
+  // The pin is the escape hatch, and it must win outright — this is the only way off
+  // the indeterminate path when a second engine's daemon is down.
+  const saved = process.env.MEMHOUSE_ENGINE;
+  try {
+    process.env.MEMHOUSE_ENGINE = 'podman';
+    const o = deploy.owningEngine();
+    assert.strictEqual(o.engine, 'podman');
+    assert.strictEqual(o.pinned, true);
+    assert.strictEqual(o.indeterminate, undefined);
+  } finally {
+    if (saved === undefined) delete process.env.MEMHOUSE_ENGINE; else process.env.MEMHOUSE_ENGINE = saved;
+  }
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

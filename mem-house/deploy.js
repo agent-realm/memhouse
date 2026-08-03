@@ -47,10 +47,28 @@ function availableEngines() {
  * under our names, which no caller may guess its way through.
  */
 function owningEngine() {
+  // An explicit pin wins over all of this. It is the escape hatch for the indeterminate
+  // case below, which is otherwise unresolvable from here.
+  const pinned = process.env.MEMHOUSE_ENGINE;
+  if (pinned) {
+    return { engine: pinned, ambiguous: false, engines: [pinned], pinned: true };
+  }
   const engines = availableEngines();
   if (!engines.length) return { engine: null, ambiguous: false, engines };
-  const owners = engines.filter((e) => ['container', 'volume'].some((k) => ownership(e, k, k === 'volume' ? VOLUME : CONTAINER) === 'ours'));
+
+  const owners = [];
+  const indeterminate = [];
+  for (const e of engines) {
+    const states = [ownership(e, 'container', CONTAINER), ownership(e, 'volume', VOLUME)];
+    if (states.includes('ours')) owners.push(e);
+    // `unknown` means this engine could not tell us — an unreachable daemon, most
+    // likely. Discarding it would let ANOTHER engine's 'ours' look unambiguous while
+    // the silent one owns the house we are about to replace or remove. It is not
+    // evidence of absence, so it cannot be dropped from the count.
+    else if (states.includes('unknown')) indeterminate.push(e);
+  }
   if (owners.length > 1) return { engine: null, ambiguous: true, engines, owners };
+  if (indeterminate.length) return { engine: null, indeterminate, engines, owners };
   return { engine: owners[0] || engines[0], ambiguous: false, engines };
 }
 
@@ -105,7 +123,7 @@ function foreignMsg(kind, name) {
  */
 function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }) {
   const o = owningEngine();
-  if (o.ambiguous) return { ok: false, msg: ambiguousMsg(o) };
+  if (o.ambiguous || o.indeterminate) return { ok: false, msg: ambiguousMsg(o) };
   const eng = o.engine;
   if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
   if (!password) return { ok: false, msg: 'refusing to start an unauthenticated house — no password given' };
@@ -120,19 +138,9 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
   // Make sure the replacement image is actually available BEFORE removing the house it
   // replaces. `run` discovers a bad tag or an unreachable registry only after the old
   // container is gone, which takes a working house offline for a typo.
-  const image = `${IMAGE_REPO}:${tag}`;
-  const haveImage = spawnSync(eng, ['image', 'inspect', image], { encoding: 'utf-8' }).status === 0;
-  if (!haveImage) {
-    const pull = spawnSync(eng, ['pull', image], { encoding: 'utf-8' });
-    if (pull.status !== 0) {
-      return {
-        ok: false,
-        engine: eng,
-        msg: `cannot obtain ${image} — ${(pull.stderr || '').trim().split('\n').slice(-1)[0] || `exit ${pull.status}`}. `
-          + 'The existing house was left running.',
-      };
-    }
-  }
+  const img = ensureImage(eng, tag);
+  if (!img.ok) return { ok: false, engine: eng, msg: img.msg };
+  const image = img.image;
 
   if (own === 'ours') spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
 
@@ -179,7 +187,7 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
  */
 function down() {
   const o = owningEngine();
-  if (o.ambiguous) return { ok: false, msg: ambiguousMsg(o) };
+  if (o.ambiguous || o.indeterminate) return { ok: false, msg: ambiguousMsg(o) };
   const eng = o.engine;
   if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
 
@@ -233,6 +241,12 @@ function volumeExists() {
 }
 
 function ambiguousMsg(o) {
+  if (o.indeterminate) {
+    return `${o.indeterminate.join(' and ')} could not say whether it holds '${CONTAINER}' or `
+      + `'${VOLUME}' — an unreachable daemon looks the same as an empty one, and acting on the `
+      + 'other engine could replace or remove the wrong house. Start it, or pin the engine '
+      + `explicitly: MEMHOUSE_ENGINE=${(o.owners && o.owners[0]) || o.engines.find((e) => !o.indeterminate.includes(e)) || o.engines[0]}`;
+  }
   return `both ${(o.owners || o.engines).join(' and ')} hold something named '${CONTAINER}' or `
     + `'${VOLUME}' with the ${OWNER_LABEL} label. Refusing to guess which house is yours — `
     + 'remove one of them, or run with only one engine on PATH.';
@@ -246,9 +260,9 @@ function ambiguousMsg(o) {
  * the shipper, the dashboard and the shim — so a refusal costs the user a working
  * pipeline in exchange for protecting them. The same questions, asked first.
  */
-function preflight() {
+function preflight({ tag = DEFAULT_TAG } = {}) {
   const o = owningEngine();
-  if (o.ambiguous) return { ok: false, reason: 'ambiguous', msg: ambiguousMsg(o) };
+  if (o.ambiguous || o.indeterminate) return { ok: false, reason: 'ambiguous', msg: ambiguousMsg(o) };
   const eng = o.engine;
   // `reason` matters to callers that are not deploying a local house. `no-engine` means
   // there cannot BE a local tier on this machine, which is a fine reason to go on and
@@ -260,11 +274,31 @@ function preflight() {
     if (own === 'foreign') return { ok: false, reason: 'foreign', engine: eng, msg: foreignMsg(kind, name) };
     if (own === 'unknown') return { ok: false, reason: 'unknown', engine: eng, msg: unknownMsg(kind, name, eng) };
   }
+  // The image, too — `up()` checks it, but by then the caller has stopped the shipper and
+  // the dashboard, so a bad tag costs a working pipeline to discover.
+  const img = ensureImage(eng, tag);
+  if (!img.ok) return { ok: false, reason: 'image', engine: eng, msg: img.msg };
   return { ok: true, engine: eng, initialised: ownership(eng, 'volume', VOLUME) === 'ours' };
 }
 
+/** Present locally, or pullable. Never removes anything. */
+function ensureImage(eng, tag) {
+  const image = `${IMAGE_REPO}:${tag}`;
+  if (spawnSync(eng, ['image', 'inspect', image], { encoding: 'utf-8' }).status === 0) return { ok: true, image };
+  const pull = spawnSync(eng, ['pull', image], { encoding: 'utf-8' });
+  if (pull.status !== 0) {
+    return {
+      ok: false,
+      image,
+      msg: `cannot obtain ${image} — ${(pull.stderr || '').trim().split('\n').slice(-1)[0] || `exit ${pull.status}`}. `
+        + 'The existing house was left running.',
+    };
+  }
+  return { ok: true, image };
+}
+
 module.exports = {
-  engine, owningEngine, availableEngines, up, down, waitReady, volumeExists, preflight,
+  engine, owningEngine, availableEngines, ensureImage, up, down, waitReady, volumeExists, preflight,
   CONTAINER, VOLUME, DEFAULT_TAG,
   // exported for the unit gate: classifying an engine message wrong is silent
   _NOT_FOUND: NOT_FOUND,

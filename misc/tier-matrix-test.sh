@@ -266,6 +266,18 @@ assert_exit "but a FRESH home with no engine still deploys solo" 0 \
 env MEMHOUSE_HOME="$HH" $CLI stop >/dev/null 2>&1
 env MEMHOUSE_HOME="$HG" $CLI deploy --down >/dev/null 2>&1
 
+say "a bad tag is caught before anything is stopped"
+HI="$TMP/home-tag2"; mkdir -p "$HI"
+env MEMHOUSE_HOME="$HI" $CLI deploy --local --house-port $((PORT_CH+9)) --no-ship >/dev/null 2>&1
+env MEMHOUSE_HOME="$HI" $CLI start >/dev/null 2>&1; sleep 2
+env MEMHOUSE_HOME="$HI" $CLI deploy --local --house-port $((PORT_CH+9)) --tag no-such-tag-77 --no-ship >/dev/null 2>&1
+if [ -e "$HI/run/shipper.pid" ] && [ -e "$HI/run/dashboard.pid" ]; then
+  ok "the refusal left both clients running"
+else bad "the clients were stopped before the image was validated"; fi
+assert_out "and the house is still serving" "connected:" env MEMHOUSE_HOME="$HI" $CLI status
+env MEMHOUSE_HOME="$HI" $CLI stop >/dev/null 2>&1
+env MEMHOUSE_HOME="$HI" $CLI deploy --down >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"

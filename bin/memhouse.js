@@ -257,6 +257,7 @@ House        deploy --local       run ClickHouse in docker/podman, then install
 
 Config: flags > MEMHOUSE_* env > ${ENV_FILE.replace(os.homedir(), '~')} > defaults.
 Layout: --per-member (or MEM_PER_MEMBER=1) uses one set of rooms per member; persisted.
+Engine: MEMHOUSE_ENGINE pins docker or podman when both are installed and one cannot answer.
 `;
 
 // A skipped adapter and an editor the user does not have look identical — both
@@ -934,7 +935,9 @@ function cmdUninstall() {
       // `volumeExists()` alone is not enough: it collapses foreign and indeterminate to
       // "no volume", so a foreign container under the fixed name was only discovered
       // inside up(), by which point the shipper and dashboard were already dead.
-      const pre = dep.preflight();
+      // The tag goes in too: `up()` validates the image, but by then the shipper and the
+      // dashboard have been stopped, so a typo costs a working pipeline to discover.
+      const pre = dep.preflight({ tag: flags.tag || process.env.MEMHOUSE_CH_TAG || dep.DEFAULT_TAG });
       if (!pre.ok) { console.log(bad(pre.msg)); process.exitCode = 1; break; }
       const initialised = pre.initialised;
       const reusable = initialised && priorCfg.password ? priorCfg.password : null;
