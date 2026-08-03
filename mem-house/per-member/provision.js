@@ -5,8 +5,9 @@
 //
 // Run as the OWNER. Steps, all IF NOT EXISTS / re-runnable:
 //   1. create the member's three rooms from schema-member.sql.tpl
-//   2. grant the member SELECT+INSERT on those three rooms, WITH GRANT OPTION
-//      (grant-option is what makes whole-room sharing self-serve)
+//   2. grant the member SELECT, INSERT, ALTER DELETE on those three rooms, WITH GRANT
+//      OPTION (grant-option is what makes whole-room sharing self-serve; ALTER DELETE is
+//      required by the shipper's clear-then-insert, not a convenience — see step 2 below)
 //   3. --merge: create/refresh the three Merge rooms, borrowing this member's columns
 //
 // Grants are explicit, one statement per room. No wildcards are used anywhere; the only

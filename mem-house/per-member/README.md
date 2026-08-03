@@ -1,24 +1,28 @@
-# per-member rooms — skeleton
+# per-member rooms
 
 A fork of the mem-house data model: **one house, a set of rooms per member**, instead of
 one house with three rooms shared by everyone and separated by a row policy.
 
-Nothing here is built. These are design skeletons with the decisions taken so far and the
-open questions marked. The working design is still `../DESIGN.md` and `../schema.sql`.
+v1–v4 were design skeletons. **The design is now implemented** — `rooms.js`,
+`provision.js`, the two DDL templates, and the `MEM_PER_MEMBER` switch in the shipper —
+and proven end-to-end on ClickHouse 26.7.1. The shared-room layout in `../DESIGN.md` and
+`../schema.sql` still ships and is unchanged; per-member is opt-in.
 
 This README is the living index; the design docs are versioned and never rewritten.
 
-## Current — v4 (2026-08-02-22_58)
+## Current — v5 (2026-08-03-16_01)
 
 | File | What |
 |---|---|
-| [`PLAN-v4-2026-08-02-22_58.md`](PLAN-v4-2026-08-02-22_58.md) | the model, why, phases, measured facts |
+| [`PLAN-v5-2026-08-03-16_01.md`](PLAN-v5-2026-08-03-16_01.md) | the model, why, phases, measured facts |
+| [`PROVISIONING-v5-2026-08-03-16_01.md`](PROVISIONING-v5-2026-08-03-16_01.md) | the grant set, kernel capability, standalone path |
 | [`SCHEMA-v4-2026-08-02-22_58.md`](SCHEMA-v4-2026-08-02-22_58.md) | room naming, shapes, sort keys, Merge rooms, `sessions_v` as a saved query |
-| [`PROVISIONING-v4-2026-08-02-22_58.md`](PROVISIONING-v4-2026-08-02-22_58.md) | the grant set, kernel capability, standalone path |
 | [`SHARING-v3-2026-08-02-22_49.md`](SHARING-v3-2026-08-02-22_49.md) | whole-room self-serve, partial rows via the owner |
 | [`MIGRATION-v3-2026-08-02-22_49.md`](MIGRATION-v3-2026-08-02-22_49.md) | **deferred**, and not blocked |
 
-Superseded, kept as written: [v3 PLAN](PLAN-v3-2026-08-02-22_49.md) ·
+Superseded, kept as written: [v4 PLAN](PLAN-v4-2026-08-02-22_58.md) ·
+[v4 PROVISIONING](PROVISIONING-v4-2026-08-02-22_58.md) ·
+[v3 PLAN](PLAN-v3-2026-08-02-22_49.md) ·
 [v3 SCHEMA](SCHEMA-v3-2026-08-02-22_49.md) · [v2 PLAN](PLAN-v2-2026-08-02-22_42.md) ·
 [v2 SCHEMA](SCHEMA-v2-2026-08-02-22_42.md) ·
 [v2 PROVISIONING](PROVISIONING-v2-2026-08-02-22_42.md) ·
@@ -30,7 +34,8 @@ Superseded, kept as written: [v3 PLAN](PLAN-v3-2026-08-02-22_49.md) ·
 ## The one-paragraph version
 
 The house is **`mem`**. Each member gets `mem.sessions_<member>`, `mem.messages_<member>`,
-`mem.tool_calls_<member>` and three grants over them `WITH GRANT OPTION`. Isolation stops
+`mem.tool_calls_<member>` and three grants over them
+(`SELECT, INSERT, ALTER DELETE ... WITH GRANT OPTION`). Isolation stops
 being a row policy that must be right everywhere and becomes a grant that is simply
 absent — it fails closed. Sharing a whole room needs no operator. Team-wide reads come
 from `Merge` rooms anchored on the room type (`^messages_`), which reduce to each caller's
@@ -39,6 +44,11 @@ own grants, auto-discover new members, and tolerate schema drift.
 not granted `EXECUTE AS`.
 
 ## Version history
+
+**v5** — corrects the grant set: `SELECT, INSERT` is insufficient, because the shipper
+clears a session's rows before re-inserting and so needs `ALTER DELETE`. The error only
+appears on the *second* ship of a *changed* session, which is how four versions carried it.
+Also stops calling this a skeleton — it is implemented and measured.
 
 **v4** — drops the wildcard-grant collision, which had been carried since v1 as a live
 design constraint. Nothing in this design proposes a wildcard grant; the only wildcard is
@@ -63,3 +73,6 @@ narrower than v2 stated, and migration is not blocked on provenance.
 3. **Standalone path** — a user with no kernel is both owner and member; one credential or
    two?
 4. **Is `EXECUTE AS` scopeable** to `mem.*` rather than `*.*`?
+5. **Should a share be `SELECT`-only?** Grant-option covers the whole grant, so a member can
+   hand a colleague `ALTER DELETE` on their own room. Convention says read-only; nothing
+   enforces it.
