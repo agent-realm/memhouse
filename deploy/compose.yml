@@ -1,0 +1,55 @@
+# memhouse — the missing first mile: a ClickHouse to point at.
+#
+# Every install path assumes a reachable ClickHouse. This stands one up with a named
+# volume so a standalone user has a house without hunting for a server.
+#
+# Deliberately NOT the banned per-repo sandbox pattern: nothing here bakes the memhouse
+# checkout into an image. It runs the stock upstream server and nothing else; memhouse
+# itself stays on the host, installed from npm, and connects over HTTP.
+#
+#   docker compose -f deploy/compose.yml up -d
+#   memhouse install --yes --url http://localhost:8123 \
+#     --user memhouse_root --password "$MEMHOUSE_PASSWORD" --db memhouse
+#
+# Or let the CLI do both:  memhouse deploy --local
+#
+# The password has no default on purpose — an unauthenticated house on a laptop is how
+# agent transcripts leak to anything that can reach the port.
+#
+# Consequence worth knowing: compose interpolates for EVERY subcommand, so `down` also
+# demands the variable. Tearing down needs any value — the server is not consulted:
+#   MEMHOUSE_PASSWORD=x docker compose -f deploy/compose.yml down -v
+# `memhouse deploy --down` does exactly that for you.
+
+name: memhouse
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:${MEMHOUSE_CH_TAG:-25.11}
+    container_name: memhouse-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${MEMHOUSE_USER:-memhouse_root}
+      CLICKHOUSE_PASSWORD: ${MEMHOUSE_PASSWORD:?set MEMHOUSE_PASSWORD — refusing to start an unauthenticated house}
+      # The house itself is created by `memhouse install`, not here: pre-creating it
+      # would skip the step an install is supposed to prove.
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      # Loopback only. The dashboard and skills run on this machine; nothing needs the
+      # house exposed to the network, and 8123 unauthenticated-by-accident is a bad day.
+      - "127.0.0.1:${MEMHOUSE_PORT:-8123}:8123"
+    volumes:
+      - memhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      # wget is present in the server image; curl is not guaranteed.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  memhouse-data:
+    name: memhouse-data
