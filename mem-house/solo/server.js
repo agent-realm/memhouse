@@ -156,10 +156,23 @@ function applySettings(url) {
 // this async — a worker pool, a promise-returning chdb binding — would let request B's
 // parameters land between request A's SET and A's query, and A would silently read B's
 // values. If that day comes, serialize explicitly instead of relying on this note.
+// `?database=X` on a statement that CREATES X is the bootstrap case: the client sends it
+// on every request including the one bringing X into existence, and `USE X` would fail
+// before anything could be created. That is the ONLY reason to proceed without switching.
+const CREATES_DB = /^\s*CREATE\s+DATABASE\b/i;
+
 function run(sql, fmt, database, url, statement) {
-  if (database && database !== currentDb && dbExists(database)) {
-    session.query(`USE ${database}`, 'CSV');
-    currentDb = database;
+  if (database && database !== currentDb) {
+    if (dbExists(database)) {
+      session.query(`USE ${database}`, 'CSV');
+      currentDb = database;
+    } else if (!CREATES_DB.test(statement || sql)) {
+      // Falling through here would run the statement against whichever database the
+      // session last selected — so `memhouse setup --db typo` followed by
+      // `memhouse reset --yes` would report clearing `typo` while its unqualified
+      // DELETEs erased the real house. Refuse the way ClickHouse does.
+      throw new Error(`Code: 81. DB::Exception: Database ${database} does not exist. (UNKNOWN_DATABASE)`);
+    }
   }
   if (url) { applySettings(url); bindParams(url, statement); }
   return session.query(sql, fmt);

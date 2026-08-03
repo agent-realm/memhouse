@@ -775,6 +775,23 @@ function cmdUninstall() {
           console.log('  use `deploy --local` (a real ClickHouse) for the per-member layout.');
           process.exitCode = 2; break;
         }
+        // A managed LOCAL house must not be shadowed by a solo one. The same-port case
+        // fails loudly on EADDRINUSE, but a stopped container — or a solo house asked for
+        // on a different port — produces no conflict at all: the shim starts, the identity
+        // probe passes, and cmdInstall overwrites the local URL and credential with solo
+        // defaults. The local memory is then unreachable (its password is gone, and the
+        // image will not re-apply one) while any shipper still running keeps writing to it.
+        {
+          const loc = dep.preflight();
+          if (loc.ok && loc.initialised) {
+            console.log(bad(`a local house already exists here — its data volume '${dep.VOLUME}' is initialised.`));
+            console.log('  starting a solo house would overwrite its URL and credential in the config, and the');
+            console.log('  local one cannot be re-credentialed afterwards.');
+            console.log('  keep it:      memhouse deploy --local');
+            console.log('  or remove it (DESTROYS that memory):  memhouse deploy --down');
+            process.exitCode = 2; break;
+          }
+        }
         // The persisted port is part of the precedence chain: re-running `deploy --solo`
         // after configuring a custom port must find the existing house, not wait on 8123
         // and then silently relocate the shim (and overwrite the saved port with it).

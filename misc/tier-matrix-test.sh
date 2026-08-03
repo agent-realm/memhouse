@@ -184,6 +184,40 @@ else
 fi
 env MEMHOUSE_HOME="$HA" $CLI deploy --down >/dev/null 2>&1
 
+say "a solo house must not shadow an existing local one"
+HB="$TMP/home-shadow"; mkdir -p "$HB"
+env MEMHOUSE_HOME="$HB" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
+PWS=$(grep MEMHOUSE_PASSWORD "$HB/env" 2>/dev/null)
+"$ENG" stop memhouse-clickhouse >/dev/null 2>&1     # stopped: no bind conflict to catch it
+assert_exit "deploy --solo over an initialised local volume is refused" 2 \
+  env MEMHOUSE_HOME="$HB" MEMHOUSE_SOLO_DATA="$TMP/shadow-data" $CLI deploy --solo --house-port $((PORT_SOLO+9)) --no-ship
+PWS2=$(grep MEMHOUSE_PASSWORD "$HB/env" 2>/dev/null)
+[ "$PWS" = "$PWS2" ] && ok "the local credential survived" || bad "local credential overwritten — that house is unreachable"
+"$ENG" start memhouse-clickhouse >/dev/null 2>&1
+env MEMHOUSE_HOME="$HB" $CLI deploy --down >/dev/null 2>&1
+
+say "the solo shim refuses a database that does not exist"
+HC="$TMP/home-db"; mkdir -p "$HC"
+env MEMHOUSE_HOME="$HC" MEMHOUSE_SOLO_DATA="$TMP/db-data" $CLI deploy --solo --house-port $((PORT_SOLO+10)) >/dev/null 2>&1
+ROWS=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=memhouse&final=1" --data-binary "SELECT count() FROM messages FORMAT TabSeparated" | tr -d "\r")
+env MEMHOUSE_HOME="$HC" $CLI setup --yes --db typo >/dev/null 2>&1
+assert_out "a query against a missing database errors" "UNKNOWN_DATABASE" \
+  curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=typo" --data-binary "SELECT count() FROM messages FORMAT TabSeparated"
+env MEMHOUSE_HOME="$HC" $CLI reset --yes >/dev/null 2>&1
+ROWS2=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=memhouse&final=1" --data-binary "SELECT count() FROM messages FORMAT TabSeparated" | tr -d "\r")
+[ "$ROWS" = "$ROWS2" ] && [ -n "$ROWS" ] && ok "a reset aimed at the wrong database did not erase the real one" \
+  || bad "the real house lost rows ($ROWS -> $ROWS2)"
+# The bootstrap case must still work: ?database=X on the statement that creates X.
+# A success is EMPTY output, which grep cannot match — assert on the absence of an error.
+BOOT=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=brandnew" --data-binary "CREATE DATABASE brandnew")
+case "$BOOT" in
+  *Exception*|*UNKNOWN_DATABASE*) bad "CREATE DATABASE no longer bootstraps: $BOOT" ;;
+  *) ok "CREATE DATABASE still bootstraps" ;;
+esac
+assert_out "and the new database is usable" "brandnew" \
+  curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=brandnew" --data-binary "SELECT currentDatabase() FORMAT TabSeparated"
+env MEMHOUSE_HOME="$HC" $CLI stop >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
