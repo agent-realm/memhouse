@@ -170,5 +170,20 @@ test('launchd plist is well-formed and escapes XML metacharacters', () => {
   }
 });
 
+test('ExecStart quotes paths containing spaces', () => {
+  const unit = service._render.systemdUnit({
+    node: '/tmp/a b/node', script: '/opt/mem house/ship.js', args: ['--loop', '300'],
+    env: {}, logDir: '/tmp', logName: 'l.log', description: 'd',
+  });
+  // systemd splits on whitespace; unquoted, the executable would resolve to `/tmp/a`.
+  assert.ok(unit.includes('ExecStart="/tmp/a b/node" "/opt/mem house/ship.js" --loop 300'), unit);
+  // Plain tokens stay unquoted, so the common case reads normally.
+  const plain = service._render.systemdUnit({
+    node: '/usr/bin/node', script: '/opt/ship.js', args: ['--loop', '300'],
+    env: {}, logDir: '/tmp', logName: 'l.log', description: 'd',
+  });
+  assert.ok(plain.includes('ExecStart=/usr/bin/node /opt/ship.js --loop 300'), plain);
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

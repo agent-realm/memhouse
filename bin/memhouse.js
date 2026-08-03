@@ -848,6 +848,9 @@ function cmdUninstall() {
       } else if (sub === 'uninstall') {
         const r = svc.uninstall();
         console.log(r.ok ? ok(`service removed (${r.kind})`) : bad(r.msg));
+        // A refusal is a failure. Silence here told automation the credential-bearing
+        // unit was gone while it was still installed and possibly still shipping.
+        if (!r.ok) process.exitCode = 1;
       } else {
         const st = svc.status();
         if (!st.kind) { console.log(warn(`no service integration for '${process.platform}'`)); break; }

@@ -52,6 +52,16 @@ function envLines(env) {
   return Object.entries(env).map(([k, v]) => `Environment=${k}=${envfile.quoteSystemd(v)}`).join('\n');
 }
 
+// systemd splits ExecStart on whitespace, so an unquoted path containing a space becomes
+// several arguments and the unit cannot start — `ExecStart=/tmp/a b/node …` resolves the
+// executable as `/tmp/a`. Node itself lives under a space-bearing path often enough
+// (`~/Library/Application Support/...`, `C:\Program Files` equivalents under WSL, any
+// checkout in a folder with a space) that this is not exotic. Double quotes with C escapes
+// are systemd's own syntax, the same rule `Environment=` uses.
+function execToken(s) {
+  return /[\s"'\\]/.test(String(s)) ? envfile.quoteSystemd(s) : String(s);
+}
+
 function systemdUnit({ node, script, args, env, logDir, logName, description, after = [] }) {
   const wants = after.length ? `${after.map((u) => `Wants=${u}`).join('\n')}\n${after.map((u) => `After=${u}`).join('\n')}\n` : '';
   return `[Unit]
@@ -62,7 +72,7 @@ ${wants}
 [Service]
 Type=simple
 ${envLines(env)}
-ExecStart=${node} ${script}${args.length ? ` ${args.join(' ')}` : ''}
+ExecStart=${[node, script, ...args].map(execToken).join(' ')}
 Restart=on-failure
 RestartSec=30
 StandardOutput=append:${path.join(logDir, logName)}
@@ -210,6 +220,7 @@ function uninstall() {
   const p = paths[kind];
   const soloPath = kind === 'systemd' ? paths.systemdSolo : paths.launchdSolo;
   const stillRunning = [];
+  const indeterminate = [];
 
   const units = kind === 'systemd'
     ? [[`${LABEL}.service`, p, 'com.memhouse.shipper'], [`${SOLO_LABEL}.service`, soloPath, 'com.memhouse.solo']]
@@ -221,8 +232,12 @@ function uninstall() {
     else spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/${label}`], { encoding: 'utf-8' });
     // The command's own status is not the question — `disable` can report success while
     // the unit stays active, and `bootout` returns non-zero for an already-absent job.
-    // Ask whether it is running now.
-    if (isRunning(kind, unit, label)) { stillRunning.push(unit); continue; }
+    // Ask what state it is in now, and treat "cannot tell" as its own answer: deleting
+    // the unit on an unknown state is how a live shipper keeps running with a credential
+    // in a file everyone believes is gone.
+    const state = runState(kind, unit, label);
+    if (state === 'running') { stillRunning.push(unit); continue; }
+    if (state === 'unknown') { indeterminate.push(unit); continue; }
     fs.unlinkSync(file);
   }
   if (kind === 'systemd') spawnSync('systemctl', ['--user', 'daemon-reload']);
@@ -236,20 +251,46 @@ function uninstall() {
         + `Stop it yourself (systemctl --user stop ${stillRunning[0]}), then re-run.`,
     };
   }
+  if (indeterminate.length) {
+    return {
+      ok: false,
+      kind,
+      path: p,
+      msg: `cannot determine whether ${indeterminate.join(', ')} stopped — no usable `
+        + `${kind === 'systemd' ? 'systemctl' : 'launchctl'} on this host, so the unit file is kept. `
+        + 'Confirm it is stopped, remove the unit yourself, then re-run.',
+    };
+  }
   return { ok: true, kind, path: p };
 }
 
-// A missing service manager is a normal state, not a crash. `spawnSync` on an absent
-// binary returns { error, stdout: null }, and dereferencing that took down `uninstall`,
-// `status` and `doctor` on any Linux host without systemctl — including hosts that never
-// installed a service at all.
-function isRunning(kind, unit, label) {
+// Three states, not two. A missing service manager is a normal state and not a crash —
+// `spawnSync` on an absent binary returns { error, stdout: null }, and dereferencing that
+// took down `uninstall`, `status` and `doctor` on any Linux host without systemctl. But
+// collapsing that into "not running" is its own bug: teardown would then treat "cannot
+// tell" as "confirmed stopped" and delete the unit and the credential out from under a
+// shipper that is still going. Display may round `unknown` down; teardown must not.
+function runState(kind, unit, label) {
   if (kind === 'systemd') {
     const r = spawnSync('systemctl', ['--user', 'is-active', unit], { encoding: 'utf-8' });
-    return !r.error && (r.stdout || '').trim() === 'active';
+    if (r.error) return 'unknown';               // no systemctl on PATH
+    const out = (r.stdout || '').trim();
+    if (out === 'active') return 'running';
+    // `is-active` answers inactive/failed/activating on a manager it can reach. Anything
+    // else — empty output, a connection error on stderr — means it could not tell us.
+    if (['inactive', 'failed', 'activating', 'deactivating', 'unknown'].includes(out)) {
+      return out === 'activating' ? 'running' : 'stopped';
+    }
+    return 'unknown';
   }
   const r = spawnSync('launchctl', ['print', `gui/${process.getuid()}/${label}`], { encoding: 'utf-8' });
-  return !r.error && r.status === 0 && /state = running|state = waiting/.test(r.stdout || '');
+  if (r.error) return 'unknown';                 // no launchctl
+  if (r.status !== 0) return 'stopped';          // launchctl says there is no such job
+  return /state = running|state = waiting/.test(r.stdout || '') ? 'running' : 'stopped';
+}
+
+function isRunning(kind, unit, label) {
+  return runState(kind, unit, label) === 'running';
 }
 
 function status() {

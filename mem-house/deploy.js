@@ -115,10 +115,26 @@ function down() {
   const vOwn = ownership(eng, 'volume', VOLUME);
   if (vOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('volume', VOLUME) };
 
-  if (cOwn === 'ours') spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
+  // Report what actually happened, not what was attempted. The engine can fail here —
+  // the daemon going away between the ownership check and the removal is the obvious
+  // way — and announcing "removed" over a container that is still running is how a user
+  // ends up with a house they believe is gone. `containerRemoved` used to be true merely
+  // because the container was OURS, which is a statement about ownership, not removal.
+  const failures = [];
+  let containerRemoved = false;
+  if (cOwn === 'ours') {
+    const r = spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
+    containerRemoved = r.status === 0;
+    if (!containerRemoved) failures.push(`container '${CONTAINER}': ${(r.stderr || '').trim().split('\n').slice(-1)[0] || `exit ${r.status}`}`);
+  }
   let volumeRemoved = false;
-  if (vOwn === 'ours') volumeRemoved = spawnSync(eng, ['volume', 'rm', '-f', VOLUME], { encoding: 'utf-8' }).status === 0;
-  return { ok: true, engine: eng, volumeRemoved, containerRemoved: cOwn === 'ours' };
+  if (vOwn === 'ours') {
+    const v = spawnSync(eng, ['volume', 'rm', '-f', VOLUME], { encoding: 'utf-8' });
+    volumeRemoved = v.status === 0;
+    if (!volumeRemoved) failures.push(`volume '${VOLUME}': ${(v.stderr || '').trim().split('\n').slice(-1)[0] || `exit ${v.status}`}`);
+  }
+  if (failures.length) return { ok: false, engine: eng, containerRemoved, volumeRemoved, msg: `removal failed — ${failures.join('; ')}` };
+  return { ok: true, engine: eng, volumeRemoved, containerRemoved };
 }
 
 /** Poll /ping until the server answers. An install against a still-starting server
