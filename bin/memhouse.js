@@ -21,6 +21,7 @@ const { spawn, spawnSync } = require('child_process');
 const REPO_ROOT = path.join(__dirname, '..');
 const SHIP_JS = path.join(REPO_ROOT, 'mem-house', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'mem-house', 'server', 'server.js');
+const SOLO_JS = path.join(REPO_ROOT, 'mem-house', 'solo', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'mem-house', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
 
@@ -305,6 +306,9 @@ async function cmdStart() {
   fs.mkdirSync(LOG_DIR, { recursive: true });
   ensureUiBuilt();
   const daemons = [
+    // The solo shim IS the house — start it first, or the shipper has nothing to talk to.
+    ...(fs.existsSync(path.join(RUN_DIR, 'solo.pid')) || process.env.MEMHOUSE_SOLO === '1'
+      ? [{ name: 'solo', script: SOLO_JS, args: [] }] : []),
     { name: 'shipper', script: SHIP_JS, args: ['--loop', String(flags.interval || 300)] },
     { name: 'dashboard', script: SERVER_JS, args: [] },
   ];
@@ -323,7 +327,7 @@ async function cmdStart() {
 
 function cmdStop() {
   let stopped = 0;
-  for (const name of ['shipper', 'dashboard']) {
+  for (const name of ['shipper', 'dashboard', 'solo']) {
     const pid = pidOf(name);
     if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`${name} stopped (pid ${pid})`)); stopped++; } catch { /* raced */ } }
     try { fs.unlinkSync(path.join(RUN_DIR, name + '.pid')); } catch { /* absent */ }
@@ -560,7 +564,33 @@ function cmdUninstall() {
         process.exitCode = r.ok ? 0 : 1;
         break;
       }
-      if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --down')); process.exitCode = 2; break; }
+      if (flags.solo) {
+        // Single-user tier: an embedded chdb behind a local ClickHouse-HTTP shim.
+        // No container, no server, no sharing — see mem-house/solo/server.js.
+        const port = String(flags.port || process.env.MEMHOUSE_SOLO_PORT || 8123);
+        fs.mkdirSync(RUN_DIR, { recursive: true }); fs.mkdirSync(LOG_DIR, { recursive: true });
+        if (!pidOf('solo')) {
+          const log = fs.openSync(path.join(LOG_DIR, 'solo.log'), 'a');
+          const child = spawn(process.execPath, [SOLO_JS], {
+            env: { ...process.env, MEMHOUSE_SOLO_PORT: port }, detached: true, stdio: ['ignore', log, log],
+          });
+          fs.writeFileSync(path.join(RUN_DIR, 'solo.pid'), String(child.pid));
+          child.unref();
+        }
+        const url = `http://127.0.0.1:${port}`;
+        const dep2 = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
+        if (!(await dep2.waitReady(url, { attempts: 40, delayMs: 1000 }))) {
+          console.log(bad(`solo house did not answer on ${url} — see ${path.join(LOG_DIR, 'solo.log')}`));
+          process.exitCode = 1; break;
+        }
+        console.log(ok(`solo house on ${url} (embedded chdb, single user, loopback only)`));
+        flags.url = url; flags.user = 'default'; flags.password = '';
+        flags.db = flags.db || process.env.MEMHOUSE_DB || 'memhouse';
+        flags.yes = true;
+        process.exitCode = await cmdInstall({ interactive: false });
+        break;
+      }
+      if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --solo | --down')); process.exitCode = 2; break; }
       const pw = process.env.MEMHOUSE_PASSWORD || crypto.randomBytes(16).toString('hex');
       const port = String(flags.port || process.env.MEMHOUSE_PORT || 8123);
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
