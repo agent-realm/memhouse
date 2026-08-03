@@ -308,7 +308,26 @@ async function cmdInstall({ interactive }) {
     catch { console.log(bad(`house '${cfg.db}' does not exist and cannot be created: ${e.message}`)); return 1; }
   }
   console.log(ok(`house '${cfg.db}' ready`));
-  if (run(SHIP_JS, ['--ensure-schema'], cfg) !== 0) return 1;
+  // Rooms. In the shared layout the installer creates them; in the per-member layout the
+  // OWNER mints them and the member cannot (nor should) run the shared schema — so here
+  // the step is a check, not a creation, and it names the command that fixes it.
+  if (String(cfg.perMember) === '1') {
+    const r = await roomsFor(cfg);
+    const want = ROOM_TYPES.map((t) => r[t]).concat(r.sessions_v);
+    let present = [];
+    try {
+      const list = `'${want.join("','")}'`;
+      present = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${list})`, { database: '' })).map((x) => x.name);
+    } catch (e) { console.log(bad(`could not list rooms: ${e.message}`)); return 1; }
+    const missing = want.filter((n) => !present.includes(n));
+    if (missing.length) {
+      console.log(bad(`per-member layout: '${r.member}' has no ${missing.join(', ')} in '${cfg.db}'`));
+      console.log('  rooms are minted by the house owner, not by install. Ask them to run:');
+      console.log(`    node mem-house/per-member/provision.js --member ${r.member}`);
+      return 1;
+    }
+    console.log(ok(`rooms present for '${r.member}': ${want.join(', ')}`));
+  } else if (run(SHIP_JS, ['--ensure-schema'], cfg) !== 0) return 1;
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
   }
@@ -349,6 +368,17 @@ async function cmdStart() {
     fs.writeFileSync(path.join(RUN_DIR, d.name + '.pid'), String(child.pid));
     child.unref();
     console.log(ok(`${d.name} started (pid ${child.pid})`));
+    // Spawn order is not readiness. chdb takes a moment to open its data directory, and
+    // if the shipper's first request loses that race it does not retry promptly — it
+    // catches the connection error and sleeps the whole loop interval, so the first ship
+    // is up to five minutes late for no reason. Wait for the house, as deploy does.
+    if (d.name === 'solo') {
+      const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
+      const ready = await dep.waitReady(cfg.url, { attempts: 40, delayMs: 500 });
+      console.log(ready ? ok(`solo house answering on ${cfg.url}`)
+        : bad(`solo house not answering on ${cfg.url} — see ${path.join(LOG_DIR, 'solo.log')}`));
+      if (!ready) return;
+    }
   }
   console.log(`  dashboard → http://localhost:${cfg.port}`);
 }
@@ -638,7 +668,10 @@ function cmdUninstall() {
           console.log('  use `deploy --local` (a real ClickHouse) for the per-member layout.');
           process.exitCode = 2; break;
         }
-        const port = String(housePort || process.env.MEMHOUSE_SOLO_PORT || 8123);
+        // The persisted port is part of the precedence chain: re-running `deploy --solo`
+        // after configuring a custom port must find the existing house, not wait on 8123
+        // and then silently relocate the shim (and overwrite the saved port with it).
+        const port = String(housePort || process.env.MEMHOUSE_SOLO_PORT || resolveConfig().soloPort || 8123);
         fs.mkdirSync(RUN_DIR, { recursive: true }); fs.mkdirSync(LOG_DIR, { recursive: true });
         if (!pidOf('solo')) {
           const log = fs.openSync(path.join(LOG_DIR, 'solo.log'), 'a');
@@ -676,6 +709,14 @@ function cmdUninstall() {
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));
+      // Switching tiers must clear the other one. A house that was solo yesterday still
+      // has MEMHOUSE_SOLO=1 in its config, and cmdInstall would write it straight back —
+      // so the next `start` would launch a shim nobody wants, flapping on the ClickHouse
+      // port or quietly serving the stale embedded house beside the real one.
+      // Empty string, not `delete`: resolveConfig falls back to the FILE on an absent env
+      // var, and the file still holds the old solo port.
+      process.env.MEMHOUSE_SOLO = '0';
+      process.env.MEMHOUSE_SOLO_PORT = '';
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
       flags.db = flags.db || process.env.MEMHOUSE_DB || 'memhouse';
       flags.yes = true;
