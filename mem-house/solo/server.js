@@ -109,6 +109,13 @@ function bindParams(url, sql) {
 // does not substitute inside that block, and a transcript whose text happens to contain
 // `{id:String}` would otherwise be read as an unbound placeholder and rejected — memhouse
 // ships conversations *about* ClickHouse, so that is a live case, not a hypothetical.
+//
+// LOAD-BEARING: binding then querying is atomic only because `session.query` is
+// synchronous and this whole function runs inside one turn of the event loop, so two
+// requests cannot interleave their `SET param_*` with each other's query. Making any of
+// this async — a worker pool, a promise-returning chdb binding — would let request B's
+// parameters land between request A's SET and A's query, and A would silently read B's
+// values. If that day comes, serialize explicitly instead of relying on this note.
 function run(sql, fmt, database, url, statement) {
   if (database && database !== currentDb && dbExists(database)) {
     session.query(`USE ${database}`, 'CSV');
