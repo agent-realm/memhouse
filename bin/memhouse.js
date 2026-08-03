@@ -753,6 +753,19 @@ function cmdUninstall() {
         // `pidOf('solo')` suppresses the spawn, the old shim stays healthy on the old
         // port, and the command waits 40s against a port nothing is listening on before
         // failing — with the house working the whole time, on the address it used to use.
+        // A service-managed shim has no pidfile — `service install` removed it — so the
+        // detached-process check below cannot see it. Moving the port anyway would start
+        // a second house and repoint the CLI at it while the installed shipper unit kept
+        // writing to the old one: two houses, and the memory silently splits between them.
+        if (housePort && String(housePort) !== String(resolveConfig().soloPort || '')) {
+          let svcSolo = { installed: false };
+          try { svcSolo = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status().solo || { installed: false }; } catch { /* unsupported */ }
+          if (svcSolo.installed) {
+            console.log(bad(`the solo house is service-managed on port ${resolveConfig().soloPort || '?'} — changing its port here would leave the installed shipper writing to the old one.`));
+            console.log('  memhouse service uninstall, then re-deploy on the new port, then memhouse service install');
+            process.exitCode = 2; break;
+          }
+        }
         const runningPid = pidOf('solo');
         if (runningPid && housePort && String(housePort) !== String(resolveConfig().soloPort || '')) {
           console.log(warn(`solo house is on port ${resolveConfig().soloPort || '?'}; moving it to ${housePort}`));
@@ -786,7 +799,50 @@ function cmdUninstall() {
         break;
       }
       if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --solo | --down')); process.exitCode = 2; break; }
-      const pw = process.env.MEMHOUSE_PASSWORD || crypto.randomBytes(16).toString('hex');
+      {
+        // A running solo shim owns the port this container wants — 8123 for both by
+        // default — so the container's bind fails and the advertised solo→local switch
+        // cannot happen without the user working it out themselves. Stop the shim we
+        // manage; a service-managed one is not ours to kill silently.
+        const prior = resolveConfig();
+        if (String(prior.solo) === '1') {
+          let svcSolo = { installed: false };
+          try { svcSolo = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status().solo || { installed: false }; } catch { /* unsupported */ }
+          if (svcSolo.installed) {
+            console.log(bad('a service-managed solo house is installed — switching tiers would leave it shipping to the old port.'));
+            console.log('  remove it first:  memhouse service uninstall');
+            process.exitCode = 2; break;
+          }
+          const soloPid = pidOf('solo');
+          if (soloPid) {
+            console.log(warn(`stopping the solo house (pid ${soloPid}) — the server tier takes over`));
+            try { process.kill(soloPid, 'SIGTERM'); } catch { /* raced */ }
+            try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
+            await new Promise((res) => setTimeout(res, 500));
+          }
+        }
+      }
+      // Reuse the house's own password when its data volume already exists. The image
+      // only applies CLICKHOUSE_PASSWORD when it INITIALISES a data directory, so a
+      // fresh random password on a re-deploy authenticates against nothing — and
+      // cmdInstall would then overwrite the working credential in the config with it,
+      // locking the CLI out of a house that is running perfectly well.
+      const priorCfg = resolveConfig();
+      const initialised = dep.volumeExists();
+      const reusable = initialised && priorCfg.password ? priorCfg.password : null;
+      // Rotating against an initialised volume is the very lockout this guards: the image
+      // applies CLICKHOUSE_PASSWORD only when it creates the data directory, so a new
+      // value would be written to the config and rejected by the server. Say what the
+      // real procedure is rather than doing something that cannot work.
+      if (initialised && (flags['rotate-password'] === true || process.env.MEMHOUSE_PASSWORD)) {
+        const how = flags['rotate-password'] === true ? '--rotate-password' : 'MEMHOUSE_PASSWORD';
+        console.log(bad(`${how} cannot change the credential of an existing house — the image only applies it when it initialises the data directory.`));
+        console.log('  to rotate:   ALTER USER memhouse_root IDENTIFIED BY \'…\' inside the house, then: memhouse setup --password …');
+        console.log('  to start over (DESTROYS the memory):  memhouse deploy --down');
+        process.exitCode = 2; break;
+      }
+      const pw = process.env.MEMHOUSE_PASSWORD || reusable || crypto.randomBytes(16).toString('hex');
+      if (reusable && pw === reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
       const port = String(housePort || process.env.MEMHOUSE_CH_PORT || 8123);
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }

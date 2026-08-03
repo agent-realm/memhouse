@@ -39,16 +39,30 @@ function engine() {
   return null;
 }
 
-/** 'absent' | 'ours' | 'foreign' — for a container or a volume. */
+// The engine says "no such object" when a name is free, and says other things when it
+// cannot answer at all — an unreachable daemon being the obvious one. Both are non-zero
+// exits, and collapsing them made an unreachable daemon look like a clean slate: `--down`
+// would then report success with nothing removed, over a container that is still running.
+const NOT_FOUND = /no such|not exist|unable to find|did not find/i;
+
+/** 'absent' | 'ours' | 'foreign' | 'unknown' — for a container or a volume. */
 function ownership(eng, kind, name) {
   const args = kind === 'volume'
     ? ['volume', 'inspect', '-f', `{{index .Labels "${OWNER_LABEL}"}}`, name]
     : ['inspect', '-f', `{{index .Config.Labels "${OWNER_LABEL}"}}`, name];
   const r = spawnSync(eng, args, { encoding: 'utf-8' });
-  if (r.status !== 0) return 'absent';
+  if (r.error) return 'unknown';
+  if (r.status !== 0) {
+    return NOT_FOUND.test(`${r.stderr || ''}${r.stdout || ''}`) ? 'absent' : 'unknown';
+  }
   // Go's template prints `<no value>` for a missing key, empty for a present-but-empty
   // one; both mean the object exists and is not ours.
   return (r.stdout || '').trim() === '1' ? 'ours' : 'foreign';
+}
+
+function unknownMsg(kind, name, eng) {
+  return `cannot determine whether ${kind} '${name}' exists — ${eng} answered neither `
+    + '"no such object" nor a label. Is the daemon reachable? Refusing to guess.';
 }
 
 function foreignMsg(kind, name) {
@@ -69,8 +83,10 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
 
   const own = ownership(eng, 'container', CONTAINER);
   if (own === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('container', CONTAINER) };
+  if (own === 'unknown') return { ok: false, engine: eng, msg: unknownMsg('container', CONTAINER, eng) };
   const volOwn = ownership(eng, 'volume', VOLUME);
   if (volOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('volume', VOLUME) };
+  if (volOwn === 'unknown') return { ok: false, engine: eng, msg: unknownMsg('volume', VOLUME, eng) };
 
   if (own === 'ours') spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
 
@@ -112,8 +128,10 @@ function down() {
 
   const cOwn = ownership(eng, 'container', CONTAINER);
   if (cOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('container', CONTAINER) };
+  if (cOwn === 'unknown') return { ok: false, engine: eng, msg: unknownMsg('container', CONTAINER, eng) };
   const vOwn = ownership(eng, 'volume', VOLUME);
   if (vOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('volume', VOLUME) };
+  if (vOwn === 'unknown') return { ok: false, engine: eng, msg: unknownMsg('volume', VOLUME, eng) };
 
   // Report what actually happened, not what was attempted. The engine can fail here —
   // the daemon going away between the ownership check and the removal is the obvious
@@ -150,4 +168,11 @@ async function waitReady(url, { attempts = 60, delayMs = 2000 } = {}) {
   return false;
 }
 
-module.exports = { engine, up, down, waitReady, CONTAINER, VOLUME, DEFAULT_TAG };
+/** Does the managed data volume already exist and belong to us? */
+function volumeExists() {
+  const eng = engine();
+  if (!eng) return false;
+  return ownership(eng, 'volume', VOLUME) === 'ours';
+}
+
+module.exports = { engine, up, down, waitReady, volumeExists, CONTAINER, VOLUME, DEFAULT_TAG };
