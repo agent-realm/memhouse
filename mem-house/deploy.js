@@ -260,7 +260,13 @@ function ambiguousMsg(o) {
  * the shipper, the dashboard and the shim — so a refusal costs the user a working
  * pipeline in exchange for protecting them. The same questions, asked first.
  */
-function preflight({ tag = DEFAULT_TAG } = {}) {
+/**
+ * `tag` OPT-IN. The solo tier calls this purely to ask whether a local house exists —
+ * it runs embedded chdb and needs no container image at all, so validating one would
+ * fail a perfectly good solo deploy whenever the registry is unreachable and the image
+ * is not cached.
+ */
+function preflight({ tag = null } = {}) {
   const o = owningEngine();
   if (o.ambiguous || o.indeterminate) return { ok: false, reason: 'ambiguous', msg: ambiguousMsg(o) };
   const eng = o.engine;
@@ -274,10 +280,13 @@ function preflight({ tag = DEFAULT_TAG } = {}) {
     if (own === 'foreign') return { ok: false, reason: 'foreign', engine: eng, msg: foreignMsg(kind, name) };
     if (own === 'unknown') return { ok: false, reason: 'unknown', engine: eng, msg: unknownMsg(kind, name, eng) };
   }
-  // The image, too — `up()` checks it, but by then the caller has stopped the shipper and
-  // the dashboard, so a bad tag costs a working pipeline to discover.
-  const img = ensureImage(eng, tag);
-  if (!img.ok) return { ok: false, reason: 'image', engine: eng, msg: img.msg };
+  // The image, too, when the caller is actually going to run one — `up()` checks it, but
+  // by then the caller has stopped the shipper and the dashboard, so a bad tag costs a
+  // working pipeline to discover.
+  if (tag) {
+    const img = ensureImage(eng, tag);
+    if (!img.ok) return { ok: false, reason: 'image', engine: eng, msg: img.msg };
+  }
   return { ok: true, engine: eng, initialised: ownership(eng, 'volume', VOLUME) === 'ours' };
 }
 

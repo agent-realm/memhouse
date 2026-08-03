@@ -278,6 +278,28 @@ assert_out "and the house is still serving" "connected:" env MEMHOUSE_HOME="$HI"
 env MEMHOUSE_HOME="$HI" $CLI stop >/dev/null 2>&1
 env MEMHOUSE_HOME="$HI" $CLI deploy --down >/dev/null 2>&1
 
+say "solo does not need a container image"
+# An engine is installed and answering, but the image is not cached and cannot be pulled.
+# The solo tier runs embedded chdb; requiring an image here fails a deploy for nothing.
+HJ="$TMP/home-noimg"; mkdir -p "$HJ"
+mkdir -p "$TMP/regdown"
+{ echo '#!/bin/bash'
+  echo 'case "$1 $2" in "image inspect") exit 1;; esac'
+  echo 'case "$1" in'
+  echo '  --version) echo podman-0.0; exit 0;;'
+  echo '  pull) echo "Error: pinging container registry: no such host" >&2; exit 125;;'
+  echo '  inspect) echo "Error: no such object: x" >&2; exit 125;;'
+  echo '  volume) echo "Error: no such volume" >&2; exit 125;;'
+  echo 'esac'; echo 'exit 0'; } > "$TMP/regdown/podman"
+chmod +x "$TMP/regdown/podman"
+for b in node bash ls cat rm sh env; do ln -sf "$(command -v $b)" "$TMP/regdown/$b" 2>/dev/null; done
+assert_exit "solo deploys with an unobtainable image" 0 \
+  env PATH="$TMP/regdown" MEMHOUSE_HOME="$HJ" MEMHOUSE_SOLO_DATA="$TMP/noimg-data" $CLI deploy --solo --house-port $((PORT_SOLO+13)) --no-ship
+HK="$TMP/home-noimg2"; mkdir -p "$HK"
+assert_out "but local still refuses it" "cannot obtain" \
+  env PATH="$TMP/regdown" MEMHOUSE_HOME="$HK" $CLI deploy --local --house-port $((PORT_CH+11)) --no-ship
+env MEMHOUSE_HOME="$HJ" $CLI stop >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
