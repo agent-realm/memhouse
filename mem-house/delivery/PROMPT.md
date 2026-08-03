@@ -12,7 +12,8 @@ has had with coding agents (Claude Code, Codex, Gemini CLI, Cursor, and other
 editors), across machines, stored in a ClickHouse database called **mem-house**.
 Connection: read `~/.memhouse/env` (`MEMHOUSE_URL/USER/PASSWORD/DB`); query over
 HTTP with `curl -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" "$MEMHOUSE_URL/?database=$MEMHOUSE_DB"`
-and always add `SETTINGS final=1` to reads.
+and always add `SETTINGS final=1, join_use_nulls=1` to reads — the second matters
+wherever the session rollup is used (see below).
 
 **When to reach for it — before claiming ignorance.** If the user refers to past
 work that is not in your current context ("that session where…", "how did I solve
@@ -35,11 +36,12 @@ as written.
 - Find sessions about a topic (FTS, lowercase your terms):
   `SELECT DISTINCT session_id, any(project), min(ts) FROM messages
    WHERE hasToken(text_word, 'clickhouse') GROUP BY session_id
-   ORDER BY 3 DESC LIMIT 10 SETTINGS final=1 FORMAT PrettyCompact`
+   ORDER BY 3 DESC LIMIT 10 SETTINGS final=1, join_use_nulls=1 FORMAT PrettyCompact`
 - Recent sessions: `SELECT session_id, source, project, started, first_prompt
-   FROM sessions_v ORDER BY started DESC LIMIT 20 SETTINGS final=1`
+   FROM sessions_v ORDER BY started DESC LIMIT 20 SETTINGS final=1, join_use_nulls=1`
+   (per-member: substitute `$(memhouse sessions-query)` for `sessions_v`)
 - Replay one session: `SELECT role, text FROM messages
-   WHERE session_id = '<id>' ORDER BY seq SETTINGS final=1`
+   WHERE session_id = '<id>' ORDER BY seq SETTINGS final=1, join_use_nulls=1`
 
 **Rules.**
 - Memory is READ-ONLY for you. Never INSERT/ALTER/DROP — ingestion belongs to the

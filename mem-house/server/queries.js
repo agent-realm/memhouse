@@ -896,7 +896,26 @@ async function schema() {
       SELECT name, type FROM system.columns
       WHERE database = currentDatabase() AND table = {tbl:String} ORDER BY position`, { tbl: name });
   }
-  return { tables: tbls.map(t => t.name), schema: out };
+  // The SPA used to infer the house's flavor from `tables.includes('sessions_v')`. That
+  // stopped working the moment the rollup became a saved query: a per-member house has
+  // three rooms named for the member and no `sessions_v` at all, so the page reported an
+  // indeterminate schema and every typed example it might have offered would have failed
+  // with UNKNOWN_TABLE. Hand it the resolved names instead of making it guess.
+  const r = await rooms();
+  return {
+    tables: tbls.map((t) => t.name),
+    schema: out,
+    rooms: {
+      perMember: r.perMember,
+      member: r.member,
+      sessions: r.sessions,
+      messages: r.messages,
+      tool_calls: r.tool_calls,
+      // A name in the shared layout, a parenthesised SELECT per member. Either drops
+      // into a `FROM … AS c` unchanged, which is what the examples do with it.
+      sessions_v: r.sessions_v,
+    },
+  };
 }
 
 module.exports = {

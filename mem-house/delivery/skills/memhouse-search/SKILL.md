@@ -14,14 +14,15 @@ tables on ClickHouse).
 ## Connection
 
 Credentials come from `~/.memhouse/env` (or already-exported `MEMHOUSE_*` vars).
-Every query runs over ClickHouse HTTP with `final=1` (ReplacingMergeTree keeps
-stale row versions until merges; `final=1` collapses to latest-wins — always
+Every query runs over ClickHouse HTTP with `final=1` and `join_use_nulls=1`
+(ReplacingMergeTree keeps stale row versions until merges; `final=1` collapses to
+latest-wins — always
 include it on reads):
 
 ```bash
 set -a; [ -f ~/.memhouse/env ] && . ~/.memhouse/env; set +a
 curl -sS --fail-with-body --user "${MEMHOUSE_USER:-memhouse_root}:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "${MEMHOUSE_URL:-http://localhost:8123}/?database=${MEMHOUSE_DB:-memhouse}&final=1" <<'SQL'
+  --data-binary @- "${MEMHOUSE_URL:-http://localhost:8123}/?database=${MEMHOUSE_DB:-memhouse}&final=1&join_use_nulls=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
@@ -56,6 +57,13 @@ fi
 # rooms: messages${MEM_SUFFIX}, sessions${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
 # rollup: `sessions_v` in the shared layout; `$(memhouse sessions-query)` per-member
 ```
+
+**Whichever rollup you use, read with `join_use_nulls=1`.** The connection recipe above
+already sets it. Without it, ClickHouse's default outer-join behaviour gives an
+unmatched `m.seq` a default value instead of NULL, so a session with no messages reports
+`total_msgs = 1` rather than 0 — measured, not theoretical. The shared `sessions_v` view
+carries the setting internally; the per-member saved query cannot, because a subquery has
+no `SETTINGS` clause of its own.
 
 ## How to search (the FTS columns)
 
