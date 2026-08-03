@@ -243,6 +243,29 @@ assert_out "and a retry succeeds instead of refusing" "installed" \
   env MEMHOUSE_HOME="$HE" $CLI deploy --local --house-port $((PORT_CH+4)) --no-ship
 env MEMHOUSE_HOME="$HE" $CLI deploy --down >/dev/null 2>&1
 
+say "a bad tag must not take down a working house"
+HF="$TMP/home-tag"; mkdir -p "$HF"
+env MEMHOUSE_HOME="$HF" $CLI deploy --local --house-port $((PORT_CH+5)) --no-ship >/dev/null 2>&1
+assert_out "an unobtainable tag is refused before the removal" "existing house was left running" \
+  env MEMHOUSE_HOME="$HF" $CLI deploy --local --house-port $((PORT_CH+5)) --tag no-such-tag-1234 --no-ship
+assert_out "and the house is still serving" "connected:" env MEMHOUSE_HOME="$HF" $CLI status
+env MEMHOUSE_HOME="$HF" $CLI deploy --down >/dev/null 2>&1
+
+say "solo must not silently adopt a home that already describes a house"
+HG="$TMP/home-adopt2"; mkdir -p "$HG"
+env MEMHOUSE_HOME="$HG" $CLI deploy --local --house-port $((PORT_CH+6)) --no-ship >/dev/null 2>&1
+PWG=$(grep MEMHOUSE_PASSWORD "$HG/env" 2>/dev/null)
+mkdir -p "$TMP/noeng"; for b in node bash ls cat rm sh env; do ln -sf "$(command -v $b)" "$TMP/noeng/$b" 2>/dev/null; done
+assert_exit "with no engine on PATH, solo is refused over an existing config" 2 \
+  env PATH="$TMP/noeng" MEMHOUSE_HOME="$HG" MEMHOUSE_SOLO_DATA="$TMP/adopt2-data" $CLI deploy --solo --house-port $((PORT_SOLO+11)) --no-ship
+PWG2=$(grep MEMHOUSE_PASSWORD "$HG/env" 2>/dev/null)
+[ "$PWG" = "$PWG2" ] && ok "the local credential survived" || bad "credential overwritten — that house is unrecoverable"
+HH="$TMP/home-fresh"; mkdir -p "$HH"
+assert_exit "but a FRESH home with no engine still deploys solo" 0 \
+  env PATH="$TMP/noeng" MEMHOUSE_HOME="$HH" MEMHOUSE_SOLO_DATA="$TMP/fresh-data" $CLI deploy --solo --house-port $((PORT_SOLO+12)) --no-ship
+env MEMHOUSE_HOME="$HH" $CLI stop >/dev/null 2>&1
+env MEMHOUSE_HOME="$HG" $CLI deploy --down >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"

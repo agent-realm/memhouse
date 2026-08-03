@@ -30,13 +30,34 @@ const IMAGE_REPO = 'docker.io/clickhouse/clickhouse-server';
 // its data. Anything we did not create is refused, never removed.
 const OWNER_LABEL = 'com.memhouse.managed';
 
-/** docker or podman, whichever is present. Returns null if neither is. */
+/** Every container engine on PATH, in preference order. */
+function availableEngines() {
+  return ['docker', 'podman'].filter((e) => spawnSync(e, ['--version'], { encoding: 'utf-8' }).status === 0);
+}
+
+/**
+ * The engine that OWNS the managed resources, not merely the first one installed.
+ *
+ * Picking by executable order is wrong the moment a machine has both: a house created
+ * with podman becomes invisible when docker is installed later, so the ownership checks
+ * report the fixed names absent, and the next deploy adopts or creates a different house
+ * and overwrites the only persisted credential for a volume that is still initialised.
+ *
+ * Returns { engine, ambiguous, engines }. `ambiguous` means both engines hold something
+ * under our names, which no caller may guess its way through.
+ */
+function owningEngine() {
+  const engines = availableEngines();
+  if (!engines.length) return { engine: null, ambiguous: false, engines };
+  const owners = engines.filter((e) => ['container', 'volume'].some((k) => ownership(e, k, k === 'volume' ? VOLUME : CONTAINER) === 'ours'));
+  if (owners.length > 1) return { engine: null, ambiguous: true, engines, owners };
+  return { engine: owners[0] || engines[0], ambiguous: false, engines };
+}
+
+/** The engine to act through, or null if there is none. Ambiguity resolves to null. */
 function engine() {
-  for (const e of ['docker', 'podman']) {
-    const r = spawnSync(e, ['--version'], { encoding: 'utf-8' });
-    if (r.status === 0) return e;
-  }
-  return null;
+  const o = owningEngine();
+  return o.ambiguous ? null : o.engine;
 }
 
 // The engine says "no such object" when a name is free, and says other things when it
@@ -83,7 +104,9 @@ function foreignMsg(kind, name) {
  * for the same reason.
  */
 function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }) {
-  const eng = engine();
+  const o = owningEngine();
+  if (o.ambiguous) return { ok: false, msg: ambiguousMsg(o) };
+  const eng = o.engine;
   if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
   if (!password) return { ok: false, msg: 'refusing to start an unauthenticated house — no password given' };
 
@@ -93,6 +116,23 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
   const volOwn = ownership(eng, 'volume', VOLUME);
   if (volOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('volume', VOLUME) };
   if (volOwn === 'unknown') return { ok: false, engine: eng, msg: unknownMsg('volume', VOLUME, eng) };
+
+  // Make sure the replacement image is actually available BEFORE removing the house it
+  // replaces. `run` discovers a bad tag or an unreachable registry only after the old
+  // container is gone, which takes a working house offline for a typo.
+  const image = `${IMAGE_REPO}:${tag}`;
+  const haveImage = spawnSync(eng, ['image', 'inspect', image], { encoding: 'utf-8' }).status === 0;
+  if (!haveImage) {
+    const pull = spawnSync(eng, ['pull', image], { encoding: 'utf-8' });
+    if (pull.status !== 0) {
+      return {
+        ok: false,
+        engine: eng,
+        msg: `cannot obtain ${image} — ${(pull.stderr || '').trim().split('\n').slice(-1)[0] || `exit ${pull.status}`}. `
+          + 'The existing house was left running.',
+      };
+    }
+  }
 
   if (own === 'ours') spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
 
@@ -118,7 +158,7 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
     '-p', `127.0.0.1:${port}:8123`,
     '-v', `${VOLUME}:/var/lib/clickhouse`,
     '--ulimit', 'nofile=262144:262144',
-    `${IMAGE_REPO}:${tag}`,
+    image,
   ];
   const r = spawnSync(eng, args, { encoding: 'utf-8' });
   if (r.status !== 0) {
@@ -138,7 +178,9 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
  * this guards, so a foreign name is an error, not a warning.
  */
 function down() {
-  const eng = engine();
+  const o = owningEngine();
+  if (o.ambiguous) return { ok: false, msg: ambiguousMsg(o) };
+  const eng = o.engine;
   if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
 
   const cOwn = ownership(eng, 'container', CONTAINER);
@@ -190,6 +232,12 @@ function volumeExists() {
   return ownership(eng, 'volume', VOLUME) === 'ours';
 }
 
+function ambiguousMsg(o) {
+  return `both ${(o.owners || o.engines).join(' and ')} hold something named '${CONTAINER}' or `
+    + `'${VOLUME}' with the ${OWNER_LABEL} label. Refusing to guess which house is yours — `
+    + 'remove one of them, or run with only one engine on PATH.';
+}
+
 /**
  * Everything `up()` would refuse for, asked BEFORE the caller changes anything.
  * Returns { ok, msg, initialised }.
@@ -199,7 +247,9 @@ function volumeExists() {
  * pipeline in exchange for protecting them. The same questions, asked first.
  */
 function preflight() {
-  const eng = engine();
+  const o = owningEngine();
+  if (o.ambiguous) return { ok: false, reason: 'ambiguous', msg: ambiguousMsg(o) };
+  const eng = o.engine;
   // `reason` matters to callers that are not deploying a local house. `no-engine` means
   // there cannot BE a local tier on this machine, which is a fine reason to go on and
   // deploy solo; `unknown` means the engine is there and could not answer, which is not
@@ -214,7 +264,8 @@ function preflight() {
 }
 
 module.exports = {
-  engine, up, down, waitReady, volumeExists, preflight, CONTAINER, VOLUME, DEFAULT_TAG,
+  engine, owningEngine, availableEngines, up, down, waitReady, volumeExists, preflight,
+  CONTAINER, VOLUME, DEFAULT_TAG,
   // exported for the unit gate: classifying an engine message wrong is silent
   _NOT_FOUND: NOT_FOUND,
 };

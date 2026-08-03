@@ -798,15 +798,35 @@ function cmdUninstall() {
         // image will not re-apply one) while any shipper still running keeps writing to it.
         {
           const loc = dep.preflight();
-          // An engine that is PRESENT but cannot answer is not evidence that no local
-          // house exists. Falling through on `!loc.ok` started the solo tier and let
-          // cmdInstall overwrite the local house's URL and credential — which, once the
-          // daemon came back, left an initialised volume nobody has the password for.
-          // Only `no-engine` is a real "there cannot be a local house here".
-          if (!loc.ok && loc.reason !== 'no-engine') {
-            console.log(bad(`cannot rule out an existing local house: ${loc.msg}`));
-            console.log('  starting a solo house would overwrite its URL and credential in the config.');
-            console.log('  fix the container engine and re-run, or deploy solo under a different MEMHOUSE_HOME.');
+          // An engine that cannot answer is not evidence that no local house exists.
+          // Falling through started the solo tier and let cmdInstall overwrite the local
+          // house's URL and credential — leaving an initialised volume nobody has the
+          // password for once the daemon came back.
+          //
+          // `no-engine` is NOT the exception it looks like either: uninstalling docker
+          // does not stop a container or erase its volume. What makes the question moot
+          // is not the engine's absence but the absence of anything to lose — a home
+          // with no config, or one already on the solo tier. Anywhere else, a config
+          // that describes some other house is exactly what must not be overwritten.
+          const cfgNow = resolveConfig();
+          const nothingToLose = !fs.existsSync(ENV_FILE) || String(cfgNow.solo) === '1';
+          if (!loc.ok && !(loc.reason === 'no-engine' && nothingToLose)) {
+            console.log(bad(loc.reason === 'no-engine'
+              ? `no container engine on PATH, so an existing local house cannot be ruled out — and ${ENV_FILE.replace(os.homedir(), '~')} already describes a house.`
+              : `cannot rule out an existing local house: ${loc.msg}`));
+            console.log('  starting a solo house would overwrite its URL and credential in the config,');
+            console.log('  and a house whose volume is already initialised cannot be re-credentialed.');
+            console.log('  put the engine back and re-run, or deploy solo under a different MEMHOUSE_HOME.');
+            process.exitCode = 2; break;
+          }
+          // A service-managed shipper keeps the environment it was installed with, so
+          // repointing the config at a solo house leaves it shipping to the previous one
+          // forever while `status` reports it healthy. Refuse rather than split the memory.
+          let svcSt = { installed: false };
+          try { svcSt = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported */ }
+          if (svcSt.installed && String(cfgNow.solo) !== '1') {
+            console.log(bad(`the shipper is service-managed and holds ${cfgNow.url} — switching to a solo house would leave it shipping there.`));
+            console.log('  memhouse service uninstall, then deploy --solo, then memhouse service install');
             process.exitCode = 2; break;
           }
           if (loc.ok && loc.initialised) {
@@ -883,6 +903,17 @@ function cmdUninstall() {
           process.exitCode = 2; break;
         }
         console.log(ok(`solo house on ${url} (embedded chdb, single user, loopback only)`));
+        // Detached clients hold a SNAPSHOT of the old connection. Switching the config to
+        // the solo house without stopping them leaves a shipper writing new transcripts
+        // to the PREVIOUS house while `status` reads the new one and reports it running —
+        // the memory silently splits. The local path already does this; so does this one.
+        for (const name of ['shipper', 'dashboard']) {
+          const pid = pidOf(name);
+          if (!pid) continue;
+          console.log(warn(`stopping ${name} (pid ${pid}) — it holds the old connection`));
+          try { process.kill(pid, 'SIGTERM'); } catch { /* raced */ }
+          try { fs.unlinkSync(path.join(RUN_DIR, `${name}.pid`)); } catch { /* absent */ }
+        }
         // Recorded in the config so `start` and `service install` know this house is a
         // shim they have to bring up, rather than a server that is simply there.
         process.env.MEMHOUSE_SOLO = '1';
