@@ -105,6 +105,46 @@ function bindParams(url, sql) {
   }
 }
 
+// ClickHouse settings ride on the URL, and dropping them is not cosmetic. Every read
+// memhouse issues sends `final=1`: without it a re-shipped session's superseded
+// ReplacingMergeTree versions stay visible until some future background merge, and
+// `sessions_v` joins EVERY visible version of a session to its messages — so token and
+// message totals multiply. The dashboard would just be wrong, with nothing to see.
+//
+// Everything on the URL that is not one of the protocol parameters below is treated as a
+// setting. chdb accepts `SET x = v` and `SET x = DEFAULT` (measured), so a setting sent by
+// one request is reverted before the next, and the session does not accumulate state.
+const PROTOCOL_PARAMS = new Set(['query', 'database', 'default_format', 'query_id', 'session_id']);
+// If one of these cannot be applied, failing loudly beats answering with wrong numbers.
+const CRITICAL_SETTINGS = new Set(['final', 'async_insert']);
+let appliedSettings = new Set();
+
+function applySettings(url) {
+  const want = new Map();
+  for (const [k, v] of url.searchParams) {
+    if (PROTOCOL_PARAMS.has(k) || k.startsWith('param_')) continue;
+    want.set(k, v);
+  }
+  // Revert anything a previous request set that this one does not.
+  for (const k of appliedSettings) {
+    if (!want.has(k)) { try { session.query(`SET ${k} = DEFAULT`, 'CSV'); } catch { /* already default */ } }
+  }
+  const applied = new Set();
+  for (const [k, v] of want) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue; // not a settings identifier
+    try {
+      session.query(`SET ${k} = ${chLiteral(v)}`, 'CSV');
+      applied.add(k);
+    } catch (e) {
+      if (CRITICAL_SETTINGS.has(k)) {
+        throw new Error(`Code: 115. DB::Exception: cannot apply setting '${k}': ${String((e && e.message) || e).split('\n')[0]} (UNKNOWN_SETTING)`);
+      }
+      if (DEBUG) console.error(`[solo] ignoring unsupported setting ${k}`);
+    }
+  }
+  appliedSettings = applied;
+}
+
 // `statement` is the SQL alone, never the INSERT data block appended to it. ClickHouse
 // does not substitute inside that block, and a transcript whose text happens to contain
 // `{id:String}` would otherwise be read as an unbound placeholder and rejected — memhouse
@@ -121,7 +161,7 @@ function run(sql, fmt, database, url, statement) {
     session.query(`USE ${database}`, 'CSV');
     currentDb = database;
   }
-  if (url) bindParams(url, statement);
+  if (url) { applySettings(url); bindParams(url, statement); }
   return session.query(sql, fmt);
 }
 

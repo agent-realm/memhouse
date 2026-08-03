@@ -374,6 +374,46 @@ async function cmdStart() {
     { name: 'shipper', script: SHIP_JS, args: ['--loop', String(flags.interval || 300)] },
     { name: 'dashboard', script: SERVER_JS, args: [] },
   ];
+  // Anything an installed service owns must not also be started here. Those pidfiles are
+  // deliberately absent — `service install` removed them when it took over — so the
+  // "already running?" check below cannot see the service's processes at all.
+  //
+  // For the shipper that means two loops parsing and clearing the same sessions
+  // concurrently, each deleting rows the other just inserted. For the solo shim it is
+  // quieter and just as wrong: the second one dies on EADDRINUSE, the readiness probe
+  // passes because the SERVICE's shim answers, and `start` reports success while leaving
+  // a pidfile pointing at a process that is already dead.
+  //
+  // Reachable in the obvious way: after a reboot the user wants the dashboard back, which
+  // is not service-managed, and types `memhouse start`.
+  let svcStatus = { installed: false, running: false, solo: { installed: false, running: false } };
+  try { svcStatus = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported platform */ }
+  const owned = [
+    ...(svcStatus.installed ? [['shipper', svcStatus.running, 'memhouse-shipper']] : []),
+    ...(svcStatus.solo?.installed ? [['solo', svcStatus.solo.running, 'memhouse-solo']] : []),
+  ];
+  for (const [name, running, unit] of owned) {
+    const i = daemons.findIndex((d) => d.name === name);
+    if (i >= 0) daemons.splice(i, 1);
+    console.log(warn(`${name} is service-managed (${svcStatus.kind}${running ? '' : ', not running'}) — not starting a second one`));
+    if (!running) {
+      console.log(svcStatus.kind === 'systemd'
+        ? `  start it with: systemctl --user start ${unit}`
+        : `  start it with: launchctl kickstart gui/$(id -u)/com.${unit.replace('memhouse-', 'memhouse.')}`);
+    }
+  }
+  // The house still has to be up before the dashboard is worth starting, whoever owns the
+  // shim. When we spawn it the gate is inside the loop below; when the service owns it,
+  // this is the only place it gets checked.
+  if (String(cfg.solo) === '1' && !daemons.some((d) => d.name === 'solo')) {
+    const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
+    if (!(await dep.waitReady(cfg.url, { attempts: 20, delayMs: 500 }))) {
+      console.log(bad(`solo house not answering on ${cfg.url} — the service owns it; check: journalctl --user -u memhouse-solo`));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(ok(`solo house answering on ${cfg.url} (service-managed)`));
+  }
   for (const d of daemons) {
     if (pidOf(d.name)) { console.log(warn(`${d.name} already running (pid ${pidOf(d.name)})`)); continue; }
     const log = fs.openSync(path.join(LOG_DIR, d.name + '.log'), 'a');
@@ -614,7 +654,15 @@ function cmdUninstall() {
   const st = svc.status();
   if (st.kind && (st.installed || st.solo?.installed)) {
     const r = svc.uninstall();
-    console.log(r.ok ? ok(`service removed (${r.kind})`) : bad(`service NOT removed: ${r.msg}`));
+    if (!r.ok) {
+      // Removing the home now would delete the env file while a service keeps shipping
+      // with the credential inlined in its unit — and report that memhouse is gone.
+      console.log(bad(`service NOT removed: ${r.msg}`));
+      console.log(`  ${HOME_DIR} left in place. Re-run uninstall once the service is stopped.`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(ok(`service removed (${r.kind})`));
   }
   cmdStop();
   if (fs.existsSync(HOME_DIR)) fs.rmSync(HOME_DIR, { recursive: true });
@@ -786,6 +834,10 @@ function cmdUninstall() {
         const r = svc.install({
           shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval: flags.interval || 300,
           soloJs: solo ? SOLO_JS : null, soloPort,
+          // Where this install lives. The env file records the connection, not the home
+          // that contains it, and the shim's data directory hangs off the home.
+          home: HOME_DIR,
+          soloData: process.env.MEMHOUSE_SOLO_DATA || null,
         });
         if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
         console.log(ok(`service installed (${r.kind}): ${r.path}`));

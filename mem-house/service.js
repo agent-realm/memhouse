@@ -121,7 +121,7 @@ function lingerEnabled() {
  * pointed at a port with nothing behind it. So the shim gets its own unit, and on Linux
  * the shipper is ordered after it.
  */
-function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloPort = null }) {
+function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloPort = null, home = null, soloData = null }) {
   const kind = platform();
   if (!kind) return { ok: false, msg: `no service integration for platform '${process.platform}'` };
   const paths = unitPaths();
@@ -137,6 +137,13 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
   // quietly ships into the wrong place.
   const env = parseEnvFile(envFile);
   if (soloPort) env.MEMHOUSE_SOLO_PORT = String(soloPort);
+  // MEMHOUSE_HOME is not in the env file — it is where the env file itself lives — but the
+  // solo shim derives its data directory from it. A service installed under a custom home
+  // would otherwise open the DEFAULT ~/.memhouse/solo-data: an empty directory with no
+  // schema, so the old memory looks gone and the shipper retries forever against a house
+  // that has nothing in it. Inline the effective paths.
+  if (home) env.MEMHOUSE_HOME = home;
+  if (soloData) env.MEMHOUSE_SOLO_DATA = soloData;
   try { envfile.assertSingleLine(env); } catch (e) { return { ok: false, msg: e.message }; }
 
   if (kind === 'systemd') {
@@ -187,33 +194,62 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
   return { ok: true, kind, path: p, soloPath: soloJs ? soloPath : null, warn: null };
 }
 
+/**
+ * Remove the units — but only after they are actually stopped.
+ *
+ * Deleting a unit file does not stop a loaded service. If `disable --now` fails (a
+ * lingering user service running under a manager this shell cannot reach, say), removing
+ * the file leaves a shipper running with the credential inlined in a file the caller is
+ * about to delete, while every command reports the install gone. So: verify stopped, and
+ * refuse rather than report a success that is not one.
+ */
 function uninstall() {
   const kind = platform();
   if (!kind) return { ok: false, msg: `no service integration for platform '${process.platform}'` };
   const paths = unitPaths();
   const p = paths[kind];
   const soloPath = kind === 'systemd' ? paths.systemdSolo : paths.launchdSolo;
-  if (kind === 'systemd') {
-    for (const [unit, file] of [[`${LABEL}.service`, p], [`${SOLO_LABEL}.service`, soloPath]]) {
-      spawnSync('systemctl', ['--user', 'disable', '--now', unit]);
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    }
-    spawnSync('systemctl', ['--user', 'daemon-reload']);
-  } else {
-    for (const [lbl, file] of [['com.memhouse.shipper', p], ['com.memhouse.solo', soloPath]]) {
-      spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/${lbl}`]);
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    }
+  const stillRunning = [];
+
+  const units = kind === 'systemd'
+    ? [[`${LABEL}.service`, p, 'com.memhouse.shipper'], [`${SOLO_LABEL}.service`, soloPath, 'com.memhouse.solo']]
+    : [['com.memhouse.shipper', p, 'com.memhouse.shipper'], ['com.memhouse.solo', soloPath, 'com.memhouse.solo']];
+
+  for (const [unit, file, label] of units) {
+    if (!fs.existsSync(file)) continue;
+    if (kind === 'systemd') spawnSync('systemctl', ['--user', 'disable', '--now', unit], { encoding: 'utf-8' });
+    else spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/${label}`], { encoding: 'utf-8' });
+    // The command's own status is not the question — `disable` can report success while
+    // the unit stays active, and `bootout` returns non-zero for an already-absent job.
+    // Ask whether it is running now.
+    if (isRunning(kind, unit, label)) { stillRunning.push(unit); continue; }
+    fs.unlinkSync(file);
+  }
+  if (kind === 'systemd') spawnSync('systemctl', ['--user', 'daemon-reload']);
+
+  if (stillRunning.length) {
+    return {
+      ok: false,
+      kind,
+      path: p,
+      msg: `${stillRunning.join(', ')} is still running after stop — unit file kept. `
+        + `Stop it yourself (systemctl --user stop ${stillRunning[0]}), then re-run.`,
+    };
   }
   return { ok: true, kind, path: p };
 }
 
+// A missing service manager is a normal state, not a crash. `spawnSync` on an absent
+// binary returns { error, stdout: null }, and dereferencing that took down `uninstall`,
+// `status` and `doctor` on any Linux host without systemctl — including hosts that never
+// installed a service at all.
 function isRunning(kind, unit, label) {
   if (kind === 'systemd') {
-    return spawnSync('systemctl', ['--user', 'is-active', unit], { encoding: 'utf-8' }).stdout.trim() === 'active';
+    const r = spawnSync('systemctl', ['--user', 'is-active', unit], { encoding: 'utf-8' });
+    return !r.error && (r.stdout || '').trim() === 'active';
   }
   const r = spawnSync('launchctl', ['print', `gui/${process.getuid()}/${label}`], { encoding: 'utf-8' });
-  return r.status === 0 && /state = running|state = waiting/.test(r.stdout || '');
+  return !r.error && r.status === 0 && /state = running|state = waiting/.test(r.stdout || '');
 }
 
 function status() {
