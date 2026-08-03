@@ -42,7 +42,11 @@ services:
     ports:
       # Loopback only. The dashboard and skills run on this machine; nothing needs the
       # house exposed to the network, and 8123 unauthenticated-by-accident is a bad day.
-      - "127.0.0.1:${MEMHOUSE_PORT:-8123}:8123"
+      # MEMHOUSE_CH_PORT, not MEMHOUSE_PORT. The CLI persists MEMHOUSE_PORT as the
+      # DASHBOARD's port (4640), and ~/.memhouse/env is meant to be sourced — so reusing
+      # it here would bind ClickHouse to the dashboard's port and the two would collide
+      # the moment `memhouse start` ran. Same variable `deploy --local` uses.
+      - "127.0.0.1:${MEMHOUSE_CH_PORT:-8123}:8123"
     volumes:
       - memhouse-data:/var/lib/clickhouse
     ulimits:

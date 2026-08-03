@@ -79,14 +79,20 @@ CREATE TABLE IF NOT EXISTS tool_calls_{{MEMBER}}
 ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (session_id, user_id, idx);
 
--- The member's own sessions_v. The read layer (dashboard, CLI stats/search, ship --stats)
--- reads sessions_v, not the base rooms, so a per-member house needs one per member or
--- nothing can read back what was shipped. Body is ../schema.sql's view verbatim, over
--- this member's rooms.
+-- The member's own sessions_v. The read layer — dashboard, CLI status/search/doctor,
+-- `ship --stats` — reads the view rather than the base rooms, so a per-member house needs
+-- one per member or nothing can read back what was shipped. Body is ../schema.sql's view
+-- verbatim, over this member's rooms.
+--
+-- NAMED `v_sessions_<m>`, NOT `sessions_v_<m>`. The Merge rooms select on `^sessions_`,
+-- which would otherwise match the view and try to merge an aggregate into the base
+-- session rooms — same columns it is grouping by, different shape. The `v_` prefix puts
+-- every view outside every room type's namespace, and `rooms.js` reserves it so no member
+-- can be named into the collision.
 --
 -- CREATE OR REPLACE (not IF NOT EXISTS) so a schema roll-forward updates the view in
 -- place, matching how the shared schema is applied.
-CREATE OR REPLACE VIEW sessions_v_{{MEMBER}} AS
+CREATE OR REPLACE VIEW v_sessions_{{MEMBER}} AS
 SELECT
     s.session_id AS session_id,
     any(s.source) AS source,

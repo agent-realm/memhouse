@@ -15,6 +15,12 @@ const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
 // rooms, so it has to resolve alongside them or a per-member house ships fine and then
 // reads back nothing.
 const VIEW_TYPES = ['sessions_v'];
+// ...and it must NOT live in a room type's namespace. The Merge rooms select on
+// `^sessions_`, which would swallow a view named `sessions_v_alice` and try to merge an
+// aggregate view into the base session rooms. The view is therefore prefixed instead of
+// suffixed: `v_sessions_alice`. `v_` cannot collide with a room type, and members cannot
+// be named into one because assertUsableMember bans a leading `v_`.
+const VIEW_PREFIX = 'v_';
 
 function perMemberEnabled() {
   return process.env.MEM_PER_MEMBER === '1';
@@ -25,6 +31,12 @@ function perMemberEnabled() {
 function assertUsableMember(member) {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
     throw new Error(`cannot build room names for user '${member}': expected [A-Za-z][A-Za-z0-9_]*`);
+  }
+  // A member called `v_bob` would own `v_sessions_v_bob` — harmless — but also make
+  // `v_sessions_bob` ambiguous between bob's view and a room of theirs. Reserve the
+  // prefix rather than reason about the overlap.
+  if (member.startsWith(VIEW_PREFIX)) {
+    throw new Error(`member name '${member}' is reserved: '${VIEW_PREFIX}' prefixes the per-member views`);
   }
 }
 
@@ -42,8 +54,14 @@ function roomNames(member, user = member) {
     return out;
   }
   assertUsableMember(member);
-  for (const t of [...ROOM_TYPES, ...VIEW_TYPES]) out[t] = `${t}_${member}`;
+  for (const t of ROOM_TYPES) out[t] = `${t}_${member}`;
+  for (const t of VIEW_TYPES) out[t] = viewName(t, member);
   return out;
+}
+
+/** `sessions_v` + alice -> `v_sessions_alice`. Out of every room type's namespace. */
+function viewName(type, member) {
+  return `${VIEW_PREFIX}${type.replace(/_v$/, '')}_${member}`;
 }
 
 async function currentUser(client) {
@@ -73,6 +91,6 @@ function mergeRooms() {
 }
 
 module.exports = {
-  ROOM_TYPES, VIEW_TYPES, perMemberEnabled, assertUsableMember, roomNames, currentUser,
-  resolveRooms, mergeRooms,
+  ROOM_TYPES, VIEW_TYPES, VIEW_PREFIX, viewName, perMemberEnabled, assertUsableMember,
+  roomNames, currentUser, resolveRooms, mergeRooms,
 };

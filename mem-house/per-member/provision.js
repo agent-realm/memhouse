@@ -19,7 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@clickhouse/client');
-const { ROOM_TYPES, VIEW_TYPES, assertUsableMember } = require('./rooms');
+const { ROOM_TYPES, VIEW_TYPES, viewName, assertUsableMember } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -84,11 +84,11 @@ async function main() {
   // to read rows and unable to use any of the product's read paths.
   for (const v of VIEW_TYPES) {
     await client.command({
-      query: `GRANT SELECT ON ${cfg.database}.${v}_${member} TO ${member} WITH GRANT OPTION`,
+      query: `GRANT SELECT ON ${cfg.database}.${viewName(v, member)} TO ${member} WITH GRANT OPTION`,
     });
   }
   console.log(`[mem] granted SELECT, INSERT, ALTER UPDATE, ALTER DELETE WITH GRANT OPTION on 3 rooms to '${member}'`);
-  console.log(`[mem] granted SELECT WITH GRANT OPTION on ${VIEW_TYPES.map((v) => `${v}_${member}`).join(', ')}`);
+  console.log(`[mem] granted SELECT WITH GRANT OPTION on ${VIEW_TYPES.map((v) => viewName(v, member)).join(', ')}`);
 
   // 3. Merge rooms
   if (flag('merge')) {

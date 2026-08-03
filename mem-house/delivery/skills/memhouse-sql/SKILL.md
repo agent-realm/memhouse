@@ -40,7 +40,9 @@ which one this house uses:
 
 - `MEM_PER_MEMBER` unset or `0` — shared rooms. Use the names below as written.
 - `MEM_PER_MEMBER=1` — every member has their own rooms, named for their ClickHouse
-  user: `messages_alice`, `sessions_alice`, `tool_calls_alice`, `sessions_v_alice`.
+  user — `messages_alice`, `sessions_alice`, `tool_calls_alice` — and the rollup view is
+  prefixed instead: `v_sessions_alice` (it must stay out of the `sessions_` namespace,
+  which the team-wide Merge rooms select on).
   A member holds no grant on anyone else's, so the unsuffixed names below do not
   merely return nothing — they fail with `UNKNOWN_TABLE`.
 
@@ -53,7 +55,8 @@ if [ "${MEM_PER_MEMBER:-0}" = "1" ]; then
     --data-binary "SELECT currentUser() FORMAT TabSeparated" \
     "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
 fi
-# then: messages${MEM_SUFFIX}, sessions_v${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
+# rooms: messages${MEM_SUFFIX}, sessions${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
+# view:  the shared `sessions_v` becomes v_sessions${MEM_SUFFIX}
 ```
 
 ## Schema (the house)

@@ -70,6 +70,13 @@ function resolveConfig() {
     // (or writes) the wrong rooms.
     perMember: (flags['per-member'] === true ? '1' : null)
       ?? process.env.MEM_PER_MEMBER ?? file.MEM_PER_MEMBER ?? '0',
+    // Which tier this house is, persisted for the same reason as the layout: the shim IS
+    // the house on the solo tier, and `start` has to know to bring it up. Inferring it
+    // from the runtime pidfile fails exactly once — after `memhouse stop`, which removes
+    // the pidfile — and the next `start` silently points the shipper and dashboard at a
+    // dead port.
+    solo: process.env.MEMHOUSE_SOLO ?? file.MEMHOUSE_SOLO ?? '0',
+    soloPort: process.env.MEMHOUSE_SOLO_PORT ?? file.MEMHOUSE_SOLO_PORT ?? '',
   };
 }
 
@@ -79,6 +86,8 @@ function childEnv(cfg) {
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
     MEM_PER_MEMBER: String(cfg.perMember || '0'),
+    MEMHOUSE_SOLO: String(cfg.solo || '0'),
+    ...(cfg.soloPort ? { MEMHOUSE_SOLO_PORT: String(cfg.soloPort) } : {}),
   };
 }
 
@@ -95,6 +104,8 @@ function writeEnvFile(cfg) {
     `MEMHOUSE_DB=${sq(cfg.db)}`,
     `MEMHOUSE_PORT=${sq(cfg.port)}`,
     `MEM_PER_MEMBER=${sq(cfg.perMember || '0')}`,
+    `MEMHOUSE_SOLO=${sq(cfg.solo || '0')}`,
+    ...(cfg.soloPort ? [`MEMHOUSE_SOLO_PORT=${sq(cfg.soloPort)}`] : []),
     '',
   ].join('\n');
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
@@ -323,8 +334,9 @@ async function cmdStart() {
   ensureUiBuilt();
   const daemons = [
     // The solo shim IS the house — start it first, or the shipper has nothing to talk to.
-    ...(fs.existsSync(path.join(RUN_DIR, 'solo.pid')) || process.env.MEMHOUSE_SOLO === '1'
-      ? [{ name: 'solo', script: SOLO_JS, args: [] }] : []),
+    // Read from the persisted config, never from the pidfile: `stop` removes the pidfile,
+    // so a pidfile test would drop the shim on the first stop/start cycle.
+    ...(String(cfg.solo) === '1' ? [{ name: 'solo', script: SOLO_JS, args: [] }] : []),
     { name: 'shipper', script: SHIP_JS, args: ['--loop', String(flags.interval || 300)] },
     { name: 'dashboard', script: SERVER_JS, args: [] },
   ];
@@ -527,8 +539,21 @@ async function cmdReset() {
     const a = (await ask(`This truncates ${targets.join(', ')} in '${cfg.db}' and re-ships. Continue? (yes/no)`, 'no')).toLowerCase();
     if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
   }
-  for (const t of targets) await ch(cfg, `TRUNCATE TABLE IF EXISTS ${t}`);
-  console.log(ok('house truncated'));
+  // DELETE, not TRUNCATE. Two reasons, and the second is the one that bites:
+  //   * TRUNCATE is its own privilege, and a provisioned member holds SELECT, INSERT and
+  //     the two ALTER grants — so `reset` failed with an authorization error for every
+  //     normally provisioned member;
+  //   * on the SHARED layout TRUNCATE is worse than unauthorized, it is wrong: the rooms
+  //     hold every member's rows, and a row policy scopes reads, not TRUNCATE. One member
+  //     resetting would empty the house.
+  // Scoping on the caller's own user_id is correct in both layouts. The value is bound
+  // rather than `currentUser()`, which a mutation does not evaluate in the caller's
+  // context and which therefore matches nothing at all.
+  const uid = (await chRows(cfg, 'SELECT currentUser() AS u'))[0]?.u;
+  if (!uid) return console.log(bad('could not determine currentUser() — refusing to reset')), 1;
+  const esc = uid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  for (const t of targets) await ch(cfg, `DELETE FROM ${t} WHERE user_id = '${esc}'`);
+  console.log(ok(`cleared ${uid}'s rows from ${targets.join(', ')}`));
   return run(SHIP_JS, ['--full'], cfg);
 }
 
@@ -630,6 +655,10 @@ function cmdUninstall() {
           process.exitCode = 1; break;
         }
         console.log(ok(`solo house on ${url} (embedded chdb, single user, loopback only)`));
+        // Recorded in the config so `start` and `service install` know this house is a
+        // shim they have to bring up, rather than a server that is simply there.
+        process.env.MEMHOUSE_SOLO = '1';
+        process.env.MEMHOUSE_SOLO_PORT = port;
         flags.url = url; flags.user = 'default'; flags.password = '';
         flags.db = flags.db || process.env.MEMHOUSE_DB || 'memhouse';
         flags.yes = true;
@@ -662,8 +691,8 @@ function cmdUninstall() {
         // the shipper talking to a dead port. Detected from the configured URL: solo is
         // the only tier whose house is a loopback shim this CLI itself started.
         const cfg = resolveConfig();
-        const solo = fs.existsSync(path.join(RUN_DIR, 'solo.pid')) || flags.solo === true;
-        const soloPort = solo ? (new URL(cfg.url).port || '8123') : null;
+        const solo = String(cfg.solo) === '1' || flags.solo === true;
+        const soloPort = solo ? (cfg.soloPort || new URL(cfg.url).port || '8123') : null;
         // The service supersedes the pidfile daemons, and they are not merely redundant:
         // the shim binds a fixed port, so leaving the detached one alive makes the new
         // unit fail with EADDRINUSE and flap under Restart=on-failure. Hand over rather

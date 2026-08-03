@@ -35,7 +35,7 @@ Superseded, kept as written: [v4 PLAN](PLAN-v4-2026-08-02-22_58.md) ·
 ## The one-paragraph version
 
 The house is **`mem`**. Each member gets `mem.sessions_<member>`, `mem.messages_<member>`,
-`mem.tool_calls_<member>` and their own `mem.sessions_v_<member>`, with four grants over
+`mem.tool_calls_<member>` and their own `mem.v_sessions_<member>`, with four grants over
 them: `SELECT, INSERT, ALTER UPDATE, ALTER DELETE` on the three rooms and `SELECT` on the
 view, all `WITH GRANT OPTION`. Isolation stops
 being a row policy that must be right everywhere and becomes a grant that is simply
@@ -54,8 +54,11 @@ a server demands varies by version, and the error only appears on the *second* s
 must **bind** the user rather than call `currentUser()`, which in a mutation matches
 nothing and removes nothing, silently. And each member needs their own `sessions_v`,
 because the dashboard and CLI read the view rather than the rooms — without it a
-per-member house ships fine and reads back nothing. Also stops calling this a skeleton:
-it is implemented and measured.
+per-member house ships fine and reads back nothing. That view is named `v_sessions_<m>`,
+**prefixed rather than suffixed**: `sessions_v_<m>` would sit inside the `^sessions_`
+namespace the Merge rooms select on, and `all_sessions` would try to merge an aggregate
+view into the base session rooms. Also stops calling this a skeleton: it is implemented
+and measured.
 
 **v4** — drops the wildcard-grant collision, which had been carried since v1 as a live
 design constraint. Nothing in this design proposes a wildcard grant; the only wildcard is
