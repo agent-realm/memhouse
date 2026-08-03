@@ -275,10 +275,19 @@ function preflight({ tag = null } = {}) {
   // deploy solo; `unknown` means the engine is there and could not answer, which is not
   // evidence of absence and must not be read as one.
   if (!eng) return { ok: false, reason: 'no-engine', msg: 'neither docker nor podman found on PATH' };
+  // BOTH objects, before deciding anything. Returning on the first `foreign` hid the
+  // state that actually matters to a caller asking "is there a house here": a foreign
+  // container beside an initialised MANAGED volume. `deploy --solo` read that as "no
+  // local house" and overwrote the credential for a volume nobody can reach afterwards.
+  const states = {
+    container: ownership(eng, 'container', CONTAINER),
+    volume: ownership(eng, 'volume', VOLUME),
+  };
   for (const [kind, name] of [['container', CONTAINER], ['volume', VOLUME]]) {
-    const own = ownership(eng, kind, name);
-    if (own === 'foreign') return { ok: false, reason: 'foreign', engine: eng, msg: foreignMsg(kind, name) };
-    if (own === 'unknown') return { ok: false, reason: 'unknown', engine: eng, msg: unknownMsg(kind, name, eng) };
+    if (states[kind] === 'unknown') return { ok: false, reason: 'unknown', engine: eng, states, msg: unknownMsg(kind, name, eng) };
+  }
+  for (const [kind, name] of [['container', CONTAINER], ['volume', VOLUME]]) {
+    if (states[kind] === 'foreign') return { ok: false, reason: 'foreign', engine: eng, states, msg: foreignMsg(kind, name) };
   }
   // The image, too, when the caller is actually going to run one — `up()` checks it, but
   // by then the caller has stopped the shipper and the dashboard, so a bad tag costs a
@@ -287,7 +296,7 @@ function preflight({ tag = null } = {}) {
     const img = ensureImage(eng, tag);
     if (!img.ok) return { ok: false, reason: 'image', engine: eng, msg: img.msg };
   }
-  return { ok: true, engine: eng, initialised: ownership(eng, 'volume', VOLUME) === 'ours' };
+  return { ok: true, engine: eng, states, initialised: states.volume === 'ours' };
 }
 
 /** Present locally, or pullable. Never removes anything. */

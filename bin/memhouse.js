@@ -765,6 +765,17 @@ function cmdUninstall() {
     case 'deploy': {
       const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
       if (flags.down) {
+        // A shipper service outlives the house it points at. Tearing down the container
+        // and volume beneath it leaves the service retrying an endpoint that is gone —
+        // and a later bare `deploy --local` mints a NEW password on the same port, which
+        // the service will never learn, while `status` still reports it running.
+        let svcDown = { installed: false };
+        try { svcDown = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported */ }
+        if (svcDown.installed) {
+          console.log(bad('a shipper service is installed and points at this house — removing it would leave the service retrying a dead endpoint.'));
+          console.log('  memhouse service uninstall, then memhouse deploy --down');
+          process.exitCode = 2; break;
+        }
         const r = dep.down();
         console.log(r.ok ? ok(`local ClickHouse removed (${r.engine}${r.volumeRemoved ? ', volume included' : ''})`) : bad(r.msg));
         process.exitCode = r.ok ? 0 : 1;
@@ -811,13 +822,19 @@ function cmdUninstall() {
           // that describes some other house is exactly what must not be overwritten.
           const cfgNow = resolveConfig();
           const nothingToLose = !fs.existsSync(ENV_FILE) || String(cfgNow.solo) === '1';
-          // `foreign` is not this path's problem. It means somebody else's container or
-          // volume happens to carry our fixed name — which matters enormously to
-          // `deploy --local`, whose whole job is to replace that name, and not at all to
-          // solo, which runs embedded chdb and never touches either object. Only the
-          // states that could HIDE a managed local house count here: `unknown`,
-          // `ambiguous`, or a genuinely initialised one.
-          const localRuledOut = loc.reason === 'foreign';
+          // `foreign` is not this path's problem — somebody else's object carrying our
+          // fixed name matters enormously to `deploy --local`, whose job is to replace
+          // that name, and not at all to solo, which runs embedded chdb and never touches
+          // either object.
+          //
+          // But it is ruled out only when BOTH objects say so. A foreign container beside
+          // an initialised MANAGED volume is still a local house whose credential this
+          // command would overwrite — and once the foreign container is removed, that
+          // volume is unreachable forever.
+          const st = loc.states || {};
+          const localRuledOut = loc.reason === 'foreign'
+            && st.container !== 'ours' && st.volume !== 'ours'
+            && st.container !== 'unknown' && st.volume !== 'unknown';
           if (!loc.ok && !localRuledOut && !(loc.reason === 'no-engine' && nothingToLose)) {
             console.log(bad(loc.reason === 'no-engine'
               ? `no container engine on PATH, so an existing local house cannot be ruled out — and ${ENV_FILE.replace(os.homedir(), '~')} already describes a house.`

@@ -335,8 +335,15 @@ function runState(kind, unit, label) {
   }
   const r = spawnSync('launchctl', ['print', `gui/${process.getuid()}/${label}`], { encoding: 'utf-8' });
   if (r.error) return 'unknown';                 // no launchctl
-  if (r.status !== 0) return 'stopped';          // launchctl says there is no such job
-  return /state = running|state = waiting/.test(r.stdout || '') ? 'running' : 'stopped';
+  if (r.status === 0) return /state = running|state = waiting/.test(r.stdout || '') ? 'running' : 'stopped';
+  // Non-zero has two very different meanings. "Could not find service" is launchd
+  // telling us the job is gone — a real `stopped`. "Could not find domain" is launchd
+  // telling us it cannot look, which happens over SSH with no GUI session, and treating
+  // that as stopped let `uninstall` delete a plist while its shipper kept running with
+  // the inlined credential.
+  const out = `${r.stderr || ''}${r.stdout || ''}`;
+  if (/could not find service|no such process|not find the specified service/i.test(out)) return 'stopped';
+  return 'unknown';
 }
 
 function isRunning(kind, unit, label) {

@@ -315,6 +315,32 @@ assert_out "local still refuses the same objects" "not created by memhouse" \
 ok "the foreign objects survived both"
 env MEMHOUSE_HOME="$HL" $CLI stop >/dev/null 2>&1
 
+say "a foreign container beside a MANAGED volume is still a local house"
+HN="$TMP/home-mixed"; mkdir -p "$HN"
+env MEMHOUSE_HOME="$HN" $CLI deploy --local --house-port $((PORT_CH+13)) --no-ship >/dev/null 2>&1
+PWN=$(grep MEMHOUSE_PASSWORD "$HN/env" 2>/dev/null)
+"$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1                       # leave the managed VOLUME
+"$ENG" run -d --name memhouse-clickhouse docker.io/library/busybox:latest sleep 300 >/dev/null 2>&1
+HO="$TMP/home-mixed2"; mkdir -p "$HO"
+assert_exit "solo refuses a mixed foreign/managed state" 2 \
+  env MEMHOUSE_HOME="$HO" MEMHOUSE_SOLO_DATA="$TMP/mixed-data" $CLI deploy --solo --house-port $((PORT_SOLO+15)) --no-ship
+PWN2=$(grep MEMHOUSE_PASSWORD "$HN/env" 2>/dev/null)
+[ "$PWN" = "$PWN2" ] && ok "the managed volume's credential survived" || bad "credential overwritten — that volume is unreachable"
+"$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1; "$ENG" volume rm -f memhouse-data >/dev/null 2>&1
+
+say "teardown must not orphan a shipper service"
+if ! have_systemd; then
+  skip "deploy --down with a service installed (no user manager)"
+else
+  HP="$TMP/home-orphan"; mkdir -p "$HP"
+  env MEMHOUSE_HOME="$HP" $CLI deploy --local --house-port $((PORT_CH+14)) --no-ship >/dev/null 2>&1
+  env MEMHOUSE_HOME="$HP" $CLI service install >/dev/null 2>&1; sleep 2
+  assert_exit "deploy --down is refused while the service is installed" 2 \
+    env MEMHOUSE_HOME="$HP" $CLI deploy --down
+  env MEMHOUSE_HOME="$HP" $CLI service uninstall >/dev/null 2>&1
+  assert_exit "and works once it is uninstalled" 0 env MEMHOUSE_HOME="$HP" $CLI deploy --down
+fi
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
