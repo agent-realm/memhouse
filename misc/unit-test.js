@@ -185,5 +185,25 @@ test('ExecStart quotes paths containing spaces', () => {
   assert.ok(plain.includes('ExecStart=/usr/bin/node /opt/ship.js --loop 300'), plain);
 });
 
+// ── container-engine message classification ────────────────────────────────────
+// The regex that decides "this object does not exist" versus "the engine could not
+// answer". Getting it wrong in the permissive direction made an unreachable daemon read
+// as a clean slate, and `deploy --down` reported success having removed nothing.
+test('only object-not-found messages mean absent', () => {
+  const deploy = require('../mem-house/deploy');
+  const cases = [
+    ['Cannot connect to Podman. stat /run/user/1000/podman/podman.sock: no such file or directory', false],
+    ['Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?', false],
+    ['Error: unable to connect: dial tcp: lookup docker: no such host', false],
+    ['Error: No such object: memhouse-clickhouse', true],
+    ['Error response from daemon: No such container: memhouse-clickhouse', true],
+    ['Error: no such container memhouse-clickhouse', true],
+    ['Error: no such volume memhouse-data', true],
+  ];
+  for (const [msg, want] of cases) {
+    assert.strictEqual(deploy._NOT_FOUND.test(msg), want, `misclassified: ${msg}`);
+  }
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

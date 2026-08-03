@@ -822,6 +822,19 @@ function cmdUninstall() {
           }
         }
       }
+      // Detached clients hold a SNAPSHOT of the connection in their environment, taken
+      // when they were spawned. Leaving them up across a tier switch means a shipper and
+      // dashboard still using `default` with no password against a server that now wants
+      // a credential — reported as running, failing every request. They are stopped here
+      // and `memhouse start` brings them back with the new config; the install line at
+      // the end of this command already says to run it.
+      for (const name of ['shipper', 'dashboard']) {
+        const pid = pidOf(name);
+        if (!pid) continue;
+        console.log(warn(`stopping ${name} (pid ${pid}) — it holds the old connection`));
+        try { process.kill(pid, 'SIGTERM'); } catch { /* raced */ }
+        try { fs.unlinkSync(path.join(RUN_DIR, `${name}.pid`)); } catch { /* absent */ }
+      }
       // Reuse the house's own password when its data volume already exists. The image
       // only applies CLICKHOUSE_PASSWORD when it INITIALISES a data directory, so a
       // fresh random password on a re-deploy authenticates against nothing — and
@@ -841,7 +854,18 @@ function cmdUninstall() {
         console.log('  to start over (DESTROYS the memory):  memhouse deploy --down');
         process.exitCode = 2; break;
       }
-      const pw = process.env.MEMHOUSE_PASSWORD || reusable || crypto.randomBytes(16).toString('hex');
+      // An initialised volume with no credential to reuse — env file deleted, emptied, or
+      // never written — is the same lockout by another route: a generated password would
+      // be ignored by the server and then written over the config as if it worked.
+      // Nothing here can recover it, so say what can.
+      if (initialised && !reusable) {
+        console.log(bad(`the managed volume '${dep.VOLUME}' already holds a house, but no credential for it is available.`));
+        console.log('  a generated one would be ignored by the server: the image sets the password only at first init.');
+        console.log(`  recover it from the old ${ENV_FILE.replace(os.homedir(), '~')}, or reset the user from inside the house,`);
+        console.log('  or start over and lose the memory:  memhouse deploy --down');
+        process.exitCode = 2; break;
+      }
+      const pw = reusable || crypto.randomBytes(16).toString('hex');
       if (reusable && pw === reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
       const port = String(housePort || process.env.MEMHOUSE_CH_PORT || 8123);
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });

@@ -43,7 +43,13 @@ function engine() {
 // cannot answer at all — an unreachable daemon being the obvious one. Both are non-zero
 // exits, and collapsing them made an unreachable daemon look like a clean slate: `--down`
 // would then report success with nothing removed, over a container that is still running.
-const NOT_FOUND = /no such|not exist|unable to find|did not find/i;
+//
+// The pattern must name the KIND of object that is missing. A bare `/no such/` was too
+// broad in exactly the direction that matters, because an unreachable engine says
+// `Cannot connect ... stat /run/user/1000/podman/podman.sock: no such file or directory`.
+// docker says `No such object: NAME` / `No such container: NAME`, podman says
+// `no such container NAME`; no socket error names a container, volume or image.
+const NOT_FOUND = /no such (object|container|volume|image)\b/i;
 
 /** 'absent' | 'ours' | 'foreign' | 'unknown' — for a container or a volume. */
 function ownership(eng, kind, name) {
@@ -175,4 +181,8 @@ function volumeExists() {
   return ownership(eng, 'volume', VOLUME) === 'ours';
 }
 
-module.exports = { engine, up, down, waitReady, volumeExists, CONTAINER, VOLUME, DEFAULT_TAG };
+module.exports = {
+  engine, up, down, waitReady, volumeExists, CONTAINER, VOLUME, DEFAULT_TAG,
+  // exported for the unit gate: classifying an engine message wrong is silent
+  _NOT_FOUND: NOT_FOUND,
+};
