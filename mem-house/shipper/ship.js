@@ -30,7 +30,7 @@ const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
-const { resolveRooms } = require('../per-member/rooms');
+const { resolveRooms, perMemberEnabled } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -101,6 +101,16 @@ function makeClient() {
 // Apply ../schema.sql statement by statement. Comments are stripped BEFORE the ';'
 // split — schema comments legitimately contain semicolons.
 async function ensureSchema(client) {
+  // schema.sql is the SHARED layout — three rooms named `sessions`/`messages`/
+  // `tool_calls` plus `sessions_v`. Applying it to a per-member house would create a
+  // second, unused set of rooms beside the members' own, and fail outright for a member
+  // who holds no CREATE TABLE. Rooms in that layout are minted per member by the owner.
+  if (perMemberEnabled()) {
+    throw new Error(
+      'MEM_PER_MEMBER=1: rooms are created per member by the owner, not by --ensure-schema.\n'
+      + '  Run, as the owner:  node mem-house/per-member/provision.js --member <name>',
+    );
+  }
   const sql = fs.readFileSync(path.join(__dirname, '..', 'schema.sql'), 'utf-8');
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);

@@ -603,6 +603,16 @@ function cmdUninstall() {
       if (flags.solo) {
         // Single-user tier: an embedded chdb behind a local ClickHouse-HTTP shim.
         // No container, no server, no sharing — see mem-house/solo/server.js.
+        //
+        // The per-member layout cannot apply here and must not be half-applied: chdb has
+        // no users, so currentUser() is always 'default' and the rooms would be named
+        // `sessions_default` — the shape of a multi-member house with exactly one member
+        // and no grants to separate anybody. Refuse rather than build that.
+        if (String(resolveConfig().perMember) === '1') {
+          console.log(bad('solo is a single-user tier: chdb has no users or grants, so MEM_PER_MEMBER cannot apply.'));
+          console.log('  use `deploy --local` (a real ClickHouse) for the per-member layout.');
+          process.exitCode = 2; break;
+        }
         const port = String(housePort || process.env.MEMHOUSE_SOLO_PORT || 8123);
         fs.mkdirSync(RUN_DIR, { recursive: true }); fs.mkdirSync(LOG_DIR, { recursive: true });
         if (!pidOf('solo')) {
