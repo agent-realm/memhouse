@@ -75,7 +75,48 @@ covers the binding), then `node bin/memhouse.js …`.
 memhouse onboard | install | setup | discover | uninstall | reset
 memhouse ship [--full|--loop N] | stats | search <terms> | start | stop | status | doctor
 memhouse plugins install claude | prompt
+memhouse deploy --local | --solo | --down       # stand up a house to point at
+memhouse service install | uninstall | status   # survive a reboot
 ```
+
+### Where the memory lives
+
+`memhouse onboard` assumes you already have a ClickHouse. If you do not, `deploy`
+is the missing first mile:
+
+| | What it runs | Who it is for |
+|---|---|---|
+| `deploy --solo` | embedded chdb behind a local shim on `127.0.0.1` | one person, no server, no container |
+| `deploy --local` | stock ClickHouse in docker or podman, loopback-bound | one machine, or several members later |
+| kernel install | an agency house on an ultimagent kernel | a team, provisioned centrally |
+
+`--solo` is a genuinely separate tier, not a smaller server: chdb has no users, no
+`GRANT` and no row policies, so there is exactly one identity and `user_id` is
+provenance rather than an isolation boundary. If two people ever need separating,
+that is `--local`, and the upgrade path is a fresh house. See
+`mem-house/solo/README.md`.
+
+`deploy` labels what it creates and refuses to replace or remove a container or
+volume it did not create, so a name collision costs you an error rather than
+somebody else's data.
+
+### Surviving a reboot
+
+`memhouse start` detaches with pidfiles: the daemons outlive the shell, and nothing
+brings them back after a restart. `memhouse service install` writes a real user
+service instead — systemd `--user` on Linux, a launchd LaunchAgent on macOS — and
+takes over from the pidfile daemons. On Linux a `--user` unit stops at logout
+unless lingering is on, so install detects that and prints the `loginctl` command.
+
+### One set of rooms per member (unreleased)
+
+`MEM_PER_MEMBER=1` (or `install --per-member`) switches the house from three shared
+rooms separated by a row policy to a set of rooms per member — `messages_alice`,
+`sessions_alice`, `tool_calls_alice`, `v_sessions_alice` — where isolation is a
+grant that is simply absent rather than a policy that must be right everywhere.
+Rooms are minted by the house owner (`mem-house/per-member/provision.js`); sharing
+a whole room is then self-serve, with no operator. Design and measurements:
+`mem-house/per-member/`.
 
 Every command is dual-mode: interactive for humans, `--yes`/flags/`--json` for
 agents — so an agent can self-install its own memory (`memhouse install --yes …`,
