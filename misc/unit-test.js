@@ -112,5 +112,63 @@ test('comments and blank lines are ignored', () => {
   assert.strictEqual(Object.keys(parsed).length, 1);
 });
 
+// ── service files ───────────────────────────────────────────────────────────────
+// Rendered, not installed. On macOS the plist is additionally linted with plutil, which
+// is the only check available for a file we must not load on this machine.
+const service = require('../mem-house/service');
+const os = require('os');
+
+const SVC = {
+  node: '/usr/bin/node',
+  script: '/opt/memhouse/ship.js',
+  args: ['--loop', '300'],
+  env: { MEMHOUSE_URL: 'http://h:8123', MEMHOUSE_PASSWORD: "ab'cd\\ef", MEM_PER_MEMBER: '1' },
+  logDir: '/var/log/memhouse',
+  logName: 'shipper.log',
+};
+
+test('systemd unit inlines env with systemd quoting, not shell quoting', () => {
+  const unit = service._render.systemdUnit({ ...SVC, description: 'd' });
+  assert.ok(unit.includes('Environment=MEMHOUSE_PASSWORD="ab\'cd\\\\ef"'), unit);
+  assert.ok(unit.includes('Environment=MEM_PER_MEMBER="1"'), 'layout switch must travel with the unit');
+  assert.ok(!unit.includes('EnvironmentFile'), 'the shell-quoted file must not be read by systemd');
+  assert.ok(unit.includes('ExecStart=/usr/bin/node /opt/memhouse/ship.js --loop 300'));
+});
+
+test('systemd ordering is emitted only when the solo unit is wanted', () => {
+  const plain = service._render.systemdUnit({ ...SVC, description: 'd' });
+  assert.ok(!plain.includes('memhouse-solo.service'));
+  const ordered = service._render.systemdUnit({ ...SVC, description: 'd', after: ['memhouse-solo.service'] });
+  assert.ok(ordered.includes('After=memhouse-solo.service'));
+  assert.ok(ordered.includes('Wants=memhouse-solo.service'));
+});
+
+test('launchd plist is well-formed and escapes XML metacharacters', () => {
+  const plist = service._render.launchdPlist({
+    ...SVC, label: 'com.memhouse.shipper',
+    env: { ...SVC.env, TRICKY: 'a & b < c > d' },
+  });
+  assert.ok(plist.startsWith('<?xml'), 'missing XML declaration');
+  assert.ok(plist.includes('<string>a &amp; b &lt; c &gt; d</string>'), 'XML metacharacters not escaped');
+  // The credential travels decoded — the shell escape must NOT survive into the plist.
+  assert.ok(plist.includes("<string>ab'cd\\ef</string>"), plist);
+  assert.ok(!plist.includes("'\\''"), 'shell quoting leaked into the plist');
+  // Every opened tag closes.
+  for (const tag of ['plist', 'dict', 'array']) {
+    const open = (plist.match(new RegExp(`<${tag}[ >]`, 'g')) || []).length;
+    const close = (plist.match(new RegExp(`</${tag}>`, 'g')) || []).length;
+    assert.strictEqual(open, close, `<${tag}> unbalanced`);
+  }
+  // On macOS, let the platform's own parser be the judge.
+  if (process.platform === 'darwin') {
+    const fs2 = require('fs');
+    const p = require('path').join(os.tmpdir(), `memhouse-plist-check-${process.pid}.plist`);
+    fs2.writeFileSync(p, plist);
+    try {
+      require('child_process').execFileSync('plutil', ['-lint', p], { stdio: 'pipe' });
+    } finally { fs2.unlinkSync(p); }
+  }
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

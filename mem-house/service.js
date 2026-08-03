@@ -234,4 +234,7 @@ function status() {
   };
 }
 
-module.exports = { install, uninstall, status, platform };
+// The two renderers are exported so the unit gate can check what gets written without
+// installing anything. A malformed plist or unit is only visible at load time otherwise,
+// and "load it and see" is not available on a machine you must not touch.
+module.exports = { install, uninstall, status, platform, _render: { systemdUnit, launchdPlist, unitPaths } };
