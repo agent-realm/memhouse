@@ -130,6 +130,16 @@ async function chRows(cfg, sql, opts) {
   return text ? text.split('\n').map((l) => JSON.parse(l)) : [];
 }
 
+/** Is anything listening on this loopback port? */
+function portInUse(port) {
+  return new Promise((resolve) => {
+    const s = require('net').createServer();
+    s.once('error', () => resolve(true));
+    s.once('listening', () => s.close(() => resolve(false)));
+    s.listen(Number(port), '127.0.0.1');
+  });
+}
+
 /** Port from a configured URL, '' when it has none or the URL is unparseable. */
 function portOf(u) {
   try { return new URL(u).port || ''; } catch { return ''; }
@@ -789,6 +799,16 @@ function cmdUninstall() {
         }
         const runningPid = pidOf('solo');
         if (runningPid && housePort && String(housePort) !== String(resolveConfig().soloPort || '')) {
+          // Check the DESTINATION before demolishing the origin. If something already
+          // owns the target port, the replacement dies on EADDRINUSE, the identity check
+          // correctly refuses — and the old house is stopped, with the config still
+          // pointing at it. The move fails either way; only one way costs the user a
+          // running house.
+          if (await portInUse(port)) {
+            console.log(bad(`port ${port} is already in use — not moving the solo house off ${resolveConfig().soloPort}.`));
+            console.log('  free that port, or pick another with --house-port.');
+            process.exitCode = 2; break;
+          }
           console.log(warn(`solo house is on port ${resolveConfig().soloPort || '?'}; moving it to ${housePort}`));
           try { process.kill(runningPid, 'SIGTERM'); } catch { /* raced */ }
           try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
@@ -836,7 +856,13 @@ function cmdUninstall() {
       // dashboard is worse than the problem it is refusing, and in the missing-credential
       // case those processes may be the last things holding a usable connection.
       const priorCfg = resolveConfig();
-      const initialised = dep.volumeExists();
+      // Ask the engine everything `up()` would refuse for, BEFORE anything is stopped.
+      // `volumeExists()` alone is not enough: it collapses foreign and indeterminate to
+      // "no volume", so a foreign container under the fixed name was only discovered
+      // inside up(), by which point the shipper and dashboard were already dead.
+      const pre = dep.preflight();
+      if (!pre.ok) { console.log(bad(pre.msg)); process.exitCode = 1; break; }
+      const initialised = pre.initialised;
       const reusable = initialised && priorCfg.password ? priorCfg.password : null;
 
       // Every way of asking for a different password against an existing house. The image
@@ -939,6 +965,11 @@ function cmdUninstall() {
         // the shipper talking to a dead port. Detected from the configured URL: solo is
         // the only tier whose house is a loopback shim this CLI itself started.
         const cfg = resolveConfig();
+        // Ask what can be asked before killing the daemons this is taking over from. A
+        // failed install used to leave the machine with no shipper — and on the solo tier
+        // with no house at all — for a condition that was knowable up front.
+        const pre = svc.preflight({ envFile: ENV_FILE });
+        if (!pre.ok) { console.log(bad(pre.msg)); process.exitCode = 1; break; }
         const solo = String(cfg.solo) === '1' || flags.solo === true;
         const soloPort = solo ? (cfg.soloPort || new URL(cfg.url).port || '8123') : null;
         // The service supersedes the pidfile daemons, and they are not merely redundant:

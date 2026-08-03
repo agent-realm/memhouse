@@ -128,6 +128,32 @@ function lingerEnabled() {
 }
 
 /**
+ * Everything install would fail on, asked before the caller stops anything.
+ *
+ * `service install` takes over from the detached daemons by killing them first. If the
+ * install then fails — no user manager on Linux, `launchctl bootstrap` refusing on macOS,
+ * a credential with a newline in it — the machine is left with no shipper at all, and on
+ * the solo tier with no house either. So the answerable questions are asked first.
+ */
+function preflight({ envFile }) {
+  const kind = platform();
+  if (!kind) return { ok: false, msg: `no service integration for platform '${process.platform}'` };
+  try { envfile.assertSingleLine(parseEnvFile(envFile)); } catch (e) { return { ok: false, msg: e.message }; }
+  if (kind === 'systemd') {
+    const r = spawnSync('systemctl', ['--user', 'show-environment'], { encoding: 'utf-8' });
+    if (r.error) return { ok: false, msg: 'systemctl is not on PATH — no systemd user manager to install into' };
+    if (r.status !== 0) {
+      return { ok: false, msg: 'cannot reach the systemd user manager '
+        + `(${((r.stderr || '').trim().split('\n')[0]) || `exit ${r.status}`}). Is XDG_RUNTIME_DIR set for this session?` };
+    }
+  } else {
+    const r = spawnSync('launchctl', ['print', `gui/${process.getuid()}`], { encoding: 'utf-8' });
+    if (r.error) return { ok: false, msg: 'launchctl is not on PATH — no launchd session to install into' };
+  }
+  return { ok: true, kind };
+}
+
+/**
  * Install the shipper as a user service.
  *
  * `soloJs` opts in to the solo tier: the shipper then talks to an embedded chdb behind a
@@ -182,8 +208,15 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
       after: soloJs ? [`${SOLO_LABEL}.service`] : [],
     }), { mode: 0o600 });
     execFileSync('systemctl', ['--user', 'daemon-reload']);
-    if (soloJs) execFileSync('systemctl', ['--user', 'enable', '--now', `${SOLO_LABEL}.service`]);
-    execFileSync('systemctl', ['--user', 'enable', '--now', `${LABEL}.service`]);
+    // `enable --now` STARTS a unit; it does not restart one that is already running, and
+    // a running unit keeps the environment it was started with. Re-installing after
+    // changing the connection, the interval, CODEX_HOME or the tier would then report
+    // success while the service went on shipping with the old settings until a reboot.
+    // So: enable, then restart — which starts a stopped unit and replaces a running one.
+    for (const unit of [...(soloJs ? [`${SOLO_LABEL}.service`] : []), `${LABEL}.service`]) {
+      execFileSync('systemctl', ['--user', 'enable', unit]);
+      execFileSync('systemctl', ['--user', 'restart', unit]);
+    }
     const warn = lingerEnabled() ? null
       : `systemd --user services stop at logout. Run: loginctl enable-linger ${os.userInfo().username}`;
     return { ok: true, kind, path: p, soloPath: soloJs ? soloPath : null, warn };
@@ -323,4 +356,7 @@ function status() {
 // The two renderers are exported so the unit gate can check what gets written without
 // installing anything. A malformed plist or unit is only visible at load time otherwise,
 // and "load it and see" is not available on a machine you must not touch.
-module.exports = { install, uninstall, status, platform, _render: { systemdUnit, launchdPlist, unitPaths } };
+module.exports = {
+  install, uninstall, status, platform, preflight,
+  _render: { systemdUnit, launchdPlist, unitPaths },
+};

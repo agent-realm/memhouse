@@ -181,8 +181,27 @@ function volumeExists() {
   return ownership(eng, 'volume', VOLUME) === 'ours';
 }
 
+/**
+ * Everything `up()` would refuse for, asked BEFORE the caller changes anything.
+ * Returns { ok, msg, initialised }.
+ *
+ * `up()` checks ownership itself, but by the time it runs the CLI has already stopped
+ * the shipper, the dashboard and the shim — so a refusal costs the user a working
+ * pipeline in exchange for protecting them. The same questions, asked first.
+ */
+function preflight() {
+  const eng = engine();
+  if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
+  for (const [kind, name] of [['container', CONTAINER], ['volume', VOLUME]]) {
+    const own = ownership(eng, kind, name);
+    if (own === 'foreign') return { ok: false, engine: eng, msg: foreignMsg(kind, name) };
+    if (own === 'unknown') return { ok: false, engine: eng, msg: unknownMsg(kind, name, eng) };
+  }
+  return { ok: true, engine: eng, initialised: ownership(eng, 'volume', VOLUME) === 'ours' };
+}
+
 module.exports = {
-  engine, up, down, waitReady, volumeExists, CONTAINER, VOLUME, DEFAULT_TAG,
+  engine, up, down, waitReady, volumeExists, preflight, CONTAINER, VOLUME, DEFAULT_TAG,
   // exported for the unit gate: classifying an engine message wrong is silent
   _NOT_FOUND: NOT_FOUND,
 };

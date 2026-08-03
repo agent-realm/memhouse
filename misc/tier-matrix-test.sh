@@ -141,6 +141,30 @@ PWL2=$(grep MEMHOUSE_PASSWORD "$H7/env" 2>/dev/null)
 [ "$PWL" = "$PWL2" ] && ok "the local credential was not overwritten" || bad "credential overwritten — the CLI is locked out"
 env MEMHOUSE_HOME="$H7" $CLI deploy --down >/dev/null 2>&1
 
+say "preflight: a refusal must not cost you a running pipeline"
+H8="$TMP/home-pre"; mkdir -p "$H8"
+env MEMHOUSE_HOME="$H8" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
+env MEMHOUSE_HOME="$H8" $CLI start >/dev/null 2>&1; sleep 1
+# Make the fixed names foreign, so the ownership check must refuse.
+env MEMHOUSE_HOME="$H8" $CLI deploy --down >/dev/null 2>&1
+"$ENG" run -d --name memhouse-clickhouse docker.io/library/busybox:latest sleep 300 >/dev/null 2>&1
+assert_out "a foreign container is refused" "not created by memhouse" env MEMHOUSE_HOME="$H8" $CLI deploy --local --no-ship
+if [ -e "$H8/run/dashboard.pid" ]; then ok "the refusal left the dashboard running"; else bad "the refusal killed the dashboard first"; fi
+"$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1
+env MEMHOUSE_HOME="$H8" $CLI stop >/dev/null 2>&1
+
+say "solo: an occupied target port is rejected before the old shim dies"
+H9="$TMP/home-move"; mkdir -p "$H9"
+env MEMHOUSE_HOME="$H9" MEMHOUSE_SOLO_DATA="$TMP/move-data" $CLI deploy --solo --house-port $PORT_SOLO --no-ship >/dev/null 2>&1
+# Occupy the destination with something that is not us.
+python3 -c "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',$((PORT_SOLO+5))));s.listen(1);time.sleep(30)" &
+BLOCKER=$!; sleep 1
+assert_exit "moving onto an occupied port is refused" 2 \
+  env MEMHOUSE_HOME="$H9" $CLI deploy --solo --house-port $((PORT_SOLO+5)) --no-ship
+assert_out "and the original house is still serving" "connected:" env MEMHOUSE_HOME="$H9" $CLI status
+kill $BLOCKER 2>/dev/null
+env MEMHOUSE_HOME="$H9" $CLI stop >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
