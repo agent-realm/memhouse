@@ -811,7 +811,14 @@ function cmdUninstall() {
           // that describes some other house is exactly what must not be overwritten.
           const cfgNow = resolveConfig();
           const nothingToLose = !fs.existsSync(ENV_FILE) || String(cfgNow.solo) === '1';
-          if (!loc.ok && !(loc.reason === 'no-engine' && nothingToLose)) {
+          // `foreign` is not this path's problem. It means somebody else's container or
+          // volume happens to carry our fixed name — which matters enormously to
+          // `deploy --local`, whose whole job is to replace that name, and not at all to
+          // solo, which runs embedded chdb and never touches either object. Only the
+          // states that could HIDE a managed local house count here: `unknown`,
+          // `ambiguous`, or a genuinely initialised one.
+          const localRuledOut = loc.reason === 'foreign';
+          if (!loc.ok && !localRuledOut && !(loc.reason === 'no-engine' && nothingToLose)) {
             console.log(bad(loc.reason === 'no-engine'
               ? `no container engine on PATH, so an existing local house cannot be ruled out — and ${ENV_FILE.replace(os.homedir(), '~')} already describes a house.`
               : `cannot rule out an existing local house: ${loc.msg}`));
@@ -830,7 +837,7 @@ function cmdUninstall() {
             console.log('  memhouse service uninstall, then deploy --solo, then memhouse service install');
             process.exitCode = 2; break;
           }
-          if (loc.ok && loc.initialised) {
+          if (loc.ok && loc.initialised && !localRuledOut) {
             console.log(bad(`a local house already exists here — its data volume '${dep.VOLUME}' is initialised.`));
             console.log('  starting a solo house would overwrite its URL and credential in the config, and the');
             console.log('  local one cannot be re-credentialed afterwards.');

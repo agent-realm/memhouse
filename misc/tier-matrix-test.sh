@@ -300,6 +300,21 @@ assert_out "but local still refuses it" "cannot obtain" \
   env PATH="$TMP/regdown" MEMHOUSE_HOME="$HK" $CLI deploy --local --house-port $((PORT_CH+11)) --no-ship
 env MEMHOUSE_HOME="$HJ" $CLI stop >/dev/null 2>&1
 
+say "an unrelated name collision must not block solo"
+# Somebody else's container/volume under our fixed names. `deploy --local` must refuse
+# them; `deploy --solo` runs embedded chdb and never touches either, so it must not care.
+"$ENG" volume create memhouse-data >/dev/null 2>&1
+"$ENG" run -d --name memhouse-clickhouse docker.io/library/busybox:latest sleep 300 >/dev/null 2>&1
+HL="$TMP/home-collide"; mkdir -p "$HL"
+assert_exit "solo deploys past a foreign name collision" 0 \
+  env MEMHOUSE_HOME="$HL" MEMHOUSE_SOLO_DATA="$TMP/collide-data" $CLI deploy --solo --house-port $((PORT_SOLO+14)) --no-ship
+HM="$TMP/home-collide2"; mkdir -p "$HM"
+assert_out "local still refuses the same objects" "not created by memhouse" \
+  env MEMHOUSE_HOME="$HM" $CLI deploy --local --house-port $((PORT_CH+12)) --no-ship
+"$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1; "$ENG" volume rm -f memhouse-data >/dev/null 2>&1
+ok "the foreign objects survived both"
+env MEMHOUSE_HOME="$HL" $CLI stop >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"

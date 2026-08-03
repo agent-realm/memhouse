@@ -149,6 +149,14 @@ function preflight({ envFile }) {
   } else {
     const r = spawnSync('launchctl', ['print', `gui/${process.getuid()}`], { encoding: 'utf-8' });
     if (r.error) return { ok: false, msg: 'launchctl is not on PATH — no launchd session to install into' };
+    // A non-zero status is a refusal too, and the systemd branch already treats it as
+    // one. Over SSH there is often no accessible GUI domain, so `bootstrap` would fail —
+    // after the caller had already stopped the shipper and the shim it was replacing.
+    if (r.status !== 0) {
+      return { ok: false, msg: `no accessible launchd GUI domain for uid ${process.getuid()} `
+        + `(${((r.stderr || '').trim().split('\n')[0]) || `exit ${r.status}`}). `
+        + 'A LaunchAgent needs a logged-in session; over SSH there may not be one.' };
+    }
   }
   return { ok: true, kind };
 }
