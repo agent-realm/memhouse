@@ -28,6 +28,11 @@ services:
     image: docker.io/clickhouse/clickhouse-server:${MEMHOUSE_CH_TAG:-25.11}
     container_name: memhouse-clickhouse
     restart: unless-stopped
+    # Ownership marker, same one `memhouse deploy` writes. Both paths use fixed names, and
+    # the CLI refuses to replace or remove anything lacking this label — so a house started
+    # through compose must carry it too, or `deploy --down` will decline to clean it up.
+    labels:
+      com.memhouse.managed: "1"
     environment:
       CLICKHOUSE_USER: ${MEMHOUSE_USER:-memhouse_root}
       CLICKHOUSE_PASSWORD: ${MEMHOUSE_PASSWORD:?set MEMHOUSE_PASSWORD — refusing to start an unauthenticated house}
@@ -53,3 +58,5 @@ services:
 volumes:
   memhouse-data:
     name: memhouse-data
+    labels:
+      com.memhouse.managed: "1"

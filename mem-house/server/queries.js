@@ -17,6 +17,7 @@
 
 const { createClient } = require('@clickhouse/client');
 const { calculateCost, normalizeModelName } = require('../../pricing');
+const { resolveRooms } = require('../per-member/rooms');
 
 const config = {
   url: process.env.MEMHOUSE_URL || 'http://localhost:8123',
@@ -44,8 +45,38 @@ function getClient() {
 
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
+// Room routing. Under MEM_PER_MEMBER the rooms are named for the member
+// (`messages_alice`), so a read layer hardcoding `messages` either hits a permission
+// error or — worse, on a house that still holds shared rooms — silently returns the old
+// shared-layout data. Every query below names its rooms as `{{sessions_v}}` and friends,
+// and this is the single place they are resolved.
+//
+// `{{name}}` cannot collide with ClickHouse's own `{name:Type}` parameter syntax: double
+// braces, no type.
+const ROOM_TOKEN = /\{\{([a-z_]+)\}\}/g;
+let roomsPromise = null;
+
+function rooms() {
+  // Resolved once per process. resolveRooms asks the server for currentUser(), so it is a
+  // round trip, and every dashboard request would otherwise pay for it.
+  if (!roomsPromise) {
+    roomsPromise = resolveRooms(getClient()).catch((e) => { roomsPromise = null; throw e; });
+  }
+  return roomsPromise;
+}
+
+function applyRooms(sql, r) {
+  return sql.replace(ROOM_TOKEN, (_, name) => {
+    const t = r[name];
+    if (!t) throw new Error(`query names unknown room '${name}'`);
+    return t;
+  });
+}
+
 async function q(query, params = {}) {
-  const rs = await getClient().query({ query, query_params: params, format: 'JSONEachRow' });
+  const rs = await getClient().query({
+    query: applyRooms(query, await rooms()), query_params: params, format: 'JSONEachRow',
+  });
   return rs.json();
 }
 async function q1(query, params = {}) { return (await q(query, params))[0]; }
@@ -101,7 +132,7 @@ function filters(opts, { editorLike = false, folderLike = false } = {}) {
 function inSessions(f, col) {
   if (!f.and) return '';
   const alias = col.split('.')[0];
-  return ` AND (${alias}.session_id, ${alias}.user_id) IN (SELECT session_id, user_id FROM sessions_v AS c WHERE 1=1${f.and})`;
+  return ` AND (${alias}.session_id, ${alias}.user_id) IN (SELECT session_id, user_id FROM {{sessions_v}} AS c WHERE 1=1${f.and})`;
 }
 
 // Fold a [{name|model, cnt}] list through normalizeModelName into a freq map.
@@ -119,20 +150,20 @@ const topN = (freq, n) => Object.entries(freq).sort((a, b) => b[1] - a[1]).slice
 // ── overview ────────────────────────────────────────────────────────────────────
 async function getOverview(opts = {}) {
   const f = filters(opts);
-  const totalChats = Number((await q1(`SELECT count() AS cnt FROM sessions_v AS c WHERE 1=1${f.and}`, f.params)).cnt);
+  const totalChats = Number((await q1(`SELECT count() AS cnt FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params)).cnt);
 
   // Root parity: without a folder filter the editor breakdown is global.
   const editors = opts.folder
-    ? await q(`SELECT source, count() AS count FROM sessions_v AS c WHERE 1=1${f.and} GROUP BY source ORDER BY count DESC`, f.params)
-    : await q('SELECT source, count() AS count FROM sessions_v GROUP BY source ORDER BY count DESC');
+    ? await q(`SELECT source, count() AS count FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY source ORDER BY count DESC`, f.params)
+    : await q('SELECT source, count() AS count FROM {{sessions_v}} GROUP BY source ORDER BY count DESC');
 
-  const modes = await q(`SELECT mode, count() AS count FROM sessions_v AS c WHERE mode != ''${f.and} GROUP BY mode`, f.params);
+  const modes = await q(`SELECT mode, count() AS count FROM {{sessions_v}} AS c WHERE mode != ''${f.and} GROUP BY mode`, f.params);
   const byMode = {};
   for (const m of modes) byMode[m.mode] = Number(m.count);
 
   const rows = await q(`
     SELECT formatDateTime(${TS}, '%Y-%m', 'UTC') AS month, source, count() AS count
-    FROM sessions_v AS c WHERE 1=1${f.and}
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}
     GROUP BY month, source ORDER BY month`, f.params);
   const monthMap = {};
   for (const r of rows) {
@@ -143,7 +174,7 @@ async function getOverview(opts = {}) {
   const byMonth = Object.keys(monthMap).sort().map(m => ({ month: m, ...monthMap[m] }));
 
   const projects = await q(`
-    SELECT folder, count() AS count FROM sessions_v AS c
+    SELECT folder, count() AS count FROM {{sessions_v}} AS c
     WHERE folder != ''${f.and} GROUP BY folder ORDER BY count DESC LIMIT 20`, f.params);
   const topProjects = projects.map(p => ({
     name: p.folder.split(/[/\\]/).slice(-2).join('/'),
@@ -151,7 +182,7 @@ async function getOverview(opts = {}) {
     count: Number(p.count),
   }));
 
-  const range = await q1(`SELECT min(${MS}) AS oldest, max(${MS}) AS newest FROM sessions_v AS c WHERE 1=1${f.and}`, f.params);
+  const range = await q1(`SELECT min(${MS}) AS oldest, max(${MS}) AS newest FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
 
   return {
     totalChats,
@@ -171,7 +202,7 @@ async function getDailyActivity(opts = {}) {
            source,
            toHour(${TS}, {tz:String}) AS hour,
            count() AS count
-    FROM sessions_v AS c WHERE 1=1${f.and}
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}
     GROUP BY day, source, hour ORDER BY day`, params);
 
   const daily = {};
@@ -193,18 +224,18 @@ async function getDashboardStats(opts = {}) {
 
   const hourlyRows = await q(`
     SELECT toHour(${TS}, {tz:String}) AS hour, count() AS count
-    FROM sessions_v AS c WHERE 1=1${f.and} GROUP BY hour ORDER BY hour`, p);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY hour ORDER BY hour`, p);
   const hourly = new Array(24).fill(0);
   for (const r of hourlyRows) hourly[Number(r.hour)] = Number(r.count);
 
   const weekdayRows = await q(`
     SELECT toDayOfWeek(${TS}, 0, {tz:String}) % 7 AS dow, count() AS count
-    FROM sessions_v AS c WHERE 1=1${f.and} GROUP BY dow ORDER BY dow`, p);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY dow ORDER BY dow`, p);
   const weekdays = new Array(7).fill(0);
   for (const r of weekdayRows) weekdays[Number(r.dow)] = Number(r.count);
 
   const depthRows = await q(`
-    SELECT total_msgs AS msgs FROM sessions_v AS c WHERE total_msgs > 0${f.and}`, f.params);
+    SELECT total_msgs AS msgs FROM {{sessions_v}} AS c WHERE total_msgs > 0${f.and}`, f.params);
   const depthBuckets = { '1': 0, '2-5': 0, '6-10': 0, '11-20': 0, '21-50': 0, '51-100': 0, '100+': 0 };
   for (const r of depthRows) {
     const m = Number(r.msgs);
@@ -222,11 +253,11 @@ async function getDashboardStats(opts = {}) {
            COALESCE(sum(cache_read_tokens), 0) AS cacheRead, COALESCE(sum(cache_write_tokens), 0) AS cacheWrite,
            COALESCE(sum(user_chars), 0) AS userChars, COALESCE(sum(assistant_chars), 0) AS assistantChars,
            count() AS sessions
-    FROM sessions_v AS c WHERE 1=1${f.and}`, f.params);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
 
   const streakRows = await q(`
     SELECT DISTINCT formatDateTime(${TS}, '%Y-%m-%d', {tz:String}) AS day
-    FROM sessions_v AS c WHERE 1=1${f.and} ORDER BY day`, p);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} ORDER BY day`, p);
   let currentStreak = 0, longestStreak = 0, tempStreak = 1;
   const today = new Date().toISOString().split('T')[0];
   for (let i = 1; i < streakRows.length; i++) {
@@ -249,7 +280,7 @@ async function getDashboardStats(opts = {}) {
 
   const monthEditorRows = await q(`
     SELECT formatDateTime(${TS}, '%Y-%m', 'UTC') AS month, source, count() AS count
-    FROM sessions_v AS c WHERE 1=1${f.and} GROUP BY month, source ORDER BY month`, f.params);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY month, source ORDER BY month`, f.params);
   const monthEditors = {};
   const allSources = new Set();
   for (const r of monthEditorRows) {
@@ -261,17 +292,17 @@ async function getDashboardStats(opts = {}) {
   const velocityRows = await q(`
     SELECT formatDateTime(c.last_updated_at, '%Y-%m', 'UTC') AS month,
            avg(total_msgs) AS avgMsgs, avg(input_tokens + output_tokens) AS avgTokens
-    FROM sessions_v AS c WHERE c.last_updated_at IS NOT NULL${f.and}
+    FROM {{sessions_v}} AS c WHERE c.last_updated_at IS NOT NULL${f.and}
     GROUP BY month ORDER BY month`, f.params);
 
   const modelRows = await q(`
-    SELECT m.model AS model, count() AS cnt FROM messages AS m
+    SELECT m.model AS model, count() AS cnt FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
     GROUP BY model`, f.params);
   const topModels = topN(normalizedModelFreq(modelRows), 10);
 
   const toolRows = await q(`
-    SELECT tool_name, count() AS cnt FROM tool_calls AS tc
+    SELECT tool_name, count() AS cnt FROM {{tool_calls}} AS tc
     WHERE 1=1${inSessions(f, 'tc.session_id')} GROUP BY tool_name`, f.params);
   let totalToolCalls = 0;
   const toolFreq = {};
@@ -303,7 +334,7 @@ async function getDashboardStats(opts = {}) {
 // ── chats list ──────────────────────────────────────────────────────────────────
 async function countChats(opts = {}) {
   const f = filters(opts, { editorLike: true, folderLike: true });
-  let sql = `SELECT count() AS cnt FROM sessions_v AS c WHERE 1=1${f.and}`;
+  let sql = `SELECT count() AS cnt FROM {{sessions_v}} AS c WHERE 1=1${f.and}`;
   if (opts.named !== false) sql += " AND (c.name != '' OR c.total_msgs > 0)";
   return Number((await q1(sql, f.params)).cnt);
 }
@@ -318,7 +349,7 @@ async function getChats(opts = {}) {
            c.input_tokens AS _inTok, c.output_tokens AS _outTok,
            c.cache_read_tokens AS _cacheR, c.cache_write_tokens AS _cacheW,
            c.user_chars AS _uChars, c.assistant_chars AS _aChars
-    FROM sessions_v AS c WHERE 1=1${f.and}`;
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}`;
   const params = { ...f.params };
   if (opts.named !== false) sql += " AND (c.name != '' OR c.total_msgs > 0)";
   sql += ` ORDER BY ${MS} DESC`;
@@ -332,7 +363,7 @@ async function getChats(opts = {}) {
   const ids = rows.map(r => r.id);
   const tmRows = await q(`
     SELECT session_id, user_id, argMax(model, cnt) AS top_model
-    FROM (SELECT session_id, user_id, model, count() AS cnt FROM messages
+    FROM (SELECT session_id, user_id, model, count() AS cnt FROM {{messages}}
           WHERE session_id IN {ids:Array(String)} AND model NOT IN ${EXCLUDED_MODELS}
           GROUP BY session_id, user_id, model)
     GROUP BY session_id, user_id`, { ids });
@@ -381,7 +412,7 @@ async function getChat(id) {
            c.user_chars AS user_chars, c.assistant_chars AS assistant_chars,
            c.input_tokens AS input_tokens, c.output_tokens AS output_tokens,
            c.cache_read_tokens AS cache_read_tokens, c.cache_write_tokens AS cache_write_tokens
-    FROM sessions_v AS c WHERE session_id = {sid:String}`;
+    FROM {{sessions_v}} AS c WHERE session_id = {sid:String}`;
   const params = { sid: sidPart };
   if (uidPart) { sql += ' AND user_id = {uid:String}'; params.uid = uidPart; }
   sql += ' LIMIT 1';
@@ -398,11 +429,11 @@ async function getChat(id) {
   // members share an adapter-local session_id would see their rows merged.
   const messages = await q(`
     SELECT role, text AS content, model, input_tokens, output_tokens
-    FROM messages WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY seq`,
+    FROM {{messages}} WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY seq`,
     { cid: chat.id, uid: chat.user_id });
 
   const toolCalls = await q(`
-    SELECT tool_name, args FROM tool_calls WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY idx`,
+    SELECT tool_name, args FROM {{tool_calls}} WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY idx`,
     { cid: chat.id, uid: chat.user_id });
   const toolCallDetails = toolCalls.map(tc => ({ name: tc.tool_name, args: safeParseJson(tc.args) }));
 
@@ -446,7 +477,7 @@ async function getProjects(opts = {}) {
 
   const perSource = await q(`
     SELECT folder, source, count() AS count, min(${MS}) AS first_seen, max(${MS}) AS last_seen
-    FROM sessions_v AS c WHERE folder != ''${df.and}
+    FROM {{sessions_v}} AS c WHERE folder != ''${df.and}
     GROUP BY folder, source ORDER BY folder, count DESC`, df.params);
 
   const map = {};
@@ -463,12 +494,12 @@ async function getProjects(opts = {}) {
            sum(input_tokens) AS totalInputTokens, sum(output_tokens) AS totalOutputTokens,
            sum(user_chars) AS totalUserChars, sum(assistant_chars) AS totalAssistantChars,
            sum(cache_read_tokens) AS totalCacheRead, sum(cache_write_tokens) AS totalCacheWrite
-    FROM sessions_v AS c WHERE folder != ''${df.and} GROUP BY folder`, df.params);
+    FROM {{sessions_v}} AS c WHERE folder != ''${df.and} GROUP BY folder`, df.params);
   const sumByFolder = {};
   for (const r of sums) sumByFolder[r.folder] = r;
 
   const modelRows = await q(`
-    SELECT m.folder AS folder, m.model AS model, count() AS cnt FROM messages AS m
+    SELECT m.folder AS folder, m.model AS model, count() AS cnt FROM {{messages}} AS m
     WHERE m.folder != '' AND m.model NOT IN ${EXCLUDED_MODELS}${inSessions(df, 'm.session_id')}
     GROUP BY folder, model`, df.params);
   const modelsByFolder = {};
@@ -479,7 +510,7 @@ async function getProjects(opts = {}) {
   }
 
   const toolRows = await q(`
-    SELECT tc.folder AS folder, tc.tool_name AS tool_name, count() AS cnt FROM tool_calls AS tc
+    SELECT tc.folder AS folder, tc.tool_name AS tool_name, count() AS cnt FROM {{tool_calls}} AS tc
     WHERE tc.folder != ''${inSessions(df, 'tc.session_id')} GROUP BY folder, tool_name`, df.params);
   const toolsByFolder = {};
   for (const r of toolRows) {
@@ -523,7 +554,7 @@ async function getDeepAnalytics(opts = {}) {
   let sql = `
     SELECT c.session_id AS id, c.user_id AS user_id, c.total_msgs AS msgs, c.user_chars AS uc, c.assistant_chars AS ac,
            c.input_tokens AS ti, c.output_tokens AS to_, c.cache_read_tokens AS cr, c.cache_write_tokens AS cw
-    FROM sessions_v AS c WHERE 1=1${f.and} ORDER BY ${MS} DESC`;
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} ORDER BY ${MS} DESC`;
   const params = { ...f.params };
   if (opts.limit) { sql += ' LIMIT {limit:UInt64}'; params.limit = opts.limit; }
   const rows = await q(sql, params);
@@ -548,7 +579,7 @@ async function getDeepAnalytics(opts = {}) {
   if (ids.length > 0) {
     const pairs = { ids, users };
     const toolRows = await q(`
-      SELECT tool_name, count() AS cnt FROM tool_calls
+      SELECT tool_name, count() AS cnt FROM {{tool_calls}}
       WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
       GROUP BY tool_name`, pairs);
     const toolFreq = {};
@@ -556,7 +587,7 @@ async function getDeepAnalytics(opts = {}) {
     topTools = topN(toolFreq, 30);
 
     const modelRows = await q(`
-      SELECT model, count() AS cnt FROM messages
+      SELECT model, count() AS cnt FROM {{messages}}
       WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
         AND model NOT IN ${EXCLUDED_MODELS} GROUP BY model`, pairs);
     topModels = topN(normalizedModelFreq(modelRows), 20);
@@ -588,7 +619,7 @@ async function getToolCalls(toolName, opts = {}) {
     SELECT tc.tool_name AS tool_name, tc.args AS args, tc.source AS source, tc.folder AS folder,
            toUnixTimestamp64Milli(tc.ts) AS timestamp, s.name AS chat_name,
            concat(tc.session_id, '::', tc.user_id) AS chat_id
-    FROM tool_calls AS tc INNER JOIN sessions AS s
+    FROM {{tool_calls}} AS tc INNER JOIN {{sessions}} AS s
       ON s.session_id = tc.session_id AND s.user_id = tc.user_id
     WHERE tc.tool_name = {name:String}`;
   const params = { name: toolName, limit };
@@ -619,7 +650,7 @@ async function sessionDominantMap(f) {
   const rows = await q(`
     SELECT session_id, user_id, argMax(model, cnt) AS dominant
     FROM (SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, count() AS cnt
-          FROM messages AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+          FROM {{messages}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
           GROUP BY session_id, user_id, model)
     GROUP BY session_id, user_id`, f.params);
   const map = {};
@@ -631,7 +662,7 @@ async function sessionDominantMap(f) {
 async function sourceDominantMap(f) {
   const rows = await q(`
     SELECT m.source AS source, m.model AS model, count() AS cnt
-    FROM messages AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+    FROM {{messages}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
     GROUP BY source, model`, f.params);
   const bySource = {}, globalFreq = {};
   for (const r of rows) {
@@ -653,14 +684,14 @@ async function estimateCosts(opts = {}) {
   const modelTokens = await q(`
     SELECT m.model AS model, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
            sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
-    FROM messages AS m
+    FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
     GROUP BY model`, f.params);
 
   const orphanRows = await q(`
     SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
            sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
-    FROM messages AS m
+    FROM {{messages}} AS m
     WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
     GROUP BY session_id, user_id`, f.params);
 
@@ -682,7 +713,7 @@ async function estimateCosts(opts = {}) {
   // Sessions that name models but report zero tokens → estimate from chars.
   const charRows = await q(`
     SELECT c.session_id AS session_id, c.user_id AS user_id, c.user_chars AS userChars, c.assistant_chars AS asstChars
-    FROM sessions_v AS c
+    FROM {{sessions_v}} AS c
     WHERE notEmpty(c.models) AND c.input_tokens = 0 AND c.output_tokens = 0
       AND (c.user_chars > 0 OR c.assistant_chars > 0)${f.and}`, f.params);
   for (const r of charRows) {
@@ -694,7 +725,7 @@ async function estimateCosts(opts = {}) {
   const unmodeledRows = await q(`
     SELECT c.source AS source, c.input_tokens AS input, c.output_tokens AS output,
            c.cache_read_tokens AS cacheRead, c.cache_write_tokens AS cacheWrite
-    FROM sessions_v AS c
+    FROM {{sessions_v}} AS c
     WHERE empty(c.models) AND (c.input_tokens > 0 OR c.output_tokens > 0)${f.and}`, f.params);
   if (unmodeledRows.length > 0) {
     const { sourceDominant, globalDominant } = await sourceDominantMap(f);
@@ -737,7 +768,7 @@ async function computePerChatCosts(f) {
   const aRows = await q(`
     SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
-    FROM messages AS m
+    FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
     GROUP BY session_id, user_id, model`, f.params);
   const byChatModel = {};
@@ -746,7 +777,7 @@ async function computePerChatCosts(f) {
   const bRows = await q(`
     SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
-    FROM messages AS m
+    FROM {{messages}} AS m
     WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
     GROUP BY session_id, user_id`, f.params);
   const orphanByChat = {};
@@ -761,7 +792,7 @@ async function computePerChatCosts(f) {
            c.input_tokens AS ti, c.output_tokens AS to_,
            c.cache_read_tokens AS cr, c.cache_write_tokens AS cw,
            formatDateTime(${TS}, '%Y-%m', 'UTC') AS month
-    FROM sessions_v AS c WHERE 1=1${f.and}`, f.params);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
 
   const dominantMap = await sessionDominantMap(f);
   const { sourceDominant, globalDominant } = await sourceDominantMap(f);

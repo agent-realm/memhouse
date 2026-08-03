@@ -78,3 +78,43 @@ CREATE TABLE IF NOT EXISTS tool_calls_{{MEMBER}}
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (session_id, user_id, idx);
+
+-- The member's own sessions_v. The read layer (dashboard, CLI stats/search, ship --stats)
+-- reads sessions_v, not the base rooms, so a per-member house needs one per member or
+-- nothing can read back what was shipped. Body is ../schema.sql's view verbatim, over
+-- this member's rooms.
+--
+-- CREATE OR REPLACE (not IF NOT EXISTS) so a schema roll-forward updates the view in
+-- place, matching how the shared schema is applied.
+CREATE OR REPLACE VIEW sessions_v_{{MEMBER}} AS
+SELECT
+    s.session_id AS session_id,
+    any(s.source) AS source,
+    any(s.host) AS host,
+    any(s.name) AS name,
+    any(s.mode) AS mode,
+    any(s.folder) AS folder,
+    any(s.project) AS project,
+    any(s.git_branch) AS git_branch,
+    s.user_id AS user_id,
+    any(s.created_at) AS created_at,
+    any(s.last_updated_at) AS last_updated_at,
+    min(m.ts) AS started,
+    max(m.ts) AS ended,
+    coalesce(dateDiff('second', min(m.ts), max(m.ts)), 0) AS duration_sec,
+    count(m.seq) AS total_msgs,
+    countIf(m.role = 'user') AS user_msgs,
+    countIf(m.role = 'assistant') AS assistant_msgs,
+    countIf(m.is_subagent) AS subagent_msgs,
+    groupUniqArrayIf(m.model, m.model NOT IN ('', '<synthetic>')) AS models,
+    coalesce(sum(m.input_tokens), 0) AS input_tokens,
+    coalesce(sum(m.output_tokens), 0) AS output_tokens,
+    coalesce(sum(m.cache_read_tokens), 0) AS cache_read_tokens,
+    coalesce(sum(m.cache_write_tokens), 0) AS cache_write_tokens,
+    coalesce(sumIf(length(m.text), m.role = 'user'), 0) AS user_chars,
+    coalesce(sumIf(length(m.text), m.role = 'assistant'), 0) AS assistant_chars,
+    coalesce(substring(argMinIf(m.text, m.seq, m.role = 'user' AND m.text != ''), 1, 200), '') AS first_prompt
+FROM sessions_{{MEMBER}} AS s
+LEFT JOIN messages_{{MEMBER}} AS m ON m.session_id = s.session_id AND m.user_id = s.user_id
+GROUP BY s.session_id, s.user_id
+SETTINGS join_use_nulls = 1;

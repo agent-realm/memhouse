@@ -24,6 +24,12 @@ const DEFAULT_TAG = '25.11';
 //   unqualified-search registries are defined in "/etc/containers/registries.conf"
 const IMAGE_REPO = 'docker.io/clickhouse/clickhouse-server';
 
+// Ownership label. `memhouse-clickhouse` and `memhouse-data` are fixed names, so without
+// a marker a name collision with somebody else's container would let `deploy --local`
+// (which replaces) or `deploy --down` (which removes) destroy an unrelated workload and
+// its data. Anything we did not create is refused, never removed.
+const OWNER_LABEL = 'com.memhouse.managed';
+
 /** docker or podman, whichever is present. Returns null if neither is. */
 function engine() {
   for (const e of ['docker', 'podman']) {
@@ -33,9 +39,21 @@ function engine() {
   return null;
 }
 
-function running(eng) {
-  const r = spawnSync(eng, ['ps', '-a', '--filter', `name=^${CONTAINER}$`, '--format', '{{.Names}}'], { encoding: 'utf-8' });
-  return (r.stdout || '').trim() === CONTAINER;
+/** 'absent' | 'ours' | 'foreign' — for a container or a volume. */
+function ownership(eng, kind, name) {
+  const args = kind === 'volume'
+    ? ['volume', 'inspect', '-f', `{{index .Labels "${OWNER_LABEL}"}}`, name]
+    : ['inspect', '-f', `{{index .Config.Labels "${OWNER_LABEL}"}}`, name];
+  const r = spawnSync(eng, args, { encoding: 'utf-8' });
+  if (r.status !== 0) return 'absent';
+  // Go's template prints `<no value>` for a missing key, empty for a present-but-empty
+  // one; both mean the object exists and is not ours.
+  return (r.stdout || '').trim() === '1' ? 'ours' : 'foreign';
+}
+
+function foreignMsg(kind, name) {
+  return `refusing to touch ${kind} '${name}': it exists but was not created by memhouse `
+    + `(no ${OWNER_LABEL} label). Remove or rename it yourself if it is disposable.`;
 }
 
 /**
@@ -49,13 +67,24 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
   if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
   if (!password) return { ok: false, msg: 'refusing to start an unauthenticated house — no password given' };
 
-  if (running(eng)) {
-    spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
+  const own = ownership(eng, 'container', CONTAINER);
+  if (own === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('container', CONTAINER) };
+  const volOwn = ownership(eng, 'volume', VOLUME);
+  if (volOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('volume', VOLUME) };
+
+  if (own === 'ours') spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
+
+  // Create the volume explicitly so it carries the label. `run -v name:/path` would
+  // create it unlabeled, and an unlabeled volume is one we then refuse to remove.
+  if (volOwn === 'absent') {
+    const v = spawnSync(eng, ['volume', 'create', '--label', `${OWNER_LABEL}=1`, VOLUME], { encoding: 'utf-8' });
+    if (v.status !== 0) return { ok: false, engine: eng, msg: (v.stderr || '').trim().split('\n').slice(-1)[0] };
   }
 
   const args = [
     'run', '-d',
     '--name', CONTAINER,
+    '--label', `${OWNER_LABEL}=1`,
     '--restart', 'unless-stopped',
     '-e', `CLICKHOUSE_USER=${user}`,
     '-e', `CLICKHOUSE_PASSWORD=${password}`,
@@ -72,13 +101,24 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
   return { ok: true, engine: eng, url: `http://localhost:${port}`, password };
 }
 
-/** Remove the container and its volume. Needs no password — nothing is contacted. */
+/**
+ * Remove the container and its volume — but only the ones memhouse created. Needs no
+ * password: nothing is contacted. Removing an unowned object is the destructive mistake
+ * this guards, so a foreign name is an error, not a warning.
+ */
 function down() {
   const eng = engine();
   if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
-  spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
-  const v = spawnSync(eng, ['volume', 'rm', '-f', VOLUME], { encoding: 'utf-8' });
-  return { ok: true, engine: eng, volumeRemoved: v.status === 0 };
+
+  const cOwn = ownership(eng, 'container', CONTAINER);
+  if (cOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('container', CONTAINER) };
+  const vOwn = ownership(eng, 'volume', VOLUME);
+  if (vOwn === 'foreign') return { ok: false, engine: eng, msg: foreignMsg('volume', VOLUME) };
+
+  if (cOwn === 'ours') spawnSync(eng, ['rm', '-f', CONTAINER], { encoding: 'utf-8' });
+  let volumeRemoved = false;
+  if (vOwn === 'ours') volumeRemoved = spawnSync(eng, ['volume', 'rm', '-f', VOLUME], { encoding: 'utf-8' }).status === 0;
+  return { ok: true, engine: eng, volumeRemoved, containerRemoved: cOwn === 'ours' };
 }
 
 /** Poll /ping until the server answers. An install against a still-starting server

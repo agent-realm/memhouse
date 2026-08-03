@@ -5,9 +5,10 @@
 //
 // Run as the OWNER. Steps, all IF NOT EXISTS / re-runnable:
 //   1. create the member's three rooms from schema-member.sql.tpl
-//   2. grant the member SELECT, INSERT, ALTER DELETE on those three rooms, WITH GRANT
-//      OPTION (grant-option is what makes whole-room sharing self-serve; ALTER DELETE is
-//      required by the shipper's clear-then-insert, not a convenience — see step 2 below)
+//   2. grant the member SELECT, INSERT, ALTER UPDATE, ALTER DELETE on those three rooms,
+//      WITH GRANT OPTION (grant-option is what makes whole-room sharing self-serve; the
+//      two ALTER grants are required by the shipper's clear-then-insert, not a
+//      convenience — see the note at the grant itself)
 //   3. --merge: create/refresh the three Merge rooms, borrowing this member's columns
 //
 // Grants are explicit, one statement per room. No wildcards are used anywhere; the only
@@ -18,7 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@clickhouse/client');
-const { ROOM_TYPES, assertUsableMember } = require('./rooms');
+const { ROOM_TYPES, VIEW_TYPES, assertUsableMember } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -68,13 +69,26 @@ async function main() {
   // 2. grants — explicit, one per room
   for (const t of ROOM_TYPES) {
     await client.command({
-      // ALTER DELETE is required, not optional: the shipper clears a known session's
-      // rows before re-inserting so a shorter re-parse cannot leave stale seq tails.
-      // Without it every incremental pass fails on the first changed session.
-      query: `GRANT SELECT, INSERT, ALTER DELETE ON ${cfg.database}.${t}_${member} TO ${member} WITH GRANT OPTION`,
+      // The mutation grants are required, not optional: the shipper clears a known
+      // session's rows before re-inserting so a shorter re-parse cannot leave stale seq
+      // tails. BOTH are needed, and which one bites depends on the server version —
+      // `DELETE FROM` is a *lightweight* delete, implemented as
+      // `ALTER TABLE ... UPDATE _row_exists = 0`, so 25.11 demands
+      // `ALTER UPDATE(_row_exists)` while 26.7 asked for `ALTER DELETE`. Granting one
+      // produces a pass that fails on the other server, so grant both.
+      query: `GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON ${cfg.database}.${t}_${member} TO ${member} WITH GRANT OPTION`,
     });
   }
-  console.log(`[mem] granted SELECT, INSERT, ALTER DELETE WITH GRANT OPTION on 3 rooms to '${member}'`);
+  // The view is read-only and read by the dashboard/CLI, so SELECT is the whole grant —
+  // with grant option, because sharing a room without its view leaves the recipient able
+  // to read rows and unable to use any of the product's read paths.
+  for (const v of VIEW_TYPES) {
+    await client.command({
+      query: `GRANT SELECT ON ${cfg.database}.${v}_${member} TO ${member} WITH GRANT OPTION`,
+    });
+  }
+  console.log(`[mem] granted SELECT, INSERT, ALTER UPDATE, ALTER DELETE WITH GRANT OPTION on 3 rooms to '${member}'`);
+  console.log(`[mem] granted SELECT WITH GRANT OPTION on ${VIEW_TYPES.map((v) => `${v}_${member}`).join(', ')}`);
 
   // 3. Merge rooms
   if (flag('merge')) {

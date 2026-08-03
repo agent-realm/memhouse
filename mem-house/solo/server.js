@@ -71,18 +71,62 @@ function dbExists(name) {
   } catch { return false; }
 }
 
-function run(sql, fmt, database) {
+// Named query parameters. `@clickhouse/client` leaves `{id:String}` in the SQL and sends
+// the value as a `param_id` URL parameter — that is how the shipper's per-session DELETE
+// and every dashboard `getChat`/search query are written. chdb has no such transport, but
+// it does honour `SET param_<name> = ...`, and its sessions are stateful, so binding is a
+// SET issued immediately before the query.
+//
+// Which makes leftovers the hazard: a param set by an earlier request stays set, so a
+// query whose parameter went missing would silently read someone else's value instead of
+// failing. Every placeholder the SQL mentions must therefore be supplied by THIS request.
+const PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[^{}]+\}/g;
+
+function chLiteral(v) {
+  return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
+function bindParams(url, sql) {
+  const supplied = new Map();
+  for (const [k, v] of url.searchParams) if (k.startsWith('param_')) supplied.set(k.slice(6), v);
+
+  const wanted = new Set();
+  for (const m of sql.matchAll(PLACEHOLDER)) wanted.add(m[1]);
+  for (const name of wanted) {
+    // Same shape as ClickHouse's own message for an unbound substitution, so callers
+    // that read `Code:` and the text behave identically against a real server.
+    if (!supplied.has(name)) {
+      const e = new Error(`Code: 456. DB::Exception: Substitution \`${name}\` is not set. (UNKNOWN_QUERY_PARAMETER)`);
+      throw e;
+    }
+  }
+  for (const [name, value] of supplied) {
+    if (wanted.has(name)) session.query(`SET param_${name} = ${chLiteral(value)}`, 'CSV');
+  }
+}
+
+// `statement` is the SQL alone, never the INSERT data block appended to it. ClickHouse
+// does not substitute inside that block, and a transcript whose text happens to contain
+// `{id:String}` would otherwise be read as an unbound placeholder and rejected — memhouse
+// ships conversations *about* ClickHouse, so that is a live case, not a hypothetical.
+function run(sql, fmt, database, url, statement) {
   if (database && database !== currentDb && dbExists(database)) {
     session.query(`USE ${database}`, 'CSV');
     currentDb = database;
   }
+  if (url) bindParams(url, statement);
   return session.query(sql, fmt);
 }
 
 const server = http.createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => { body += c; });
+  // Collect Buffers and decode ONCE. `body += chunk` decodes each chunk on its own, so a
+  // multi-byte UTF-8 sequence straddling a chunk boundary is silently replaced with U+FFFD
+  // — and an insert body carrying tens of thousands of rows straddles many boundaries.
+  // The damage is invisible: the insert succeeds, the transcript is just quietly wrong.
+  const chunks = [];
+  req.on('data', (c) => { chunks.push(c); });
   req.on('end', () => {
+    const body = Buffer.concat(chunks).toString('utf-8');
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
     if (url.pathname === '/ping') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('Ok.\n'); }
@@ -96,6 +140,8 @@ const server = http.createServer((req, res) => {
     const sql = qParam && bodyText ? `${qParam}\n${bodyText}`
       : (qParam || bodyText || '');
     if (!sql.trim()) { res.writeHead(400); return res.end('no query\n'); }
+    // The SQL alone — the insert data block, when there is one, is not part of it.
+    const statement = qParam && bodyText ? qParam : sql;
 
     const database = url.searchParams.get('database') || '';
     const fmt = formatFor(url, sql);
@@ -107,7 +153,7 @@ const server = http.createServer((req, res) => {
     }
 
     try {
-      const out = run(sql, fmt, database);
+      const out = run(sql, fmt, database, url, statement);
       const text = out == null ? '' : String(out);
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=UTF-8', 'X-ClickHouse-Server-Display-Name': 'memhouse-solo' });
       res.end(NO_ROWS.test(qParam || bodyText) ? '' : text);
@@ -119,6 +165,18 @@ const server = http.createServer((req, res) => {
       res.end(/^Code:\s*\d+/.test(msg) ? msg : `Code: 1. DB::Exception: ${msg}\n`);
     }
   });
+});
+
+// Without this, a port clash exits with an unhandled-exception stack trace, which under a
+// service manager becomes a restart loop whose logs never say what is wrong.
+server.on('error', (e) => {
+  if (e && e.code === 'EADDRINUSE') {
+    console.error(`[solo] port ${PORT} is already in use — another solo house is running.`);
+    console.error('[solo] stop it first (memhouse stop), or set MEMHOUSE_SOLO_PORT to a free port.');
+    process.exit(3);
+  }
+  console.error(`[solo] server error: ${e && e.message}`);
+  process.exit(1);
 });
 
 server.listen(PORT, '127.0.0.1', () => {

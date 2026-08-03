@@ -24,6 +24,8 @@ const SERVER_JS = path.join(REPO_ROOT, 'mem-house', 'server', 'server.js');
 const SOLO_JS = path.join(REPO_ROOT, 'mem-house', 'solo', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'mem-house', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
+const { roomNames, ROOM_TYPES } = require(path.join(REPO_ROOT, 'mem-house', 'per-member', 'rooms'));
+const envfile = require(path.join(REPO_ROOT, 'mem-house', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
 const ENV_FILE = path.join(HOME_DIR, 'env');
@@ -49,23 +51,7 @@ const JSON_OUT = flags.json === true;
 
 // ── config ──────────────────────────────────────────────────────────────────────
 function readEnvFile() {
-  const out = {};
-  try {
-    for (const line of fs.readFileSync(ENV_FILE, 'utf-8').split('\n')) {
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-      if (m && !line.trim().startsWith('#')) {
-        let v = m[2].trim();
-        // Unwrap shell quoting (we write single-quoted; tolerate double too).
-        if (v.startsWith("'") && v.endsWith("'") && v.length >= 2) {
-          v = v.slice(1, -1).replace(/'\\''/g, "'");
-        } else if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
-          v = v.slice(1, -1);
-        }
-        out[m[1]] = v;
-      }
-    }
-  } catch { /* no env file yet */ }
-  return out;
+  try { return envfile.parse(fs.readFileSync(ENV_FILE, 'utf-8')); } catch { return {}; }
 }
 
 function resolveConfig() {
@@ -78,6 +64,12 @@ function resolveConfig() {
     password: pick('password', 'MEMHOUSE_PASSWORD', ''),
     db: pick('db', 'MEMHOUSE_DB', 'memhouse'),
     port: pick('port', 'MEMHOUSE_PORT', '4640'),
+    // Which room layout this house uses. It has to be part of the persisted config, not a
+    // variable that happens to be exported in one shell: the shipper, the dashboard, the
+    // CLI's own queries and the installed OS service must all agree, or one of them reads
+    // (or writes) the wrong rooms.
+    perMember: (flags['per-member'] === true ? '1' : null)
+      ?? process.env.MEM_PER_MEMBER ?? file.MEM_PER_MEMBER ?? '0',
   };
 }
 
@@ -86,6 +78,7 @@ function childEnv(cfg) {
     ...process.env,
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
+    MEM_PER_MEMBER: String(cfg.perMember || '0'),
   };
 }
 
@@ -93,7 +86,7 @@ function writeEnvFile(cfg) {
   fs.mkdirSync(HOME_DIR, { recursive: true });
   // Single-quoted values: this file is also sourced by shells (skills/docs use
   // `. ~/.memhouse/env`), so metacharacters in a password must never be bare.
-  const sq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+  const sq = envfile.quoteShell;
   const body = [
     '# mem-house connection — written by `memhouse install/setup`',
     `MEMHOUSE_URL=${sq(cfg.url)}`,
@@ -101,6 +94,7 @@ function writeEnvFile(cfg) {
     `MEMHOUSE_PASSWORD=${sq(cfg.password)}`,
     `MEMHOUSE_DB=${sq(cfg.db)}`,
     `MEMHOUSE_PORT=${sq(cfg.port)}`,
+    `MEM_PER_MEMBER=${sq(cfg.perMember || '0')}`,
     '',
   ].join('\n');
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
@@ -123,6 +117,20 @@ async function ch(cfg, sql, { database = cfg.db } = {}) {
 async function chRows(cfg, sql, opts) {
   const text = await ch(cfg, sql + ' FORMAT JSONEachRow', opts);
   return text ? text.split('\n').map((l) => JSON.parse(l)) : [];
+}
+
+// Room routing for the CLI's own queries. The shipper and dashboard resolve rooms through
+// @clickhouse/client; the CLI speaks raw HTTP, so it asks the same question over its own
+// transport and builds the names with the same shared function.
+let _rooms = null;
+async function roomsFor(cfg) {
+  if (_rooms) return _rooms;
+  if (String(cfg.perMember || '0') !== '1') { _rooms = roomNames(null); return _rooms; }
+  const rows = await chRows(cfg, 'SELECT currentUser() AS u');
+  const member = rows[0] && rows[0].u;
+  if (!member) throw new Error('could not determine currentUser() for per-member room resolution');
+  _rooms = roomNames(member);
+  return _rooms;
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────────
@@ -185,7 +193,15 @@ Data         ship                 one incremental pass (--full | --loop [sec])
 Agents       plugins              list | install claude [--target DIR] | remove claude
              prompt               print the memory system-prompt snippet
 
+House        deploy --local       run ClickHouse in docker/podman, then install
+             deploy --solo        embedded chdb behind a local shim — one user, no server
+             deploy --down        remove the local house (container + volume)
+                                  [--house-port N] [--tag 25.11]  (--port is the dashboard)
+             service install      run the shipper as a user service (systemd / launchd)
+             service uninstall | status
+
 Config: flags > MEMHOUSE_* env > ${ENV_FILE.replace(os.homedir(), '~')} > defaults.
+Layout: --per-member (or MEM_PER_MEMBER=1) uses one set of rooms per member; persisted.
 `;
 
 // A skipped adapter and an editor the user does not have look identical — both
@@ -345,8 +361,10 @@ async function cmdStatus() {
   };
   try {
     out.connected = true && !!(await ch(cfg, 'SELECT 1'));
-    const s = await chRows(cfg, 'SELECT count() AS sessions FROM sessions_v');
-    const m = await chRows(cfg, "SELECT count() AS msgs, formatDateTime(max(ingested_at), '%Y-%m-%d %H:%i:%S') AS freshest FROM messages");
+    const r = await roomsFor(cfg);
+    if (r.perMember) out.member = r.member;
+    const s = await chRows(cfg, `SELECT count() AS sessions FROM ${r.sessions_v}`);
+    const m = await chRows(cfg, `SELECT count() AS msgs, formatDateTime(max(ingested_at), '%Y-%m-%d %H:%i:%S') AS freshest FROM ${r.messages}`);
     out.sessions = Number(s[0]?.sessions || 0);
     out.messages = Number(m[0]?.msgs || 0);
     out.freshest = m[0]?.freshest || null;
@@ -355,6 +373,7 @@ async function cmdStatus() {
   if (JSON_OUT) return console.log(JSON.stringify(out, null, 2));
   console.log(out.config ? ok(`config: ${out.config}`) : warn('no config (memhouse install)'));
   console.log(out.connected ? ok(`connected: ${cfg.url} / ${cfg.db} as ${cfg.user}`) : bad(`not connected: ${out.error || cfg.url}`));
+  if (out.member) console.log(ok(`layout: per-member rooms for '${out.member}'`));
   if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
   for (const [name, pid] of Object.entries(out.daemons)) {
     console.log(pid ? ok(`${name}: running (pid ${pid})`) : warn(`${name}: not running`));
@@ -372,13 +391,17 @@ async function cmdDoctor() {
   add(fs.existsSync(ENV_FILE), `config ${ENV_FILE}`, 'run: memhouse install');
   try { await ch(cfg, 'SELECT 1', { database: '' }); add(true, `clickhouse reachable (${cfg.url})`); }
   catch (e) { add(false, `clickhouse reachable (${cfg.url})`, e.message); }
+  let rooms = roomNames(null);
+  try { rooms = await roomsFor(cfg); } catch (e) { add(false, 'room resolution', e.message); }
+  if (rooms.perMember) add(true, `layout: per-member rooms for '${rooms.member}'`);
   try {
-    const t = (await chRows(cfg, "SELECT name FROM system.tables WHERE database = {db:String} AND name IN ('sessions','messages','tool_calls')".replace('{db:String}', `'${cfg.db}'`), { database: '' })).length;
-    add(t === 3, `schema: ${t}/3 tables in '${cfg.db}'`, 'run: memhouse install (ensure-schema)');
+    const want = ROOM_TYPES.map((t) => `'${rooms[t]}'`).join(',');
+    const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
+    add(t === 3, `schema: ${t}/3 rooms in '${cfg.db}' (${ROOM_TYPES.map((x) => rooms[x]).join(', ')})`, 'run: memhouse install (ensure-schema)');
   } catch (e) { add(false, 'schema check', e.message); }
   try {
-    const u = await chRows(cfg, 'SELECT any(user_id) AS u FROM sessions');
-    add((u[0]?.u ?? '') !== '' || (await chRows(cfg, 'SELECT count() AS c FROM sessions'))[0].c === 0,
+    const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
+    add((u[0]?.u ?? '') !== '' || (await chRows(cfg, `SELECT count() AS c FROM ${rooms.sessions}`))[0].c === 0,
       `identity stamping (user_id='${u[0]?.u ?? ''}')`, 'writers must use async_insert=0');
   } catch { add(false, 'identity stamping', 'schema missing?'); }
   let adapterErrors = [];
@@ -452,11 +475,12 @@ async function cmdSearch() {
   if (!positional.length) { console.log('usage: memhouse search <terms…>'); return 2; }
   const cfg = resolveConfig();
   const needle = positional.join(' ').toLowerCase().replace(/[%_\\]/g, '\\$&').replace(/'/g, "\\'");
+  const r = await roomsFor(cfg);
   const rows = await chRows(cfg, `
     SELECT session_id, any(source) AS source, any(project) AS project,
            formatDateTime(max(ts), '%Y-%m-%d %H:%i') AS at, count() AS hits,
            substring(any(text), 1, 150) AS snippet
-    FROM messages
+    FROM ${r.messages}
     WHERE text_ngram LIKE '%${needle}%'
     GROUP BY session_id ORDER BY max(ts) DESC LIMIT ${Number(flags.limit) || 10}`);
   if (JSON_OUT) return console.log(JSON.stringify(rows, null, 2));
@@ -495,11 +519,15 @@ function cmdPlugins() {
 
 async function cmdReset() {
   const cfg = resolveConfig();
+  const r = await roomsFor(cfg);
+  const targets = ROOM_TYPES.map((t) => r[t]);
   if (flags.yes !== true) {
-    const a = (await ask(`This truncates ALL rows in '${cfg.db}' and re-ships. Continue? (yes/no)`, 'no')).toLowerCase();
+    // Name the rooms. Under the per-member layout this only ever empties the caller's own,
+    // and "ALL rows in 'mem'" would misdescribe that in the alarming direction.
+    const a = (await ask(`This truncates ${targets.join(', ')} in '${cfg.db}' and re-ships. Continue? (yes/no)`, 'no')).toLowerCase();
     if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
   }
-  for (const t of ['sessions', 'messages', 'tool_calls']) await ch(cfg, `TRUNCATE TABLE IF EXISTS ${t}`);
+  for (const t of targets) await ch(cfg, `TRUNCATE TABLE IF EXISTS ${t}`);
   console.log(ok('house truncated'));
   return run(SHIP_JS, ['--full'], cfg);
 }
@@ -564,10 +592,18 @@ function cmdUninstall() {
         process.exitCode = r.ok ? 0 : 1;
         break;
       }
+      // Two ports are in play and they are not the same port: the house speaks ClickHouse
+      // HTTP, the dashboard serves the SPA. `--port` belongs to the dashboard everywhere
+      // else in this CLI (it is persisted as MEMHOUSE_PORT), so deploy takes `--house-port`
+      // and the two can never be handed the same number by accident.
+      const housePort = flags['house-port'];
+      if (flags.port !== undefined && housePort === undefined) {
+        console.log(warn('deploy: --port is the dashboard port; use --house-port for ClickHouse'));
+      }
       if (flags.solo) {
         // Single-user tier: an embedded chdb behind a local ClickHouse-HTTP shim.
         // No container, no server, no sharing — see mem-house/solo/server.js.
-        const port = String(flags.port || process.env.MEMHOUSE_SOLO_PORT || 8123);
+        const port = String(housePort || process.env.MEMHOUSE_SOLO_PORT || 8123);
         fs.mkdirSync(RUN_DIR, { recursive: true }); fs.mkdirSync(LOG_DIR, { recursive: true });
         if (!pidOf('solo')) {
           const log = fs.openSync(path.join(LOG_DIR, 'solo.log'), 'a');
@@ -592,7 +628,7 @@ function cmdUninstall() {
       }
       if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --solo | --down')); process.exitCode = 2; break; }
       const pw = process.env.MEMHOUSE_PASSWORD || crypto.randomBytes(16).toString('hex');
-      const port = String(flags.port || process.env.MEMHOUSE_PORT || 8123);
+      const port = String(housePort || process.env.MEMHOUSE_CH_PORT || 8123);
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
       console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));
@@ -611,9 +647,30 @@ function cmdUninstall() {
       const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
       const sub = positional[0] || 'status';
       if (sub === 'install') {
-        const r = svc.install({ shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval: flags.interval || 300 });
+        // A solo house lives in this machine's own shim process, so the service has to
+        // bring that back too — otherwise the reboot the service exists to survive leaves
+        // the shipper talking to a dead port. Detected from the configured URL: solo is
+        // the only tier whose house is a loopback shim this CLI itself started.
+        const cfg = resolveConfig();
+        const solo = fs.existsSync(path.join(RUN_DIR, 'solo.pid')) || flags.solo === true;
+        const soloPort = solo ? (new URL(cfg.url).port || '8123') : null;
+        // The service supersedes the pidfile daemons, and they are not merely redundant:
+        // the shim binds a fixed port, so leaving the detached one alive makes the new
+        // unit fail with EADDRINUSE and flap under Restart=on-failure. Hand over rather
+        // than run both. The dashboard is not service-managed, so it is left alone.
+        for (const name of ['shipper', 'solo']) {
+          const pid = pidOf(name);
+          if (!pid) continue;
+          try { process.kill(pid, 'SIGTERM'); console.log(ok(`${name} daemon stopped — the service takes it over (pid ${pid})`)); } catch { /* raced */ }
+          try { fs.unlinkSync(path.join(RUN_DIR, `${name}.pid`)); } catch { /* absent */ }
+        }
+        const r = svc.install({
+          shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval: flags.interval || 300,
+          soloJs: solo ? SOLO_JS : null, soloPort,
+        });
         if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
         console.log(ok(`service installed (${r.kind}): ${r.path}`));
+        if (r.soloPath) console.log(ok(`solo house service installed: ${r.soloPath}`));
         console.log(r.warn ? '  starts at login; `memhouse start` is no longer needed'
                             : '  survives reboot; `memhouse start` is no longer needed');
         if (r.warn) console.log(warn(r.warn));
@@ -625,6 +682,10 @@ function cmdUninstall() {
         if (!st.kind) { console.log(warn(`no service integration for '${process.platform}'`)); break; }
         console.log(st.installed ? ok(`service installed (${st.kind}): ${st.path}`) : warn('service not installed'));
         console.log(st.running ? ok('service running') : warn('service not running'));
+        if (st.solo.installed) {
+          console.log(ok(`solo house service installed: ${st.solo.path}`));
+          console.log(st.solo.running ? ok('solo house service running') : warn('solo house service not running'));
+        }
       }
       break;
     }

@@ -352,10 +352,17 @@ async function runShip(client, opts = {}) {
       // shorter re-parse can't leave stale seq/idx tails. A crash between the
       // delete and the inserts is repaired by the next pass: the skip predicate
       // refuses to skip a non-empty session whose message rows are missing.
+      // user_id is BOUND, not `= currentUser()`. A DELETE is a mutation, and a mutation
+      // does not necessarily evaluate currentUser() in the caller's context: on chdb
+      // (the solo tier) it matches nothing at all, so the delete silently removes zero
+      // rows and the stale tail this code exists to clear survives forever. Measured —
+      // the identical predicate with the literal value deleted 2000 rows where
+      // currentUser() deleted 0. The value is the same identity either way: it is read
+      // from the server over this very connection.
       for (const t of ['messages', 'tool_calls']) {
         await client.command({
-          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = currentUser()`,
-          query_params: { id },
+          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = {uid:String}`,
+          query_params: { id, uid: rooms.user },
           clickhouse_settings: { async_insert: 0 },
         });
       }
@@ -389,14 +396,17 @@ function reportAdapterErrors(warned) {
 }
 
 // Per-source rollup straight from sessions_v (final=1 so ReplacingMergeTree collapses).
+// The view is per-member under MEM_PER_MEMBER, so it resolves like the rooms do — reading
+// the shared `sessions_v` from a per-member house reports someone else's totals or none.
 async function printStats(client) {
+  const rooms = await resolveRooms(client);
   const rs = await client.query({
     query: `
       SELECT source,
              count() AS sessions,
              sum(total_msgs) AS messages,
              sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS tokens
-      FROM sessions_v
+      FROM ${rooms.sessions_v}
       GROUP BY source
       ORDER BY sessions DESC`,
     format: 'JSONEachRow',
