@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sandbox/vm-e2e/run.sh — thin wrapper: resolves the agent-gauntlet engine and execs its
 # run.sh with memhouse's subject params set. The engine (clone lifecycle, driver, assert,
-# telemetry, dashboard) lives at github.com/ramazanpolat/agent-gauntlet.
+# telemetry, dashboard) lives at github.com/agent-realm/agent-gauntlet.
 #
 # Usage: identical to the engine's run.sh — see `./run.sh --help`.
 set -uo pipefail
@@ -19,6 +19,9 @@ fi
 export SUBJECT_DIR="${SUBJECT_DIR:-$REPO}"
 export SUBJECT_REMOTE_DIR="${SUBJECT_REMOTE_DIR:-~/memhouse}"
 export CONFIGS_DIR="${CONFIGS_DIR:-$HERE/configs}"
-export ARTIFACTS_DIR="${ARTIFACTS_DIR:-/Users/polat/.claude-playbooks/kommander/data/tasks/memhouse/artifacts}"
+# Repo-local by default. The engine's own fallback is an absolute path inside one
+# author's private notes directory, which does not exist on anyone else's machine —
+# this repo is public, so it must not inherit it. Override for your own runs.
+export ARTIFACTS_DIR="${ARTIFACTS_DIR:-$HERE/artifacts}"
 
 exec "$GAUNTLET_DIR/run.sh" "$@"
