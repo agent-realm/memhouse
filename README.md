@@ -69,7 +69,9 @@ npx --allow-scripts=better-sqlite3 -y memhouse discover
 ```
 
 Working from a checkout instead: `npm install` (the repo's `allowScripts` field
-covers the binding), then `node bin/memhouse.js …`.
+covers the binding), then `node bin/memhouse.js …`. `npm test` is a syntax gate plus
+unit checks; `misc/tier-matrix-test.sh` walks the tier/ownership matrix against a real
+container engine on Linux and takes a few minutes, so it is not part of `npm test`.
 
 ```text
 memhouse onboard | install | setup | discover | uninstall | reset
