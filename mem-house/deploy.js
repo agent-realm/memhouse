@@ -98,9 +98,11 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
 
   // Create the volume explicitly so it carries the label. `run -v name:/path` would
   // create it unlabeled, and an unlabeled volume is one we then refuse to remove.
+  let createdVolume = false;
   if (volOwn === 'absent') {
     const v = spawnSync(eng, ['volume', 'create', '--label', `${OWNER_LABEL}=1`, VOLUME], { encoding: 'utf-8' });
     if (v.status !== 0) return { ok: false, engine: eng, msg: (v.stderr || '').trim().split('\n').slice(-1)[0] };
+    createdVolume = true;
   }
 
   const args = [
@@ -119,7 +121,14 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
     `${IMAGE_REPO}:${tag}`,
   ];
   const r = spawnSync(eng, args, { encoding: 'utf-8' });
-  if (r.status !== 0) return { ok: false, engine: eng, msg: (r.stderr || '').trim().split('\n').slice(-2).join(' ') };
+  if (r.status !== 0) {
+    // The volume exists but the image never touched it — an unpullable tag, a port bind
+    // that failed. Leaving it labelled would make the NEXT deploy read an empty volume as
+    // an initialised house and refuse for a missing credential that was never set. Only
+    // remove one this call created; an existing house's data is never at stake here.
+    if (createdVolume) spawnSync(eng, ['volume', 'rm', '-f', VOLUME], { encoding: 'utf-8' });
+    return { ok: false, engine: eng, msg: (r.stderr || '').trim().split('\n').slice(-2).join(' ') };
+  }
   return { ok: true, engine: eng, url: `http://localhost:${port}`, password };
 }
 
@@ -191,11 +200,15 @@ function volumeExists() {
  */
 function preflight() {
   const eng = engine();
-  if (!eng) return { ok: false, msg: 'neither docker nor podman found on PATH' };
+  // `reason` matters to callers that are not deploying a local house. `no-engine` means
+  // there cannot BE a local tier on this machine, which is a fine reason to go on and
+  // deploy solo; `unknown` means the engine is there and could not answer, which is not
+  // evidence of absence and must not be read as one.
+  if (!eng) return { ok: false, reason: 'no-engine', msg: 'neither docker nor podman found on PATH' };
   for (const [kind, name] of [['container', CONTAINER], ['volume', VOLUME]]) {
     const own = ownership(eng, kind, name);
-    if (own === 'foreign') return { ok: false, engine: eng, msg: foreignMsg(kind, name) };
-    if (own === 'unknown') return { ok: false, engine: eng, msg: unknownMsg(kind, name, eng) };
+    if (own === 'foreign') return { ok: false, reason: 'foreign', engine: eng, msg: foreignMsg(kind, name) };
+    if (own === 'unknown') return { ok: false, reason: 'unknown', engine: eng, msg: unknownMsg(kind, name, eng) };
   }
   return { ok: true, engine: eng, initialised: ownership(eng, 'volume', VOLUME) === 'ours' };
 }

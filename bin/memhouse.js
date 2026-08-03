@@ -798,6 +798,17 @@ function cmdUninstall() {
         // image will not re-apply one) while any shipper still running keeps writing to it.
         {
           const loc = dep.preflight();
+          // An engine that is PRESENT but cannot answer is not evidence that no local
+          // house exists. Falling through on `!loc.ok` started the solo tier and let
+          // cmdInstall overwrite the local house's URL and credential — which, once the
+          // daemon came back, left an initialised volume nobody has the password for.
+          // Only `no-engine` is a real "there cannot be a local house here".
+          if (!loc.ok && loc.reason !== 'no-engine') {
+            console.log(bad(`cannot rule out an existing local house: ${loc.msg}`));
+            console.log('  starting a solo house would overwrite its URL and credential in the config.');
+            console.log('  fix the container engine and re-run, or deploy solo under a different MEMHOUSE_HOME.');
+            process.exitCode = 2; break;
+          }
           if (loc.ok && loc.initialised) {
             console.log(bad(`a local house already exists here — its data volume '${dep.VOLUME}' is initialised.`));
             console.log('  starting a solo house would overwrite its URL and credential in the config, and the');

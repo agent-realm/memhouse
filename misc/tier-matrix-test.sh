@@ -234,6 +234,15 @@ assert_out "the redeploy reuses it instead of refusing" "reusing the existing ho
 assert_out "and it authenticates" "connected:" env MEMHOUSE_HOME="$HD" $CLI status
 env MEMHOUSE_HOME="$HD" $CLI deploy --down >/dev/null 2>&1
 
+say "a failed run must not leave a false 'initialised house' marker"
+HE="$TMP/home-badtag"; mkdir -p "$HE"
+env MEMHOUSE_HOME="$HE" $CLI deploy --local --house-port $((PORT_CH+4)) --tag no-such-tag-9999 --no-ship >/dev/null 2>&1
+VOLS=$("$ENG" volume ls -q | grep -c memhouse-data || true)
+[ "$VOLS" = "0" ] && ok "no orphan volume after a failed run" || bad "an empty labelled volume survived — the next deploy will refuse"
+assert_out "and a retry succeeds instead of refusing" "installed" \
+  env MEMHOUSE_HOME="$HE" $CLI deploy --local --house-port $((PORT_CH+4)) --no-ship
+env MEMHOUSE_HOME="$HE" $CLI deploy --down >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
