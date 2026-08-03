@@ -26,7 +26,6 @@ const { execFileSync, spawnSync } = require('child_process');
 const envfile = require('./envfile');
 
 const LABEL = 'memhouse-shipper';
-const SOLO_LABEL = 'memhouse-solo';
 // Environment an ADAPTER reads to find its sessions, as opposed to the connection
 // settings that live in the env file. Keep this in step with `editors/` — today
 // `editors/codex.js` is the only adapter with an override.
@@ -43,8 +42,6 @@ function unitPaths() {
   return {
     systemd: path.join(home, '.config', 'systemd', 'user', `${LABEL}.service`),
     launchd: path.join(home, 'Library', 'LaunchAgents', 'com.memhouse.shipper.plist'),
-    systemdSolo: path.join(home, '.config', 'systemd', 'user', `${SOLO_LABEL}.service`),
-    launchdSolo: path.join(home, 'Library', 'LaunchAgents', 'com.memhouse.solo.plist'),
   };
 }
 
@@ -66,13 +63,12 @@ function execToken(s) {
   return /[\s"'\\]/.test(String(s)) ? envfile.quoteSystemd(s) : String(s);
 }
 
-function systemdUnit({ node, script, args, env, logDir, logName, description, after = [] }) {
-  const wants = after.length ? `${after.map((u) => `Wants=${u}`).join('\n')}\n${after.map((u) => `After=${u}`).join('\n')}\n` : '';
+function systemdUnit({ node, script, args, env, logDir, logName, description }) {
   return `[Unit]
 Description=${description}
 After=network-online.target
 Wants=network-online.target
-${wants}
+
 [Service]
 Type=simple
 ${envLines(env)}
@@ -130,10 +126,10 @@ function lingerEnabled() {
 /**
  * Everything install would fail on, asked before the caller stops anything.
  *
- * `service install` takes over from the detached daemons by killing them first. If the
+ * `service install` takes over from the detached shipper by killing it first. If the
  * install then fails — no user manager on Linux, `launchctl bootstrap` refusing on macOS,
- * a credential with a newline in it — the machine is left with no shipper at all, and on
- * the solo tier with no house either. So the answerable questions are asked first.
+ * a credential with a newline in it — the machine is left with no shipper at all. So the
+ * answerable questions are asked first.
  */
 function preflight({ envFile }) {
   const kind = platform();
@@ -161,20 +157,11 @@ function preflight({ envFile }) {
   return { ok: true, kind };
 }
 
-/**
- * Install the shipper as a user service.
- *
- * `soloJs` opts in to the solo tier: the shipper then talks to an embedded chdb behind a
- * local shim, and a service that starts only the shipper would come back from a reboot
- * pointed at a port with nothing behind it. So the shim gets its own unit, and on Linux
- * the shipper is ordered after it.
- */
-function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloPort = null, home = null, soloData = null }) {
+/** Install the shipper as a user service. */
+function install({ shipJs, envFile, logDir, interval = 300, home = null }) {
   const kind = platform();
   if (!kind) return { ok: false, msg: `no service integration for platform '${process.platform}'` };
-  const paths = unitPaths();
-  const p = paths[kind];
-  const soloPath = kind === 'systemd' ? paths.systemdSolo : paths.launchdSolo;
+  const p = unitPaths()[kind];
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.mkdirSync(logDir, { recursive: true });
   const node = process.execPath;
@@ -184,14 +171,10 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
   // shared rooms — which either fails on permissions or, on a house that still has them,
   // quietly ships into the wrong place.
   const env = parseEnvFile(envFile);
-  if (soloPort) env.MEMHOUSE_SOLO_PORT = String(soloPort);
-  // MEMHOUSE_HOME is not in the env file — it is where the env file itself lives — but the
-  // solo shim derives its data directory from it. A service installed under a custom home
-  // would otherwise open the DEFAULT ~/.memhouse/solo-data: an empty directory with no
-  // schema, so the old memory looks gone and the shipper retries forever against a house
-  // that has nothing in it. Inline the effective paths.
+  // MEMHOUSE_HOME is not in the env file — it is where the env file itself lives — and a
+  // service installed under a custom home must keep using it, or it reads a different
+  // config after a reboot than the one just written.
   if (home) env.MEMHOUSE_HOME = home;
-  if (soloData) env.MEMHOUSE_SOLO_DATA = soloData;
   // Adapter location overrides travel too. A detached shipper inherits them from the
   // invoking shell through childEnv(); a service inherits nothing, so an override that
   // was working before `service install` silently stops applying — the adapter falls back
@@ -200,20 +183,9 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
   try { envfile.assertSingleLine(env); } catch (e) { return { ok: false, msg: e.message }; }
 
   if (kind === 'systemd') {
-    if (soloJs) {
-      fs.writeFileSync(soloPath, systemdUnit({
-        node, script: soloJs, args: [], env, logDir, logName: 'solo.log',
-        description: 'memhouse solo house — embedded chdb behind a local ClickHouse-HTTP shim',
-      }), { mode: 0o600 });
-    } else if (fs.existsSync(soloPath)) {
-      // Switching tiers must not leave the previous tier's unit running.
-      spawnSync('systemctl', ['--user', 'disable', '--now', `${SOLO_LABEL}.service`]);
-      fs.unlinkSync(soloPath);
-    }
     fs.writeFileSync(p, systemdUnit({
       node, script: shipJs, args: ['--loop', String(interval)], env, logDir, logName: 'shipper.log',
       description: 'memhouse shipper — parse local agent sessions and ship to the house',
-      after: soloJs ? [`${SOLO_LABEL}.service`] : [],
     }), { mode: 0o600 });
     execFileSync('systemctl', ['--user', 'daemon-reload']);
     // `enable --now` STARTS a unit; it does not restart one that is already running, and
@@ -221,29 +193,16 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
     // changing the connection, the interval, CODEX_HOME or the tier would then report
     // success while the service went on shipping with the old settings until a reboot.
     // So: enable, then restart — which starts a stopped unit and replaces a running one.
-    for (const unit of [...(soloJs ? [`${SOLO_LABEL}.service`] : []), `${LABEL}.service`]) {
+    for (const unit of [`${LABEL}.service`]) {
       execFileSync('systemctl', ['--user', 'enable', unit]);
       execFileSync('systemctl', ['--user', 'restart', unit]);
     }
     const warn = lingerEnabled() ? null
       : `systemd --user services stop at logout. Run: loginctl enable-linger ${os.userInfo().username}`;
-    return { ok: true, kind, path: p, soloPath: soloJs ? soloPath : null, warn };
+    return { ok: true, kind, path: p, warn };
   }
 
-  // launchd. Both plists inline the credential, so neither may be world-readable.
-  // launchd has no ordering between agents; the shipper's own retry loop covers the
-  // window where the shim has not finished starting.
-  if (soloJs) {
-    fs.writeFileSync(soloPath, launchdPlist({
-      node, script: soloJs, args: [], env, logDir, logName: 'solo.log', label: 'com.memhouse.solo',
-    }), { mode: 0o600 });
-    spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/com.memhouse.solo`]);
-    const rs = spawnSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, soloPath], { encoding: 'utf-8' });
-    if (rs.status !== 0) return { ok: false, msg: (rs.stderr || '').trim() || 'launchctl bootstrap failed (solo)', path: soloPath };
-  } else if (fs.existsSync(soloPath)) {
-    spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/com.memhouse.solo`]);
-    fs.unlinkSync(soloPath);
-  }
+  // launchd. The plist inlines the credential, so it must not be world-readable.
   fs.writeFileSync(p, launchdPlist({
     node, script: shipJs, args: ['--loop', String(interval)], env, logDir,
     logName: 'shipper.log', label: 'com.memhouse.shipper',
@@ -251,7 +210,7 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
   spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/com.memhouse.shipper`]); // ignore if absent
   const r = spawnSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, p], { encoding: 'utf-8' });
   if (r.status !== 0) return { ok: false, msg: (r.stderr || '').trim() || 'launchctl bootstrap failed', path: p };
-  return { ok: true, kind, path: p, soloPath: soloJs ? soloPath : null, warn: null };
+  return { ok: true, kind, path: p, warn: null };
 }
 
 /**
@@ -266,15 +225,13 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
 function uninstall() {
   const kind = platform();
   if (!kind) return { ok: false, msg: `no service integration for platform '${process.platform}'` };
-  const paths = unitPaths();
-  const p = paths[kind];
-  const soloPath = kind === 'systemd' ? paths.systemdSolo : paths.launchdSolo;
+  const p = unitPaths()[kind];
   const stillRunning = [];
   const indeterminate = [];
 
   const units = kind === 'systemd'
-    ? [[`${LABEL}.service`, p, 'com.memhouse.shipper'], [`${SOLO_LABEL}.service`, soloPath, 'com.memhouse.solo']]
-    : [['com.memhouse.shipper', p, 'com.memhouse.shipper'], ['com.memhouse.solo', soloPath, 'com.memhouse.solo']];
+    ? [[`${LABEL}.service`, p, 'com.memhouse.shipper']]
+    : [['com.memhouse.shipper', p, 'com.memhouse.shipper']];
 
   for (const [unit, file, label] of units) {
     if (!fs.existsSync(file)) continue;
@@ -355,15 +312,15 @@ function isRunning(kind, unit, label) {
  * the current config — the two drift the moment anything is redeployed, and callers
  * asking "does this service care about the house I am removing?" need the unit's answer.
  *
- * Returns { installed, url, solo } — `url` null when it cannot be determined.
+ * Returns { installed, url } — `url` null when it cannot be determined.
  */
 function installedConfig() {
   const kind = platform();
-  if (!kind) return { installed: false, url: null, solo: false };
+  if (!kind) return { installed: false, url: null };
   const p = unitPaths()[kind];
-  if (!fs.existsSync(p)) return { installed: false, url: null, solo: false };
+  if (!fs.existsSync(p)) return { installed: false, url: null };
   let text = '';
-  try { text = fs.readFileSync(p, 'utf-8'); } catch { return { installed: true, url: null, solo: false }; }
+  try { text = fs.readFileSync(p, 'utf-8'); } catch { return { installed: true, url: null }; }
   const env = {};
   if (kind === 'systemd') {
     for (const m of text.matchAll(/^Environment=([A-Z0-9_]+)=(.*)$/gm)) {
@@ -377,24 +334,18 @@ function installedConfig() {
       env[m[1]] = m[2].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
     }
   }
-  return { installed: true, url: env.MEMHOUSE_URL || null, solo: env.MEMHOUSE_SOLO === '1' };
+  return { installed: true, url: env.MEMHOUSE_URL || null };
 }
 
 function status() {
   const kind = platform();
   if (!kind) return { kind: null, installed: false, running: false };
-  const paths = unitPaths();
-  const p = paths[kind];
-  const soloPath = kind === 'systemd' ? paths.systemdSolo : paths.launchdSolo;
-  const soloInstalled = fs.existsSync(soloPath);
+  const p = unitPaths()[kind];
   return {
     kind,
     installed: fs.existsSync(p),
     running: isRunning(kind, `${LABEL}.service`, 'com.memhouse.shipper'),
     path: p,
-    solo: soloInstalled
-      ? { installed: true, running: isRunning(kind, `${SOLO_LABEL}.service`, 'com.memhouse.solo'), path: soloPath }
-      : { installed: false, running: false, path: soloPath },
   };
 }
 

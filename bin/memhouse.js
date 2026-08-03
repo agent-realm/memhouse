@@ -21,7 +21,6 @@ const { spawn, spawnSync } = require('child_process');
 const REPO_ROOT = path.join(__dirname, '..');
 const SHIP_JS = path.join(REPO_ROOT, 'mem-house', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'mem-house', 'server', 'server.js');
-const SOLO_JS = path.join(REPO_ROOT, 'mem-house', 'solo', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'mem-house', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
 const { roomNames, ROOM_TYPES } = require(path.join(REPO_ROOT, 'mem-house', 'per-member', 'rooms'));
@@ -70,13 +69,6 @@ function resolveConfig() {
     // (or writes) the wrong rooms.
     perMember: (flags['per-member'] === true ? '1' : null)
       ?? process.env.MEM_PER_MEMBER ?? file.MEM_PER_MEMBER ?? '0',
-    // Which tier this house is, persisted for the same reason as the layout: the shim IS
-    // the house on the solo tier, and `start` has to know to bring it up. Inferring it
-    // from the runtime pidfile fails exactly once — after `memhouse stop`, which removes
-    // the pidfile — and the next `start` silently points the shipper and dashboard at a
-    // dead port.
-    solo: process.env.MEMHOUSE_SOLO ?? file.MEMHOUSE_SOLO ?? '0',
-    soloPort: process.env.MEMHOUSE_SOLO_PORT ?? file.MEMHOUSE_SOLO_PORT ?? '',
   };
 }
 
@@ -86,8 +78,6 @@ function childEnv(cfg) {
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
     MEM_PER_MEMBER: String(cfg.perMember || '0'),
-    MEMHOUSE_SOLO: String(cfg.solo || '0'),
-    ...(cfg.soloPort ? { MEMHOUSE_SOLO_PORT: String(cfg.soloPort) } : {}),
   };
 }
 
@@ -104,8 +94,6 @@ function writeEnvFile(cfg) {
     `MEMHOUSE_DB=${sq(cfg.db)}`,
     `MEMHOUSE_PORT=${sq(cfg.port)}`,
     `MEM_PER_MEMBER=${sq(cfg.perMember || '0')}`,
-    `MEMHOUSE_SOLO=${sq(cfg.solo || '0')}`,
-    ...(cfg.soloPort ? [`MEMHOUSE_SOLO_PORT=${sq(cfg.soloPort)}`] : []),
     '',
   ].join('\n');
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
@@ -146,16 +134,6 @@ function portInUse(port) {
 /** Port from a configured URL, '' when it has none or the URL is unparseable. */
 function portOf(u) {
   try { return new URL(u).port || ''; } catch { return ''; }
-}
-
-// Is whatever answers this URL our own solo shim, or some other ClickHouse? Both answer
-// /ping with `Ok.`, so the tier cannot be told from readiness alone. The shim sets a
-// display name on every response; a server sets its own.
-async function isSoloShim(url) {
-  try {
-    const r = await fetch(`${url}/ping`, { signal: AbortSignal.timeout(3000) });
-    return r.headers.get('x-clickhouse-server-display-name') === 'memhouse-solo';
-  } catch { return false; }
 }
 
 // Is the shipper alive, by whichever mechanism owns it? After `service install` the
@@ -249,7 +227,6 @@ Agents       plugins              list | install claude [--target DIR] | remove 
              prompt               print the memory system-prompt snippet
 
 House        deploy --local       run ClickHouse in docker/podman, then install
-             deploy --solo        embedded chdb behind a local shim — one user, no server
              deploy --down        remove the local house (container + volume)
                                   [--house-port N] [--tag 25.11]  (--port is the dashboard)
              service install      run the shipper as a user service (systemd / launchd)
@@ -398,10 +375,6 @@ async function cmdStart() {
   fs.mkdirSync(LOG_DIR, { recursive: true });
   ensureUiBuilt();
   const daemons = [
-    // The solo shim IS the house — start it first, or the shipper has nothing to talk to.
-    // Read from the persisted config, never from the pidfile: `stop` removes the pidfile,
-    // so a pidfile test would drop the shim on the first stop/start cycle.
-    ...(String(cfg.solo) === '1' ? [{ name: 'solo', script: SOLO_JS, args: [] }] : []),
     { name: 'shipper', script: SHIP_JS, args: ['--loop', String(flags.interval || 300)] },
     { name: 'dashboard', script: SERVER_JS, args: [] },
   ];
@@ -410,18 +383,14 @@ async function cmdStart() {
   // "already running?" check below cannot see the service's processes at all.
   //
   // For the shipper that means two loops parsing and clearing the same sessions
-  // concurrently, each deleting rows the other just inserted. For the solo shim it is
-  // quieter and just as wrong: the second one dies on EADDRINUSE, the readiness probe
-  // passes because the SERVICE's shim answers, and `start` reports success while leaving
-  // a pidfile pointing at a process that is already dead.
+  // concurrently, each deleting rows the other just inserted.
   //
   // Reachable in the obvious way: after a reboot the user wants the dashboard back, which
   // is not service-managed, and types `memhouse start`.
-  let svcStatus = { installed: false, running: false, solo: { installed: false, running: false } };
+  let svcStatus = { installed: false, running: false };
   try { svcStatus = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported platform */ }
   const owned = [
     ...(svcStatus.installed ? [['shipper', svcStatus.running, 'memhouse-shipper']] : []),
-    ...(svcStatus.solo?.installed ? [['solo', svcStatus.solo.running, 'memhouse-solo']] : []),
   ];
   for (const [name, running, unit] of owned) {
     const i = daemons.findIndex((d) => d.name === name);
@@ -433,18 +402,6 @@ async function cmdStart() {
         : `  start it with: launchctl kickstart gui/$(id -u)/com.${unit.replace('memhouse-', 'memhouse.')}`);
     }
   }
-  // The house still has to be up before the dashboard is worth starting, whoever owns the
-  // shim. When we spawn it the gate is inside the loop below; when the service owns it,
-  // this is the only place it gets checked.
-  if (String(cfg.solo) === '1' && !daemons.some((d) => d.name === 'solo')) {
-    const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
-    if (!(await dep.waitReady(cfg.url, { attempts: 20, delayMs: 500 }))) {
-      console.log(bad(`solo house not answering on ${cfg.url} — the service owns it; check: journalctl --user -u memhouse-solo`));
-      process.exitCode = 1;
-      return;
-    }
-    console.log(ok(`solo house answering on ${cfg.url} (service-managed)`));
-  }
   for (const d of daemons) {
     if (pidOf(d.name)) { console.log(warn(`${d.name} already running (pid ${pidOf(d.name)})`)); continue; }
     const log = fs.openSync(path.join(LOG_DIR, d.name + '.log'), 'a');
@@ -454,26 +411,13 @@ async function cmdStart() {
     fs.writeFileSync(path.join(RUN_DIR, d.name + '.pid'), String(child.pid));
     child.unref();
     console.log(ok(`${d.name} started (pid ${child.pid})`));
-    // Spawn order is not readiness. chdb takes a moment to open its data directory, and
-    // if the shipper's first request loses that race it does not retry promptly — it
-    // catches the connection error and sleeps the whole loop interval, so the first ship
-    // is up to five minutes late for no reason. Wait for the house, as deploy does.
-    if (d.name === 'solo') {
-      const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
-      const ready = await dep.waitReady(cfg.url, { attempts: 40, delayMs: 500 });
-      console.log(ready ? ok(`solo house answering on ${cfg.url}`)
-        : bad(`solo house not answering on ${cfg.url} — see ${path.join(LOG_DIR, 'solo.log')}`));
-      // Nonzero, or automation reads "started fine" from a run that started nothing:
-      // neither shipper nor dashboard is spawned past this point.
-      if (!ready) { process.exitCode = 1; return; }
-    }
   }
   console.log(`  dashboard → http://localhost:${cfg.port}`);
 }
 
 function cmdStop() {
   let stopped = 0;
-  for (const name of ['shipper', 'dashboard', 'solo']) {
+  for (const name of ['shipper', 'dashboard']) {
     const pid = pidOf(name);
     if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`${name} stopped (pid ${pid})`)); stopped++; } catch { /* raced */ } }
     try { fs.unlinkSync(path.join(RUN_DIR, name + '.pid')); } catch { /* absent */ }
@@ -687,7 +631,7 @@ function cmdUninstall() {
   // shipping transcripts — with a credential in a file the user now believes is gone.
   const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
   const st = svc.status();
-  if (st.kind && (st.installed || st.solo?.installed)) {
+  if (st.kind && st.installed) {
     const r = svc.uninstall();
     if (!r.ok) {
       // Removing the home now would delete the env file while a service keeps shipping
@@ -770,13 +714,13 @@ function cmdUninstall() {
         // and a later bare `deploy --local` mints a NEW password on the same port, which
         // the service will never learn, while `status` still reports it running.
         // Only a service that points at THIS house. `service install` is supported for
-        // solo and for external/kernel houses too, and refusing on any installed unit
+        // external/kernel houses too, and refusing on any installed unit
         // would make an unrelated production shipper block the cleanup of a stale local
         // container. Compare the unit's own inlined URL against the port this container
         // publishes; if that cannot be determined, fail closed.
-        let svcCfg = { installed: false, url: null, solo: false };
+        let svcCfg = { installed: false, url: null };
         try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
-        if (svcCfg.installed && !svcCfg.solo) {
+        if (svcCfg.installed) {
           const pub = dep.publishedPort();
           const svcPort = portOf(svcCfg.url);
           const targetsThisHouse = !svcCfg.url || !pub || svcPort === pub;
@@ -800,177 +744,7 @@ function cmdUninstall() {
       if (flags.port !== undefined && housePort === undefined) {
         console.log(warn('deploy: --port is the dashboard port; use --house-port for ClickHouse'));
       }
-      if (flags.solo) {
-        // Single-user tier: an embedded chdb behind a local ClickHouse-HTTP shim.
-        // No container, no server, no sharing — see mem-house/solo/server.js.
-        //
-        // The per-member layout cannot apply here and must not be half-applied: chdb has
-        // no users, so currentUser() is always 'default' and the rooms would be named
-        // `sessions_default` — the shape of a multi-member house with exactly one member
-        // and no grants to separate anybody. Refuse rather than build that.
-        if (String(resolveConfig().perMember) === '1') {
-          console.log(bad('solo is a single-user tier: chdb has no users or grants, so MEM_PER_MEMBER cannot apply.'));
-          console.log('  use `deploy --local` (a real ClickHouse) for the per-member layout.');
-          process.exitCode = 2; break;
-        }
-        // A managed LOCAL house must not be shadowed by a solo one. The same-port case
-        // fails loudly on EADDRINUSE, but a stopped container — or a solo house asked for
-        // on a different port — produces no conflict at all: the shim starts, the identity
-        // probe passes, and cmdInstall overwrites the local URL and credential with solo
-        // defaults. The local memory is then unreachable (its password is gone, and the
-        // image will not re-apply one) while any shipper still running keeps writing to it.
-        {
-          const loc = dep.preflight();
-          // An engine that cannot answer is not evidence that no local house exists.
-          // Falling through started the solo tier and let cmdInstall overwrite the local
-          // house's URL and credential — leaving an initialised volume nobody has the
-          // password for once the daemon came back.
-          //
-          // `no-engine` is NOT the exception it looks like either: uninstalling docker
-          // does not stop a container or erase its volume. What makes the question moot
-          // is not the engine's absence but the absence of anything to lose — a home
-          // with no config, or one already on the solo tier. Anywhere else, a config
-          // that describes some other house is exactly what must not be overwritten.
-          const cfgNow = resolveConfig();
-          const nothingToLose = !fs.existsSync(ENV_FILE) || String(cfgNow.solo) === '1';
-          // `foreign` is not this path's problem — somebody else's object carrying our
-          // fixed name matters enormously to `deploy --local`, whose job is to replace
-          // that name, and not at all to solo, which runs embedded chdb and never touches
-          // either object.
-          //
-          // But it is ruled out only when BOTH objects say so. A foreign container beside
-          // an initialised MANAGED volume is still a local house whose credential this
-          // command would overwrite — and once the foreign container is removed, that
-          // volume is unreachable forever.
-          const st = loc.states || {};
-          const localRuledOut = loc.reason === 'foreign'
-            && st.container !== 'ours' && st.volume !== 'ours'
-            && st.container !== 'unknown' && st.volume !== 'unknown';
-          if (!loc.ok && !localRuledOut && !(loc.reason === 'no-engine' && nothingToLose)) {
-            console.log(bad(loc.reason === 'no-engine'
-              ? `no container engine on PATH, so an existing local house cannot be ruled out — and ${ENV_FILE.replace(os.homedir(), '~')} already describes a house.`
-              : `cannot rule out an existing local house: ${loc.msg}`));
-            console.log('  starting a solo house would overwrite its URL and credential in the config,');
-            console.log('  and a house whose volume is already initialised cannot be re-credentialed.');
-            console.log('  put the engine back and re-run, or deploy solo under a different MEMHOUSE_HOME.');
-            process.exitCode = 2; break;
-          }
-          // A service-managed shipper keeps the environment it was installed with, so
-          // repointing the config at a solo house leaves it shipping to the previous one
-          // forever while `status` reports it healthy. Refuse rather than split the memory.
-          let svcSt = { installed: false };
-          try { svcSt = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported */ }
-          if (svcSt.installed && String(cfgNow.solo) !== '1') {
-            console.log(bad(`the shipper is service-managed and holds ${cfgNow.url} — switching to a solo house would leave it shipping there.`));
-            console.log('  memhouse service uninstall, then deploy --solo, then memhouse service install');
-            process.exitCode = 2; break;
-          }
-          if (loc.ok && loc.initialised && !localRuledOut) {
-            console.log(bad(`a local house already exists here — its data volume '${dep.VOLUME}' is initialised.`));
-            console.log('  starting a solo house would overwrite its URL and credential in the config, and the');
-            console.log('  local one cannot be re-credentialed afterwards.');
-            console.log('  keep it:      memhouse deploy --local');
-            console.log('  or remove it (DESTROYS that memory):  memhouse deploy --down');
-            process.exitCode = 2; break;
-          }
-        }
-        // The persisted port is part of the precedence chain: re-running `deploy --solo`
-        // after configuring a custom port must find the existing house, not wait on 8123
-        // and then silently relocate the shim (and overwrite the saved port with it).
-        const port = String(housePort || process.env.MEMHOUSE_SOLO_PORT || resolveConfig().soloPort || 8123);
-        fs.mkdirSync(RUN_DIR, { recursive: true }); fs.mkdirSync(LOG_DIR, { recursive: true });
-        // An explicit port change while a shim is running has to move the shim. Otherwise
-        // `pidOf('solo')` suppresses the spawn, the old shim stays healthy on the old
-        // port, and the command waits 40s against a port nothing is listening on before
-        // failing — with the house working the whole time, on the address it used to use.
-        // A service-managed shim has no pidfile — `service install` removed it — so the
-        // detached-process check below cannot see it. Moving the port anyway would start
-        // a second house and repoint the CLI at it while the installed shipper unit kept
-        // writing to the old one: two houses, and the memory silently splits between them.
-        // The effective port has a precedence chain — flag, env, persisted — and the
-        // guards used to read only the flag, so `MEMHOUSE_SOLO_PORT=<new> deploy --solo`
-        // walked straight past them and started a second house.
-        //
-        // The FROM side has to come from the file, not resolveConfig(): that merges the
-        // same env var, so setting MEMHOUSE_SOLO_PORT made the persisted port equal the
-        // target and the comparison could never fire. The question is "where is the house
-        // that is actually running", and only the file knows that.
-        const persistedSoloPort = String(readEnvFile().MEMHOUSE_SOLO_PORT || '');
-        const soloMoving = persistedSoloPort !== '' && String(port) !== persistedSoloPort;
-        if (soloMoving) {
-          let svcSolo = { installed: false };
-          try { svcSolo = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status().solo || { installed: false }; } catch { /* unsupported */ }
-          if (svcSolo.installed) {
-            console.log(bad(`the solo house is service-managed on port ${persistedSoloPort || '?'} — moving it to ${port} would leave the installed shipper writing to the old one.`));
-            console.log('  memhouse service uninstall, then re-deploy on the new port, then memhouse service install');
-            process.exitCode = 2; break;
-          }
-        }
-        const runningPid = pidOf('solo');
-        if (runningPid && soloMoving) {
-          // Check the DESTINATION before demolishing the origin. If something already
-          // owns the target port, the replacement dies on EADDRINUSE, the identity check
-          // correctly refuses — and the old house is stopped, with the config still
-          // pointing at it. The move fails either way; only one way costs the user a
-          // running house.
-          if (await portInUse(port)) {
-            console.log(bad(`port ${port} is already in use — not moving the solo house off ${persistedSoloPort}.`));
-            console.log('  free that port, or pick another with --house-port.');
-            process.exitCode = 2; break;
-          }
-          console.log(warn(`solo house is on port ${persistedSoloPort || '?'}; moving it to ${port}`));
-          try { process.kill(runningPid, 'SIGTERM'); } catch { /* raced */ }
-          try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
-          await new Promise((r) => setTimeout(r, 500)); // let the port free before rebinding
-        }
-        if (!pidOf('solo')) {
-          const log = fs.openSync(path.join(LOG_DIR, 'solo.log'), 'a');
-          const child = spawn(process.execPath, [SOLO_JS], {
-            env: { ...process.env, MEMHOUSE_SOLO_PORT: port }, detached: true, stdio: ['ignore', log, log],
-          });
-          fs.writeFileSync(path.join(RUN_DIR, 'solo.pid'), String(child.pid));
-          child.unref();
-        }
-        const url = `http://127.0.0.1:${port}`;
-        const dep2 = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
-        if (!(await dep2.waitReady(url, { attempts: 40, delayMs: 1000 }))) {
-          console.log(bad(`solo house did not answer on ${url} — see ${path.join(LOG_DIR, 'solo.log')}`));
-          process.exitCode = 1; break;
-        }
-        // Answering is not the same as being OURS. A real ClickHouse on this port answers
-        // /ping identically, so a shim that died on EADDRINUSE looks ready — and the
-        // install below would then overwrite a working url/user/password with
-        // `default` and no credential, locking the CLI out of the server that is actually
-        // there. The shim stamps every response with its own display name; require it.
-        if (!(await isSoloShim(url))) {
-          console.log(bad(`something else is already serving ${url} — it answers /ping but is not a memhouse solo house.`));
-          console.log('  if that is the local ClickHouse, stop it first:  memhouse deploy --down');
-          console.log(`  or put the solo house somewhere else:  memhouse deploy --solo --house-port <n>`);
-          process.exitCode = 2; break;
-        }
-        console.log(ok(`solo house on ${url} (embedded chdb, single user, loopback only)`));
-        // Detached clients hold a SNAPSHOT of the old connection. Switching the config to
-        // the solo house without stopping them leaves a shipper writing new transcripts
-        // to the PREVIOUS house while `status` reads the new one and reports it running —
-        // the memory silently splits. The local path already does this; so does this one.
-        for (const name of ['shipper', 'dashboard']) {
-          const pid = pidOf(name);
-          if (!pid) continue;
-          console.log(warn(`stopping ${name} (pid ${pid}) — it holds the old connection`));
-          try { process.kill(pid, 'SIGTERM'); } catch { /* raced */ }
-          try { fs.unlinkSync(path.join(RUN_DIR, `${name}.pid`)); } catch { /* absent */ }
-        }
-        // Recorded in the config so `start` and `service install` know this house is a
-        // shim they have to bring up, rather than a server that is simply there.
-        process.env.MEMHOUSE_SOLO = '1';
-        process.env.MEMHOUSE_SOLO_PORT = port;
-        flags.url = url; flags.user = 'default'; flags.password = '';
-        flags.db = flags.db || process.env.MEMHOUSE_DB || 'memhouse';
-        flags.yes = true;
-        process.exitCode = await cmdInstall({ interactive: false });
-        break;
-      }
-      if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --solo | --down')); process.exitCode = 2; break; }
+      if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --down')); process.exitCode = 2; break; }
       // VALIDATE FIRST, then act. Everything below that can refuse runs before anything
       // is stopped: a safety refusal that has already killed a healthy shipper and
       // dashboard is worse than the problem it is refusing, and in the missing-credential
@@ -1011,23 +785,13 @@ function cmdUninstall() {
         console.log('  or start over and lose the memory:  memhouse deploy --down');
         process.exitCode = 2; break;
       }
-      // A service-managed solo house must not be switched out from under its own units.
-      if (String(priorCfg.solo) === '1') {
-        let svcSolo = { installed: false };
-        try { svcSolo = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status().solo || { installed: false }; } catch { /* unsupported */ }
-        if (svcSolo.installed) {
-          console.log(bad('a service-managed solo house is installed — switching tiers would leave it shipping to the old port.'));
-          console.log('  remove it first:  memhouse service uninstall');
-          process.exitCode = 2; break;
-        }
-      }
-
-      // Moving the local house has the same two hazards the solo move has, and they were
-      // fixed there first: an occupied destination, and a shipper this loop cannot see.
+      // Moving the local house has two hazards: an occupied destination, and a shipper
+      // this loop cannot see.
       {
-        // Persisted, not merged — same reason as the solo side above.
+        // Persisted, not merged: resolveConfig() folds in the same env vars the target is
+        // derived from, so the comparison could never fire.
         const fileCfg = readEnvFile();
-        const from = String(fileCfg.MEMHOUSE_SOLO) === '1' ? '' : portOf(fileCfg.MEMHOUSE_URL || '');
+        const from = portOf(fileCfg.MEMHOUSE_URL || '');
         // Same precedence `dep.up()` uses below. Reading only the flag let
         // `MEMHOUSE_CH_PORT=<occupied> deploy --local` skip the destination probe, remove
         // the working container, and then fail to bind.
@@ -1043,9 +807,9 @@ function cmdUninstall() {
             console.log('  memhouse service uninstall, then re-deploy on the new port, then memhouse service install');
             process.exitCode = 2; break;
           }
-          // And probe the destination before demolishing a working house, as the solo
-          // move does: `run -p` only discovers the conflict after the old container is
-          // gone, which leaves the house down on a port that was working.
+          // And probe the destination before demolishing a working house: `run -p` only
+          // discovers the conflict after the old container is gone, which leaves the
+          // house down on a port that was working.
           if (await portInUse(to)) {
             console.log(bad(`port ${to} is already in use — not moving the house off ${from}.`));
             console.log('  free that port, or pick another with --house-port.');
@@ -1055,19 +819,6 @@ function cmdUninstall() {
       }
 
       // Validation passed. From here the command changes things.
-      //
-      // A running solo shim owns the port this container wants — 8123 for both by default
-      // — so the container's bind would fail and the documented solo->local switch could
-      // not happen. The shim we manage is stopped; a service-managed one was refused above.
-      if (String(priorCfg.solo) === '1') {
-        const soloPid = pidOf('solo');
-        if (soloPid) {
-          console.log(warn(`stopping the solo house (pid ${soloPid}) — the server tier takes over`));
-          try { process.kill(soloPid, 'SIGTERM'); } catch { /* raced */ }
-          try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
-          await new Promise((res) => setTimeout(res, 500));
-        }
-      }
       // Detached clients hold a SNAPSHOT of the connection in their environment, taken
       // when they were spawned. Leaving them up across a tier switch means a shipper and
       // dashboard still using `default` with no password against a server that now wants
@@ -1082,11 +833,11 @@ function cmdUninstall() {
       }
       const pw = reusable || crypto.randomBytes(16).toString('hex');
       if (reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
-      // The persisted URL is part of the precedence chain, as the solo port is: a bare
-      // re-deploy after `--house-port 18123` would otherwise remove the working container
-      // and rebuild it on 8123, relocating the house and rewriting its URL — or leaving it
-      // stopped if 8123 is taken.
-      const persistedPort = String(priorCfg.solo) === '1' ? '' : portOf(priorCfg.url);
+      // The persisted URL is part of the precedence chain: a bare re-deploy after
+      // `--house-port 18123` would otherwise remove the working container and rebuild it
+      // on 8123, relocating the house and rewriting its URL — or leaving it stopped if
+      // 8123 is taken.
+      const persistedPort = portOf(priorCfg.url);
       const port = String(housePort || process.env.MEMHOUSE_CH_PORT || persistedPort || 8123);
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
@@ -1100,7 +851,7 @@ function cmdUninstall() {
       // house that eventually came up is unreachable forever. The image applies the
       // password only at first init, so there is no way back from that.
       if (!reusable) {
-        writeEnvFile({ ...priorCfg, url: r.url, user: 'memhouse_root', password: pw, solo: '0', soloPort: '' });
+        writeEnvFile({ ...priorCfg, url: r.url, user: 'memhouse_root', password: pw });
         console.log(ok(`credential saved to ${ENV_FILE} before waiting — the volume is initialised with it`));
       }
 
@@ -1113,14 +864,6 @@ function cmdUninstall() {
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));
-      // Switching tiers must clear the other one. A house that was solo yesterday still
-      // has MEMHOUSE_SOLO=1 in its config, and cmdInstall would write it straight back —
-      // so the next `start` would launch a shim nobody wants, flapping on the ClickHouse
-      // port or quietly serving the stale embedded house beside the real one.
-      // Empty string, not `delete`: resolveConfig falls back to the FILE on an absent env
-      // var, and the file still holds the old solo port.
-      process.env.MEMHOUSE_SOLO = '0';
-      process.env.MEMHOUSE_SOLO_PORT = '';
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
       flags.db = flags.db || process.env.MEMHOUSE_DB || 'memhouse';
       flags.yes = true;
@@ -1131,23 +874,16 @@ function cmdUninstall() {
       const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
       const sub = positional[0] || 'status';
       if (sub === 'install') {
-        // A solo house lives in this machine's own shim process, so the service has to
-        // bring that back too — otherwise the reboot the service exists to survive leaves
-        // the shipper talking to a dead port. Detected from the configured URL: solo is
-        // the only tier whose house is a loopback shim this CLI itself started.
-        const cfg = resolveConfig();
-        // Ask what can be asked before killing the daemons this is taking over from. A
-        // failed install used to leave the machine with no shipper — and on the solo tier
-        // with no house at all — for a condition that was knowable up front.
+        // Ask what can be asked before killing the daemon this is taking over from. A
+        // failed install used to leave the machine with no shipper for a condition that
+        // was knowable up front.
         const pre = svc.preflight({ envFile: ENV_FILE });
         if (!pre.ok) { console.log(bad(pre.msg)); process.exitCode = 1; break; }
-        const solo = String(cfg.solo) === '1' || flags.solo === true;
-        const soloPort = solo ? (cfg.soloPort || new URL(cfg.url).port || '8123') : null;
         // The service supersedes the pidfile daemons, and they are not merely redundant:
         // the shim binds a fixed port, so leaving the detached one alive makes the new
         // unit fail with EADDRINUSE and flap under Restart=on-failure. Hand over rather
         // than run both. The dashboard is not service-managed, so it is left alone.
-        for (const name of ['shipper', 'solo']) {
+        for (const name of ['shipper']) {
           const pid = pidOf(name);
           if (!pid) continue;
           try { process.kill(pid, 'SIGTERM'); console.log(ok(`${name} daemon stopped — the service takes it over (pid ${pid})`)); } catch { /* raced */ }
@@ -1155,15 +891,12 @@ function cmdUninstall() {
         }
         const r = svc.install({
           shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval: flags.interval || 300,
-          soloJs: solo ? SOLO_JS : null, soloPort,
           // Where this install lives. The env file records the connection, not the home
-          // that contains it, and the shim's data directory hangs off the home.
+          // that contains it, and an adapter override may hang off the home.
           home: HOME_DIR,
-          soloData: process.env.MEMHOUSE_SOLO_DATA || null,
         });
         if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
         console.log(ok(`service installed (${r.kind}): ${r.path}`));
-        if (r.soloPath) console.log(ok(`solo house service installed: ${r.soloPath}`));
         console.log(r.warn ? '  starts at login; `memhouse start` is no longer needed'
                             : '  survives reboot; `memhouse start` is no longer needed');
         if (r.warn) console.log(warn(r.warn));
@@ -1178,10 +911,6 @@ function cmdUninstall() {
         if (!st.kind) { console.log(warn(`no service integration for '${process.platform}'`)); break; }
         console.log(st.installed ? ok(`service installed (${st.kind}): ${st.path}`) : warn('service not installed'));
         console.log(st.running ? ok('service running') : warn('service not running'));
-        if (st.solo.installed) {
-          console.log(ok(`solo house service installed: ${st.solo.path}`));
-          console.log(st.solo.running ? ok('solo house service running') : warn('solo house service not running'));
-        }
       }
       break;
     }

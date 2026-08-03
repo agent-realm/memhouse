@@ -77,7 +77,7 @@ container engine on Linux and takes a few minutes, so it is not part of `npm tes
 memhouse onboard | install | setup | discover | uninstall | reset
 memhouse ship [--full|--loop N] | stats | search <terms> | start | stop | status | doctor
 memhouse plugins install claude | prompt
-memhouse deploy --local | --solo | --down       # stand up a house to point at
+memhouse deploy --local | --down                # stand up a house to point at
 memhouse service install | uninstall | status   # survive a reboot
 ```
 
@@ -88,15 +88,15 @@ is the missing first mile:
 
 | | What it runs | Who it is for |
 |---|---|---|
-| `deploy --solo` | embedded chdb behind a local shim on `127.0.0.1` | one person, no server, no container |
 | `deploy --local` | stock ClickHouse in docker or podman, loopback-bound | one machine, or several members later |
 | kernel install | an agency house on an ultimagent kernel | a team, provisioned centrally |
+| point at your own | any reachable ClickHouse — a server, ClickHouse Cloud | you already have one |
 
-`--solo` is a genuinely separate tier, not a smaller server: chdb has no users, no
-`GRANT` and no row policies, so there is exactly one identity and `user_id` is
-provenance rather than an isolation boundary. If two people ever need separating,
-that is `--local`, and the upgrade path is a fresh house. See
-`mem-house/solo/README.md`.
+`deploy --local` needs docker or podman. If you have neither and no ClickHouse, install
+one of them — memhouse does not embed a database. An earlier `--solo` tier ran chdb
+behind a hand-written ClickHouse-HTTP shim and was removed: emulating the HTTP protocol
+meant every setting or request shape the shim did not implement became a silently wrong
+answer, and half the defects found reviewing this branch came from it.
 
 `deploy` labels what it creates and refuses to replace or remove a container or
 volume it did not create, so a name collision costs you an error rather than

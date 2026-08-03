@@ -270,24 +270,20 @@ function ambiguousMsg(o) {
  * pipeline in exchange for protecting them. The same questions, asked first.
  */
 /**
- * `tag` OPT-IN. The solo tier calls this purely to ask whether a local house exists —
- * it runs embedded chdb and needs no container image at all, so validating one would
- * fail a perfectly good solo deploy whenever the registry is unreachable and the image
- * is not cached.
+ * `tag` is OPT-IN: a caller asking only "does a local house exist here" should not fail
+ * because a registry is unreachable and the image is not cached.
  */
 function preflight({ tag = null } = {}) {
   const o = owningEngine();
   if (o.ambiguous || o.indeterminate) return { ok: false, reason: 'ambiguous', msg: ambiguousMsg(o) };
   const eng = o.engine;
-  // `reason` matters to callers that are not deploying a local house. `no-engine` means
-  // there cannot BE a local tier on this machine, which is a fine reason to go on and
-  // deploy solo; `unknown` means the engine is there and could not answer, which is not
-  // evidence of absence and must not be read as one.
+  // `reason` matters: `no-engine` means there cannot BE a local house on this machine;
+  // `unknown` means the engine is there and could not answer, which is not evidence of
+  // absence and must never be read as one.
   if (!eng) return { ok: false, reason: 'no-engine', msg: 'neither docker nor podman found on PATH' };
-  // BOTH objects, before deciding anything. Returning on the first `foreign` hid the
+  // BOTH objects, before deciding anything. Returning on the first `foreign` hides the
   // state that actually matters to a caller asking "is there a house here": a foreign
-  // container beside an initialised MANAGED volume. `deploy --solo` read that as "no
-  // local house" and overwrote the credential for a volume nobody can reach afterwards.
+  // container standing beside an initialised MANAGED volume.
   const states = {
     container: ownership(eng, 'container', CONTAINER),
     volume: ownership(eng, 'volume', VOLUME),

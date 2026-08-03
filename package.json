@@ -57,8 +57,7 @@
     "node": ">=20.19.0"
   },
   "allowScripts": {
-    "better-sqlite3": true,
-    "chdb": true
+    "better-sqlite3": true
   },
   "repository": {
     "type": "git",
@@ -72,8 +71,5 @@
     "express": "^4.22.1",
     "log-update": "^4.0.0",
     "open": "^8.4.2"
-  },
-  "optionalDependencies": {
-    "chdb": "^3.2.0"
   }
 }

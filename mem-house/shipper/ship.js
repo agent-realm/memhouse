@@ -363,9 +363,9 @@ async function runShip(client, opts = {}) {
       // delete and the inserts is repaired by the next pass: the skip predicate
       // refuses to skip a non-empty session whose message rows are missing.
       // user_id is BOUND, not `= currentUser()`. A DELETE is a mutation, and a mutation
-      // does not necessarily evaluate currentUser() in the caller's context: on chdb
-      // (the solo tier) it matches nothing at all, so the delete silently removes zero
-      // rows and the stale tail this code exists to clear survives forever. Measured —
+      // does not necessarily evaluate currentUser() in the caller's context — it matches
+      // nothing at all, so the delete silently removes zero rows and the stale tail this
+      // code exists to clear survives forever. Measured on ClickHouse 25.11 —
       // the identical predicate with the literal value deleted 2000 rows where
       // currentUser() deleted 0. The value is the same identity either way: it is read
       // from the server over this very connection.
@@ -456,8 +456,8 @@ async function main() {
     }
     let full = argv.includes('--full');
     // A failed pass does NOT wait the full interval. The common failure at startup is
-    // that the house is not up yet — the solo shim is still opening its data directory,
-    // or the container is still booting — and sleeping 300s there means the first ship is
+    // that the house is not up yet — the container is still booting — and sleeping 300s
+    // there means the first ship is
     // five minutes late for a condition that clears in under a second. systemd's
     // After= orders process start, not readiness, and launchd has no ordering at all, so
     // this is the only place the race can be closed for every path at once.

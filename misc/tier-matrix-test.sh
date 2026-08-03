@@ -19,7 +19,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 CLI="node $REPO/bin/memhouse.js"
 TMP="$(mktemp -d /tmp/memhouse-matrix.XXXXXX)"
 PORT_CH=18123
-PORT_SOLO=18124
+
 PASS=0 FAIL=0 SKIP=0
 
 ok()   { echo "  ok    $*"; PASS=$((PASS+1)); }
@@ -45,7 +45,6 @@ have_systemd() { systemctl --user show-environment >/dev/null 2>&1; }
 cleanup() {
   for h in "$TMP"/home-*; do [ -d "$h" ] && MEMHOUSE_HOME="$h" $CLI uninstall >/dev/null 2>&1; done
   MEMHOUSE_HOME="$TMP/home-x" $CLI service uninstall >/dev/null 2>&1
-  pkill -f "$REPO/mem-house/solo/server.js" >/dev/null 2>&1
   local eng; eng=$(command -v podman || command -v docker) || true
   if [ -n "${eng:-}" ]; then "$eng" rm -f memhouse-clickhouse >/dev/null 2>&1; "$eng" volume rm -f memhouse-data >/dev/null 2>&1; fi
   rm -rf "$TMP"
@@ -54,22 +53,6 @@ trap cleanup EXIT
 
 command -v podman >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 || { echo "no container engine — nothing to test"; exit 2; }
 
-say "solo tier: deploy, restart cycle, teardown"
-H="$TMP/home-solo"; mkdir -p "$H"; export MEMHOUSE_HOME="$H"
-export MEMHOUSE_SOLO_DATA="$TMP/solo-data"
-assert_exit "deploy --solo" 0 env MEMHOUSE_HOME="$H" $CLI deploy --solo --house-port $PORT_SOLO --no-ship
-assert_out  "solo is persisted, not inferred" "MEMHOUSE_SOLO='1'" cat "$H/env"
-assert_exit "stop" 0 env MEMHOUSE_HOME="$H" $CLI stop
-# The bug this guards: `stop` removes the pidfile, so a pidfile-derived tier lost the shim.
-assert_out  "start brings the shim back" "solo house answering" env MEMHOUSE_HOME="$H" $CLI start
-assert_out  "status sees the house" "connected:" env MEMHOUSE_HOME="$H" $CLI status
-env MEMHOUSE_HOME="$H" $CLI stop >/dev/null 2>&1
-
-say "solo tier: a redeploy must find the existing house, not relocate it"
-assert_out  "bare redeploy reuses the persisted port" "$PORT_SOLO" env MEMHOUSE_HOME="$H" $CLI deploy --solo --no-ship
-assert_out  "an explicit new port MOVES the shim" "moving it to $((PORT_SOLO+1))" env MEMHOUSE_HOME="$H" $CLI deploy --solo --house-port $((PORT_SOLO+1)) --no-ship
-env MEMHOUSE_HOME="$H" $CLI stop >/dev/null 2>&1
-
 say "per-member: install must not create the shared schema"
 H2="$TMP/home-pm"; mkdir -p "$H2"
 # No server needed: it must refuse before it can even resolve rooms.
@@ -77,10 +60,6 @@ assert_out "install --per-member fails closed without a house" "connection faile
   env MEMHOUSE_HOME="$H2" MEM_PER_MEMBER=1 $CLI install --yes --url http://127.0.0.1:1 --user u --password p --db mem --no-ship
 assert_out "ship --ensure-schema refuses under MEM_PER_MEMBER" "provision.js --member" \
   env MEM_PER_MEMBER=1 MEMHOUSE_URL=http://127.0.0.1:1 node "$REPO/mem-house/shipper/ship.js" --ensure-schema
-
-say "solo + per-member is refused, not half-applied"
-assert_exit "deploy --solo with MEM_PER_MEMBER=1" 2 \
-  env MEMHOUSE_HOME="$TMP/home-mix" MEM_PER_MEMBER=1 $CLI deploy --solo --no-ship
 
 say "local tier: credential survives a redeploy"
 H3="$TMP/home-local"; mkdir -p "$H3"
@@ -104,14 +83,6 @@ assert_out "deploy --local refuses a foreign container" "not created by memhouse
 "$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1; "$ENG" volume rm -f memhouse-data >/dev/null 2>&1
 ok "foreign container and volume survived both commands"
 
-say "tier switch: solo then local, on the port they both want"
-H4="$TMP/home-switch"; mkdir -p "$H4"
-env MEMHOUSE_HOME="$H4" MEMHOUSE_SOLO_DATA="$TMP/switch-data" $CLI deploy --solo --house-port $PORT_CH --no-ship >/dev/null 2>&1
-assert_out "local stops the managed shim first" "stopping the solo house" \
-  env MEMHOUSE_HOME="$H4" $CLI deploy --local --house-port $PORT_CH --no-ship
-assert_out "and clears the solo flag" "MEMHOUSE_SOLO='0'" cat "$H4/env"
-env MEMHOUSE_HOME="$H4" $CLI deploy --down >/dev/null 2>&1
-
 say "lockout guards: every way of asking for a different credential"
 H6="$TMP/home-lock"; mkdir -p "$H6"
 env MEMHOUSE_HOME="$H6" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
@@ -131,16 +102,6 @@ assert_out "persisted port is reused without the flag" "localhost:$PORT_CH" \
   env MEMHOUSE_HOME="$H6" $CLI deploy --local --no-ship
 env MEMHOUSE_HOME="$H6" $CLI deploy --down >/dev/null 2>&1
 
-say "solo must not adopt somebody else's ClickHouse"
-H7="$TMP/home-adopt"; mkdir -p "$H7"
-env MEMHOUSE_HOME="$H7" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
-PWL=$(grep MEMHOUSE_PASSWORD "$H7/env" 2>/dev/null)
-assert_exit "deploy --solo onto the local house's port is refused" 2 \
-  env MEMHOUSE_HOME="$H7" MEMHOUSE_SOLO_DATA="$TMP/adopt-data" $CLI deploy --solo --house-port $PORT_CH --no-ship
-PWL2=$(grep MEMHOUSE_PASSWORD "$H7/env" 2>/dev/null)
-[ "$PWL" = "$PWL2" ] && ok "the local credential was not overwritten" || bad "credential overwritten — the CLI is locked out"
-env MEMHOUSE_HOME="$H7" $CLI deploy --down >/dev/null 2>&1
-
 say "preflight: a refusal must not cost you a running pipeline"
 H8="$TMP/home-pre"; mkdir -p "$H8"
 env MEMHOUSE_HOME="$H8" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
@@ -153,19 +114,7 @@ if [ -e "$H8/run/dashboard.pid" ]; then ok "the refusal left the dashboard runni
 "$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1
 env MEMHOUSE_HOME="$H8" $CLI stop >/dev/null 2>&1
 
-say "solo: an occupied target port is rejected before the old shim dies"
-H9="$TMP/home-move"; mkdir -p "$H9"
-env MEMHOUSE_HOME="$H9" MEMHOUSE_SOLO_DATA="$TMP/move-data" $CLI deploy --solo --house-port $PORT_SOLO --no-ship >/dev/null 2>&1
-# Occupy the destination with something that is not us.
-python3 -c "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',$((PORT_SOLO+5))));s.listen(1);time.sleep(30)" &
-BLOCKER=$!; sleep 1
-assert_exit "moving onto an occupied port is refused" 2 \
-  env MEMHOUSE_HOME="$H9" $CLI deploy --solo --house-port $((PORT_SOLO+5)) --no-ship
-assert_out "and the original house is still serving" "connected:" env MEMHOUSE_HOME="$H9" $CLI status
-kill $BLOCKER 2>/dev/null
-env MEMHOUSE_HOME="$H9" $CLI stop >/dev/null 2>&1
-
-say "local: moving the house has the same two guards as moving the shim"
+say "moving the house has two guards: an occupied target and a service that cannot see it"
 HA="$TMP/home-lmove"; mkdir -p "$HA"
 env MEMHOUSE_HOME="$HA" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
 python3 -c "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',$((PORT_CH+7))));s.listen(1);time.sleep(30)" &
@@ -183,44 +132,6 @@ else
   skip "service-managed local move (no user manager)"
 fi
 env MEMHOUSE_HOME="$HA" $CLI deploy --down >/dev/null 2>&1
-
-say "a solo house must not shadow an existing local one"
-HB="$TMP/home-shadow"; mkdir -p "$HB"
-env MEMHOUSE_HOME="$HB" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
-PWS=$(grep MEMHOUSE_PASSWORD "$HB/env" 2>/dev/null)
-"$ENG" stop memhouse-clickhouse >/dev/null 2>&1     # stopped: no bind conflict to catch it
-assert_exit "deploy --solo over an initialised local volume is refused" 2 \
-  env MEMHOUSE_HOME="$HB" MEMHOUSE_SOLO_DATA="$TMP/shadow-data" $CLI deploy --solo --house-port $((PORT_SOLO+9)) --no-ship
-PWS2=$(grep MEMHOUSE_PASSWORD "$HB/env" 2>/dev/null)
-[ "$PWS" = "$PWS2" ] && ok "the local credential survived" || bad "local credential overwritten — that house is unreachable"
-"$ENG" start memhouse-clickhouse >/dev/null 2>&1
-env MEMHOUSE_HOME="$HB" $CLI deploy --down >/dev/null 2>&1
-
-say "the solo shim refuses a database that does not exist"
-HC="$TMP/home-db"; mkdir -p "$HC"
-env MEMHOUSE_HOME="$HC" MEMHOUSE_SOLO_DATA="$TMP/db-data" $CLI deploy --solo --house-port $((PORT_SOLO+10)) >/dev/null 2>&1
-ROWS=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=memhouse&final=1" --data-binary "SELECT count() FROM messages FORMAT TabSeparated" | tr -d "\r")
-env MEMHOUSE_HOME="$HC" $CLI setup --yes --db typo >/dev/null 2>&1
-assert_out "a query against a missing database errors" "UNKNOWN_DATABASE" \
-  curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=typo" --data-binary "SELECT count() FROM messages FORMAT TabSeparated"
-env MEMHOUSE_HOME="$HC" $CLI reset --yes >/dev/null 2>&1
-ROWS2=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=memhouse&final=1" --data-binary "SELECT count() FROM messages FORMAT TabSeparated" | tr -d "\r")
-[ "$ROWS" = "$ROWS2" ] && [ -n "$ROWS" ] && ok "a reset aimed at the wrong database did not erase the real one" \
-  || bad "the real house lost rows ($ROWS -> $ROWS2)"
-# The rollup resolves differently per layout: the stored view's NAME in the shared
-# layout (this home), a subquery in the per-member one (covered by the unit gate).
-assert_out "sessions-query prints the shared view name here" "^sessions_v$" \
-  env MEMHOUSE_HOME="$HC" $CLI sessions-query
-# The bootstrap case must still work: ?database=X on the statement that creates X.
-# A success is EMPTY output, which grep cannot match — assert on the absence of an error.
-BOOT=$(curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=brandnew" --data-binary "CREATE DATABASE brandnew")
-case "$BOOT" in
-  *Exception*|*UNKNOWN_DATABASE*) bad "CREATE DATABASE no longer bootstraps: $BOOT" ;;
-  *) ok "CREATE DATABASE still bootstraps" ;;
-esac
-assert_out "and the new database is usable" "brandnew" \
-  curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=brandnew" --data-binary "SELECT currentDatabase() FORMAT TabSeparated"
-env MEMHOUSE_HOME="$HC" $CLI stop >/dev/null 2>&1
 
 say "a generated credential survives the CLI dying mid-startup"
 HD="$TMP/home-crash"; mkdir -p "$HD"
@@ -251,21 +162,6 @@ assert_out "an unobtainable tag is refused before the removal" "existing house w
 assert_out "and the house is still serving" "connected:" env MEMHOUSE_HOME="$HF" $CLI status
 env MEMHOUSE_HOME="$HF" $CLI deploy --down >/dev/null 2>&1
 
-say "solo must not silently adopt a home that already describes a house"
-HG="$TMP/home-adopt2"; mkdir -p "$HG"
-env MEMHOUSE_HOME="$HG" $CLI deploy --local --house-port $((PORT_CH+6)) --no-ship >/dev/null 2>&1
-PWG=$(grep MEMHOUSE_PASSWORD "$HG/env" 2>/dev/null)
-mkdir -p "$TMP/noeng"; for b in node bash ls cat rm sh env; do ln -sf "$(command -v $b)" "$TMP/noeng/$b" 2>/dev/null; done
-assert_exit "with no engine on PATH, solo is refused over an existing config" 2 \
-  env PATH="$TMP/noeng" MEMHOUSE_HOME="$HG" MEMHOUSE_SOLO_DATA="$TMP/adopt2-data" $CLI deploy --solo --house-port $((PORT_SOLO+11)) --no-ship
-PWG2=$(grep MEMHOUSE_PASSWORD "$HG/env" 2>/dev/null)
-[ "$PWG" = "$PWG2" ] && ok "the local credential survived" || bad "credential overwritten — that house is unrecoverable"
-HH="$TMP/home-fresh"; mkdir -p "$HH"
-assert_exit "but a FRESH home with no engine still deploys solo" 0 \
-  env PATH="$TMP/noeng" MEMHOUSE_HOME="$HH" MEMHOUSE_SOLO_DATA="$TMP/fresh-data" $CLI deploy --solo --house-port $((PORT_SOLO+12)) --no-ship
-env MEMHOUSE_HOME="$HH" $CLI stop >/dev/null 2>&1
-env MEMHOUSE_HOME="$HG" $CLI deploy --down >/dev/null 2>&1
-
 say "a bad tag is caught before anything is stopped"
 HI="$TMP/home-tag2"; mkdir -p "$HI"
 env MEMHOUSE_HOME="$HI" $CLI deploy --local --house-port $((PORT_CH+9)) --no-ship >/dev/null 2>&1
@@ -278,52 +174,14 @@ assert_out "and the house is still serving" "connected:" env MEMHOUSE_HOME="$HI"
 env MEMHOUSE_HOME="$HI" $CLI stop >/dev/null 2>&1
 env MEMHOUSE_HOME="$HI" $CLI deploy --down >/dev/null 2>&1
 
-say "solo does not need a container image"
-# An engine is installed and answering, but the image is not cached and cannot be pulled.
-# The solo tier runs embedded chdb; requiring an image here fails a deploy for nothing.
-HJ="$TMP/home-noimg"; mkdir -p "$HJ"
-mkdir -p "$TMP/regdown"
-{ echo '#!/bin/bash'
-  echo 'case "$1 $2" in "image inspect") exit 1;; esac'
-  echo 'case "$1" in'
-  echo '  --version) echo podman-0.0; exit 0;;'
-  echo '  pull) echo "Error: pinging container registry: no such host" >&2; exit 125;;'
-  echo '  inspect) echo "Error: no such object: x" >&2; exit 125;;'
-  echo '  volume) echo "Error: no such volume" >&2; exit 125;;'
-  echo 'esac'; echo 'exit 0'; } > "$TMP/regdown/podman"
-chmod +x "$TMP/regdown/podman"
-for b in node bash ls cat rm sh env; do ln -sf "$(command -v $b)" "$TMP/regdown/$b" 2>/dev/null; done
-assert_exit "solo deploys with an unobtainable image" 0 \
-  env PATH="$TMP/regdown" MEMHOUSE_HOME="$HJ" MEMHOUSE_SOLO_DATA="$TMP/noimg-data" $CLI deploy --solo --house-port $((PORT_SOLO+13)) --no-ship
-HK="$TMP/home-noimg2"; mkdir -p "$HK"
-assert_out "but local still refuses it" "cannot obtain" \
-  env PATH="$TMP/regdown" MEMHOUSE_HOME="$HK" $CLI deploy --local --house-port $((PORT_CH+11)) --no-ship
-env MEMHOUSE_HOME="$HJ" $CLI stop >/dev/null 2>&1
-
-say "an unrelated name collision must not block solo"
-# Somebody else's container/volume under our fixed names. `deploy --local` must refuse
-# them; `deploy --solo` runs embedded chdb and never touches either, so it must not care.
-"$ENG" volume create memhouse-data >/dev/null 2>&1
-"$ENG" run -d --name memhouse-clickhouse docker.io/library/busybox:latest sleep 300 >/dev/null 2>&1
-HL="$TMP/home-collide"; mkdir -p "$HL"
-assert_exit "solo deploys past a foreign name collision" 0 \
-  env MEMHOUSE_HOME="$HL" MEMHOUSE_SOLO_DATA="$TMP/collide-data" $CLI deploy --solo --house-port $((PORT_SOLO+14)) --no-ship
-HM="$TMP/home-collide2"; mkdir -p "$HM"
-assert_out "local still refuses the same objects" "not created by memhouse" \
-  env MEMHOUSE_HOME="$HM" $CLI deploy --local --house-port $((PORT_CH+12)) --no-ship
-"$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1; "$ENG" volume rm -f memhouse-data >/dev/null 2>&1
-ok "the foreign objects survived both"
-env MEMHOUSE_HOME="$HL" $CLI stop >/dev/null 2>&1
-
 say "a foreign container beside a MANAGED volume is still a local house"
 HN="$TMP/home-mixed"; mkdir -p "$HN"
 env MEMHOUSE_HOME="$HN" $CLI deploy --local --house-port $((PORT_CH+13)) --no-ship >/dev/null 2>&1
 PWN=$(grep MEMHOUSE_PASSWORD "$HN/env" 2>/dev/null)
 "$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1                       # leave the managed VOLUME
 "$ENG" run -d --name memhouse-clickhouse docker.io/library/busybox:latest sleep 300 >/dev/null 2>&1
-HO="$TMP/home-mixed2"; mkdir -p "$HO"
-assert_exit "solo refuses a mixed foreign/managed state" 2 \
-  env MEMHOUSE_HOME="$HO" MEMHOUSE_SOLO_DATA="$TMP/mixed-data" $CLI deploy --solo --house-port $((PORT_SOLO+15)) --no-ship
+assert_out "the foreign container is refused, not replaced" "not created by memhouse" \
+  env MEMHOUSE_HOME="$HN" $CLI deploy --local --house-port $((PORT_CH+13)) --no-ship
 PWN2=$(grep MEMHOUSE_PASSWORD "$HN/env" 2>/dev/null)
 [ "$PWN" = "$PWN2" ] && ok "the managed volume's credential survived" || bad "credential overwritten — that volume is unreachable"
 "$ENG" rm -f memhouse-clickhouse >/dev/null 2>&1; "$ENG" volume rm -f memhouse-data >/dev/null 2>&1
@@ -356,9 +214,10 @@ say "teardown ignores a service that points somewhere else"
 if ! have_systemd; then
   skip "unrelated-service teardown (no user manager)"
 else
+  # A service pointing at an EXTERNAL house — nothing to do with the managed container.
   HR="$TMP/home-otherservice"; mkdir -p "$HR"
-  env MEMHOUSE_HOME="$HR" MEMHOUSE_SOLO_DATA="$TMP/other-data" $CLI deploy --solo --house-port $((PORT_SOLO+16)) --no-ship >/dev/null 2>&1
-  env MEMHOUSE_HOME="$HR" MEMHOUSE_SOLO_DATA="$TMP/other-data" $CLI service install >/dev/null 2>&1; sleep 2
+  env MEMHOUSE_HOME="$HR" $CLI setup --yes --url http://127.0.0.1:$((PORT_CH+90)) --user u --password p --db mem >/dev/null 2>&1
+  env MEMHOUSE_HOME="$HR" $CLI service install >/dev/null 2>&1; sleep 2
   HS="$TMP/home-localside"; mkdir -p "$HS"
   env MEMHOUSE_HOME="$HS" $CLI deploy --local --house-port $((PORT_CH+17)) --no-ship >/dev/null 2>&1
   assert_exit "an unrelated service does not block teardown" 0 env MEMHOUSE_HOME="$HS" $CLI deploy --down
@@ -370,17 +229,14 @@ if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
 else
   H5="$TMP/home-svc"; mkdir -p "$H5"
-  env MEMHOUSE_HOME="$H5" MEMHOUSE_SOLO_DATA="$TMP/svc-data" $CLI deploy --solo --house-port $((PORT_SOLO+2)) --no-ship >/dev/null 2>&1
-  assert_out "service install takes over the pidfile daemons" "solo house service installed" \
-    env MEMHOUSE_HOME="$H5" MEMHOUSE_SOLO_DATA="$TMP/svc-data" $CLI service install
+  env MEMHOUSE_HOME="$H5" $CLI deploy --local --house-port $((PORT_CH+18)) --no-ship >/dev/null 2>&1
+  assert_out "service install takes over the pidfile daemon" "service installed" \
+    env MEMHOUSE_HOME="$H5" $CLI service install
   sleep 3
   assert_out "status reports the service-managed shipper" "shipper: running — service" env MEMHOUSE_HOME="$H5" $CLI status
   assert_out "start does not spawn a second shipper" "shipper is service-managed" env MEMHOUSE_HOME="$H5" $CLI start
-  assert_out "nor a second shim" "solo is service-managed" env MEMHOUSE_HOME="$H5" $CLI start
   assert_exit "a service-managed port change is refused" 2 \
-    env MEMHOUSE_HOME="$H5" $CLI deploy --solo --house-port $((PORT_SOLO+3)) --no-ship
-  assert_exit "a service-managed tier switch is refused" 2 \
-    env MEMHOUSE_HOME="$H5" $CLI deploy --local --house-port $PORT_CH --no-ship
+    env MEMHOUSE_HOME="$H5" $CLI deploy --local --house-port $((PORT_CH+19)) --no-ship
   assert_out "uninstall removes the service too" "service removed" env MEMHOUSE_HOME="$H5" $CLI uninstall
   [ -e "$HOME/.config/systemd/user/memhouse-shipper.service" ] && bad "unit file survived uninstall" || ok "unit files removed"
 fi

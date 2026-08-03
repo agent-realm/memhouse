@@ -142,14 +142,6 @@ test('systemd unit inlines env with systemd quoting, not shell quoting', () => {
   assert.ok(unit.includes('ExecStart=/usr/bin/node /opt/memhouse/ship.js --loop 300'));
 });
 
-test('systemd ordering is emitted only when the solo unit is wanted', () => {
-  const plain = service._render.systemdUnit({ ...SVC, description: 'd' });
-  assert.ok(!plain.includes('memhouse-solo.service'));
-  const ordered = service._render.systemdUnit({ ...SVC, description: 'd', after: ['memhouse-solo.service'] });
-  assert.ok(ordered.includes('After=memhouse-solo.service'));
-  assert.ok(ordered.includes('Wants=memhouse-solo.service'));
-});
-
 test('launchd plist is well-formed and escapes XML metacharacters', () => {
   const plist = service._render.launchdPlist({
     ...SVC, label: 'com.memhouse.shipper',
