@@ -176,7 +176,14 @@ const server = http.createServer((req, res) => {
     const body = Buffer.concat(chunks).toString('utf-8');
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
-    if (url.pathname === '/ping') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('Ok.\n'); }
+    // The display name is on /ping too, not only on query responses: a real ClickHouse
+    // answers /ping with the same `Ok.`, so this header is the only thing that tells the
+    // CLI whether the house on this port is the shim it just started or somebody else's
+    // server it is about to overwrite the credentials for.
+    if (url.pathname === '/ping') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'X-ClickHouse-Server-Display-Name': 'memhouse-solo' });
+      return res.end('Ok.\n');
+    }
 
     // Two shapes, and conflating them breaks inserts. A plain query arrives as the POST
     // body. An INSERT arrives as `?query=INSERT INTO t FORMAT JSONEachRow` with the ROWS

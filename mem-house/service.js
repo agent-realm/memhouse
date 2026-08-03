@@ -27,6 +27,10 @@ const envfile = require('./envfile');
 
 const LABEL = 'memhouse-shipper';
 const SOLO_LABEL = 'memhouse-solo';
+// Environment an ADAPTER reads to find its sessions, as opposed to the connection
+// settings that live in the env file. Keep this in step with `editors/` — today
+// `editors/codex.js` is the only adapter with an override.
+const ADAPTER_ENV = ['CODEX_HOME'];
 
 function platform() {
   if (process.platform === 'darwin') return 'launchd';
@@ -154,6 +158,11 @@ function install({ shipJs, envFile, logDir, interval = 300, soloJs = null, soloP
   // that has nothing in it. Inline the effective paths.
   if (home) env.MEMHOUSE_HOME = home;
   if (soloData) env.MEMHOUSE_SOLO_DATA = soloData;
+  // Adapter location overrides travel too. A detached shipper inherits them from the
+  // invoking shell through childEnv(); a service inherits nothing, so an override that
+  // was working before `service install` silently stops applying — the adapter falls back
+  // to its default path and just stops finding sessions, with no error anywhere.
+  for (const k of ADAPTER_ENV) if (process.env[k]) env[k] = process.env[k];
   try { envfile.assertSingleLine(env); } catch (e) { return { ok: false, msg: e.message }; }
 
   if (kind === 'systemd') {

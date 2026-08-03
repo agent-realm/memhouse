@@ -130,6 +130,21 @@ async function chRows(cfg, sql, opts) {
   return text ? text.split('\n').map((l) => JSON.parse(l)) : [];
 }
 
+/** Port from a configured URL, '' when it has none or the URL is unparseable. */
+function portOf(u) {
+  try { return new URL(u).port || ''; } catch { return ''; }
+}
+
+// Is whatever answers this URL our own solo shim, or some other ClickHouse? Both answer
+// /ping with `Ok.`, so the tier cannot be told from readiness alone. The shim sets a
+// display name on every response; a server sets its own.
+async function isSoloShim(url) {
+  try {
+    const r = await fetch(`${url}/ping`, { signal: AbortSignal.timeout(3000) });
+    return r.headers.get('x-clickhouse-server-display-name') === 'memhouse-solo';
+  } catch { return false; }
+}
+
 // Is the shipper alive, by whichever mechanism owns it? After `service install` the
 // pidfile is deliberately gone — the service took over — so a pidfile-only check reports
 // "not running" for every correctly service-managed install, and `doctor` fails on a
@@ -494,9 +509,15 @@ async function cmdDoctor() {
   try { rooms = await roomsFor(cfg); } catch (e) { add(false, 'room resolution', e.message); }
   if (rooms.perMember) add(true, `layout: per-member rooms for '${rooms.member}'`);
   try {
-    const want = ROOM_TYPES.map((t) => `'${rooms[t]}'`).join(',');
+    // The ROLLUP VIEW counts. Every product read path goes through it — dashboard,
+    // status, search, stats — so a house with three healthy rooms and no view ships fine
+    // and fails every read with UNKNOWN_TABLE, while a rooms-only check calls that a
+    // clean bill of health.
+    const objects = [...ROOM_TYPES.map((t) => rooms[t]), rooms.sessions_v];
+    const want = objects.map((n) => `'${n}'`).join(',');
     const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
-    add(t === 3, `schema: ${t}/3 rooms in '${cfg.db}' (${ROOM_TYPES.map((x) => rooms[x]).join(', ')})`, 'run: memhouse install (ensure-schema)');
+    add(t === objects.length, `schema: ${t}/${objects.length} rooms+view in '${cfg.db}' (${objects.join(', ')})`,
+      rooms.perMember ? `run, as the owner: node mem-house/per-member/provision.js --member ${rooms.member}` : 'run: memhouse install (ensure-schema)');
   } catch (e) { add(false, 'schema check', e.message); }
   try {
     const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
@@ -787,6 +808,17 @@ function cmdUninstall() {
           console.log(bad(`solo house did not answer on ${url} — see ${path.join(LOG_DIR, 'solo.log')}`));
           process.exitCode = 1; break;
         }
+        // Answering is not the same as being OURS. A real ClickHouse on this port answers
+        // /ping identically, so a shim that died on EADDRINUSE looks ready — and the
+        // install below would then overwrite a working url/user/password with
+        // `default` and no credential, locking the CLI out of the server that is actually
+        // there. The shim stamps every response with its own display name; require it.
+        if (!(await isSoloShim(url))) {
+          console.log(bad(`something else is already serving ${url} — it answers /ping but is not a memhouse solo house.`));
+          console.log('  if that is the local ClickHouse, stop it first:  memhouse deploy --down');
+          console.log(`  or put the solo house somewhere else:  memhouse deploy --solo --house-port <n>`);
+          process.exitCode = 2; break;
+        }
         console.log(ok(`solo house on ${url} (embedded chdb, single user, loopback only)`));
         // Recorded in the config so `start` and `service install` know this house is a
         // shim they have to bring up, rather than a server that is simply there.
@@ -799,57 +831,24 @@ function cmdUninstall() {
         break;
       }
       if (!flags.local) { console.log(bad('usage: memhouse deploy --local | --solo | --down')); process.exitCode = 2; break; }
-      {
-        // A running solo shim owns the port this container wants — 8123 for both by
-        // default — so the container's bind fails and the advertised solo→local switch
-        // cannot happen without the user working it out themselves. Stop the shim we
-        // manage; a service-managed one is not ours to kill silently.
-        const prior = resolveConfig();
-        if (String(prior.solo) === '1') {
-          let svcSolo = { installed: false };
-          try { svcSolo = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status().solo || { installed: false }; } catch { /* unsupported */ }
-          if (svcSolo.installed) {
-            console.log(bad('a service-managed solo house is installed — switching tiers would leave it shipping to the old port.'));
-            console.log('  remove it first:  memhouse service uninstall');
-            process.exitCode = 2; break;
-          }
-          const soloPid = pidOf('solo');
-          if (soloPid) {
-            console.log(warn(`stopping the solo house (pid ${soloPid}) — the server tier takes over`));
-            try { process.kill(soloPid, 'SIGTERM'); } catch { /* raced */ }
-            try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
-            await new Promise((res) => setTimeout(res, 500));
-          }
-        }
-      }
-      // Detached clients hold a SNAPSHOT of the connection in their environment, taken
-      // when they were spawned. Leaving them up across a tier switch means a shipper and
-      // dashboard still using `default` with no password against a server that now wants
-      // a credential — reported as running, failing every request. They are stopped here
-      // and `memhouse start` brings them back with the new config; the install line at
-      // the end of this command already says to run it.
-      for (const name of ['shipper', 'dashboard']) {
-        const pid = pidOf(name);
-        if (!pid) continue;
-        console.log(warn(`stopping ${name} (pid ${pid}) — it holds the old connection`));
-        try { process.kill(pid, 'SIGTERM'); } catch { /* raced */ }
-        try { fs.unlinkSync(path.join(RUN_DIR, `${name}.pid`)); } catch { /* absent */ }
-      }
-      // Reuse the house's own password when its data volume already exists. The image
-      // only applies CLICKHOUSE_PASSWORD when it INITIALISES a data directory, so a
-      // fresh random password on a re-deploy authenticates against nothing — and
-      // cmdInstall would then overwrite the working credential in the config with it,
-      // locking the CLI out of a house that is running perfectly well.
+      // VALIDATE FIRST, then act. Everything below that can refuse runs before anything
+      // is stopped: a safety refusal that has already killed a healthy shipper and
+      // dashboard is worse than the problem it is refusing, and in the missing-credential
+      // case those processes may be the last things holding a usable connection.
       const priorCfg = resolveConfig();
       const initialised = dep.volumeExists();
       const reusable = initialised && priorCfg.password ? priorCfg.password : null;
-      // Rotating against an initialised volume is the very lockout this guards: the image
-      // applies CLICKHOUSE_PASSWORD only when it creates the data directory, so a new
-      // value would be written to the config and rejected by the server. Say what the
-      // real procedure is rather than doing something that cannot work.
-      if (initialised && (flags['rotate-password'] === true || process.env.MEMHOUSE_PASSWORD)) {
-        const how = flags['rotate-password'] === true ? '--rotate-password' : 'MEMHOUSE_PASSWORD';
-        console.log(bad(`${how} cannot change the credential of an existing house — the image only applies it when it initialises the data directory.`));
+
+      // Every way of asking for a different password against an existing house. The image
+      // applies CLICKHOUSE_PASSWORD only when it INITIALISES a data directory, so any of
+      // them would be written to the config and then rejected by the server — the lockout.
+      // `--password` counts: it lands in priorCfg via resolveConfig, so without this it
+      // would masquerade as the credential being reused.
+      const rotateAsk = flags['rotate-password'] === true ? '--rotate-password'
+        : (flags.password !== undefined && flags.password !== true) ? '--password'
+          : process.env.MEMHOUSE_PASSWORD ? 'MEMHOUSE_PASSWORD' : null;
+      if (initialised && rotateAsk) {
+        console.log(bad(`${rotateAsk} cannot change the credential of an existing house — the image only applies it when it initialises the data directory.`));
         console.log('  to rotate:   ALTER USER memhouse_root IDENTIFIED BY \'…\' inside the house, then: memhouse setup --password …');
         console.log('  to start over (DESTROYS the memory):  memhouse deploy --down');
         process.exitCode = 2; break;
@@ -857,7 +856,6 @@ function cmdUninstall() {
       // An initialised volume with no credential to reuse — env file deleted, emptied, or
       // never written — is the same lockout by another route: a generated password would
       // be ignored by the server and then written over the config as if it worked.
-      // Nothing here can recover it, so say what can.
       if (initialised && !reusable) {
         console.log(bad(`the managed volume '${dep.VOLUME}' already holds a house, but no credential for it is available.`));
         console.log('  a generated one would be ignored by the server: the image sets the password only at first init.');
@@ -865,9 +863,51 @@ function cmdUninstall() {
         console.log('  or start over and lose the memory:  memhouse deploy --down');
         process.exitCode = 2; break;
       }
+      // A service-managed solo house must not be switched out from under its own units.
+      if (String(priorCfg.solo) === '1') {
+        let svcSolo = { installed: false };
+        try { svcSolo = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status().solo || { installed: false }; } catch { /* unsupported */ }
+        if (svcSolo.installed) {
+          console.log(bad('a service-managed solo house is installed — switching tiers would leave it shipping to the old port.'));
+          console.log('  remove it first:  memhouse service uninstall');
+          process.exitCode = 2; break;
+        }
+      }
+
+      // Validation passed. From here the command changes things.
+      //
+      // A running solo shim owns the port this container wants — 8123 for both by default
+      // — so the container's bind would fail and the documented solo->local switch could
+      // not happen. The shim we manage is stopped; a service-managed one was refused above.
+      if (String(priorCfg.solo) === '1') {
+        const soloPid = pidOf('solo');
+        if (soloPid) {
+          console.log(warn(`stopping the solo house (pid ${soloPid}) — the server tier takes over`));
+          try { process.kill(soloPid, 'SIGTERM'); } catch { /* raced */ }
+          try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
+          await new Promise((res) => setTimeout(res, 500));
+        }
+      }
+      // Detached clients hold a SNAPSHOT of the connection in their environment, taken
+      // when they were spawned. Leaving them up across a tier switch means a shipper and
+      // dashboard still using `default` with no password against a server that now wants
+      // a credential — reported as running, failing every request. `memhouse start` brings
+      // them back with the new config; the install line at the end already says to run it.
+      for (const name of ['shipper', 'dashboard']) {
+        const pid = pidOf(name);
+        if (!pid) continue;
+        console.log(warn(`stopping ${name} (pid ${pid}) — it holds the old connection`));
+        try { process.kill(pid, 'SIGTERM'); } catch { /* raced */ }
+        try { fs.unlinkSync(path.join(RUN_DIR, `${name}.pid`)); } catch { /* absent */ }
+      }
       const pw = reusable || crypto.randomBytes(16).toString('hex');
-      if (reusable && pw === reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
-      const port = String(housePort || process.env.MEMHOUSE_CH_PORT || 8123);
+      if (reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
+      // The persisted URL is part of the precedence chain, as the solo port is: a bare
+      // re-deploy after `--house-port 18123` would otherwise remove the working container
+      // and rebuild it on 8123, relocating the house and rewriting its URL — or leaving it
+      // stopped if 8123 is taken.
+      const persistedPort = String(priorCfg.solo) === '1' ? '' : portOf(priorCfg.url);
+      const port = String(housePort || process.env.MEMHOUSE_CH_PORT || persistedPort || 8123);
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
       console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));

@@ -112,6 +112,35 @@ assert_out "local stops the managed shim first" "stopping the solo house" \
 assert_out "and clears the solo flag" "MEMHOUSE_SOLO='0'" cat "$H4/env"
 env MEMHOUSE_HOME="$H4" $CLI deploy --down >/dev/null 2>&1
 
+say "lockout guards: every way of asking for a different credential"
+H6="$TMP/home-lock"; mkdir -p "$H6"
+env MEMHOUSE_HOME="$H6" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
+assert_exit "--password on an initialised volume is refused" 2 \
+  env MEMHOUSE_HOME="$H6" $CLI deploy --local --house-port $PORT_CH --no-ship --password whatever
+assert_exit "MEMHOUSE_PASSWORD on an initialised volume is refused" 2 \
+  env MEMHOUSE_HOME="$H6" MEMHOUSE_PASSWORD=whatever $CLI deploy --local --house-port $PORT_CH --no-ship
+assert_out "the credential still works after the refusals" "connected:" env MEMHOUSE_HOME="$H6" $CLI status
+# A refusal must not have killed the daemons on its way to refusing.
+env MEMHOUSE_HOME="$H6" $CLI start >/dev/null 2>&1; sleep 1
+env MEMHOUSE_HOME="$H6" $CLI deploy --local --house-port $PORT_CH --no-ship --rotate-password >/dev/null 2>&1
+if [ -e "$H6/run/shipper.pid" ]; then ok "a refused redeploy leaves the daemons alone"; else bad "a refused redeploy killed the shipper"; fi
+env MEMHOUSE_HOME="$H6" $CLI stop >/dev/null 2>&1
+
+say "a bare redeploy keeps the house where it is"
+assert_out "persisted port is reused without the flag" "localhost:$PORT_CH" \
+  env MEMHOUSE_HOME="$H6" $CLI deploy --local --no-ship
+env MEMHOUSE_HOME="$H6" $CLI deploy --down >/dev/null 2>&1
+
+say "solo must not adopt somebody else's ClickHouse"
+H7="$TMP/home-adopt"; mkdir -p "$H7"
+env MEMHOUSE_HOME="$H7" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
+PWL=$(grep MEMHOUSE_PASSWORD "$H7/env" 2>/dev/null)
+assert_exit "deploy --solo onto the local house's port is refused" 2 \
+  env MEMHOUSE_HOME="$H7" MEMHOUSE_SOLO_DATA="$TMP/adopt-data" $CLI deploy --solo --house-port $PORT_CH --no-ship
+PWL2=$(grep MEMHOUSE_PASSWORD "$H7/env" 2>/dev/null)
+[ "$PWL" = "$PWL2" ] && ok "the local credential was not overwritten" || bad "credential overwritten — the CLI is locked out"
+env MEMHOUSE_HOME="$H7" $CLI deploy --down >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
