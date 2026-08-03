@@ -9,10 +9,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"        # sandbox/vm-e2e
 REPO="$(cd "$HERE/../.." && pwd)"                            # memhouse worktree root
 
-: "${GAUNTLET_DIR:=$HOME/DEV/agent-gauntlet}"
+: "${GAUNTLET_DIR:=$HOME/agent-realm/agent-gauntlet}"
 if [ ! -x "$GAUNTLET_DIR/run.sh" ]; then
   echo "run.sh: agent-gauntlet engine not found at \$GAUNTLET_DIR ($GAUNTLET_DIR)." >&2
-  echo "  clone it:  git clone https://github.com/ramazanpolat/agent-gauntlet \"$GAUNTLET_DIR\"" >&2
+  echo "  clone it:  git clone https://github.com/agent-realm/agent-gauntlet \"$GAUNTLET_DIR\"" >&2
   exit 2
 fi
 
