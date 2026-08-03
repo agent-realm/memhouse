@@ -130,6 +130,21 @@ async function chRows(cfg, sql, opts) {
   return text ? text.split('\n').map((l) => JSON.parse(l)) : [];
 }
 
+// Is the shipper alive, by whichever mechanism owns it? After `service install` the
+// pidfile is deliberately gone — the service took over — so a pidfile-only check reports
+// "not running" for every correctly service-managed install, and `doctor` fails on a
+// healthy machine. Returns { running, via }.
+function shipperHealth() {
+  const pid = pidOf('shipper');
+  if (pid) return { running: true, via: `daemon (pid ${pid})` };
+  try {
+    const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
+    const st = svc.status();
+    if (st.installed) return { running: st.running, via: `service (${st.kind})` };
+  } catch { /* no service integration on this platform */ }
+  return { running: false, via: null };
+}
+
 // Room routing for the CLI's own queries. The shipper and dashboard resolve rooms through
 // @clickhouse/client; the CLI speaks raw HTTP, so it asks the same question over its own
 // transport and builds the names with the same shared function.
@@ -377,7 +392,9 @@ async function cmdStart() {
       const ready = await dep.waitReady(cfg.url, { attempts: 40, delayMs: 500 });
       console.log(ready ? ok(`solo house answering on ${cfg.url}`)
         : bad(`solo house not answering on ${cfg.url} — see ${path.join(LOG_DIR, 'solo.log')}`));
-      if (!ready) return;
+      // Nonzero, or automation reads "started fine" from a run that started nothing:
+      // neither shipper nor dashboard is spawned past this point.
+      if (!ready) { process.exitCode = 1; return; }
     }
   }
   console.log(`  dashboard → http://localhost:${cfg.port}`);
@@ -399,6 +416,7 @@ async function cmdStatus() {
     config: fs.existsSync(ENV_FILE) ? ENV_FILE : null,
     url: cfg.url, db: cfg.db, user: cfg.user,
     daemons: { shipper: pidOf('shipper'), dashboard: pidOf('dashboard') },
+    shipper: shipperHealth(),
     connected: false,
   };
   try {
@@ -417,9 +435,8 @@ async function cmdStatus() {
   console.log(out.connected ? ok(`connected: ${cfg.url} / ${cfg.db} as ${cfg.user}`) : bad(`not connected: ${out.error || cfg.url}`));
   if (out.member) console.log(ok(`layout: per-member rooms for '${out.member}'`));
   if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
-  for (const [name, pid] of Object.entries(out.daemons)) {
-    console.log(pid ? ok(`${name}: running (pid ${pid})`) : warn(`${name}: not running`));
-  }
+  console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
+  console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
   if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${cfg.port}`);
 }
 
@@ -505,7 +522,8 @@ async function cmdDoctor() {
         : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
           : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
-  add(!!pidOf('shipper'), 'shipper daemon', 'memhouse start');
+  const sh = shipperHealth();
+  add(sh.running, `shipper${sh.via ? ` — ${sh.via}` : ''}`, 'memhouse start (or: memhouse service install)');
   add(!!pidOf('dashboard'), 'dashboard daemon', 'memhouse start');
   add(fs.existsSync(path.join(REPO_ROOT, 'public', 'index.html')), 'dashboard UI built', 'built automatically by memhouse start');
 
@@ -588,6 +606,16 @@ async function cmdReset() {
 }
 
 function cmdUninstall() {
+  // The OS service first, and this is not tidiness: it outlives the pidfile daemons by
+  // design, it holds the credential inlined in its unit file, and it restarts itself. An
+  // uninstall that stopped only the daemons would report success while a service kept
+  // shipping transcripts — with a credential in a file the user now believes is gone.
+  const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
+  const st = svc.status();
+  if (st.kind && (st.installed || st.solo?.installed)) {
+    const r = svc.uninstall();
+    console.log(r.ok ? ok(`service removed (${r.kind})`) : bad(`service NOT removed: ${r.msg}`));
+  }
   cmdStop();
   if (fs.existsSync(HOME_DIR)) fs.rmSync(HOME_DIR, { recursive: true });
   console.log(ok(`removed ${HOME_DIR} (the house data in ClickHouse is untouched)`));
@@ -673,6 +701,17 @@ function cmdUninstall() {
         // and then silently relocate the shim (and overwrite the saved port with it).
         const port = String(housePort || process.env.MEMHOUSE_SOLO_PORT || resolveConfig().soloPort || 8123);
         fs.mkdirSync(RUN_DIR, { recursive: true }); fs.mkdirSync(LOG_DIR, { recursive: true });
+        // An explicit port change while a shim is running has to move the shim. Otherwise
+        // `pidOf('solo')` suppresses the spawn, the old shim stays healthy on the old
+        // port, and the command waits 40s against a port nothing is listening on before
+        // failing — with the house working the whole time, on the address it used to use.
+        const runningPid = pidOf('solo');
+        if (runningPid && housePort && String(housePort) !== String(resolveConfig().soloPort || '')) {
+          console.log(warn(`solo house is on port ${resolveConfig().soloPort || '?'}; moving it to ${housePort}`));
+          try { process.kill(runningPid, 'SIGTERM'); } catch { /* raced */ }
+          try { fs.unlinkSync(path.join(RUN_DIR, 'solo.pid')); } catch { /* absent */ }
+          await new Promise((r) => setTimeout(r, 500)); // let the port free before rebinding
+        }
         if (!pidOf('solo')) {
           const log = fs.openSync(path.join(LOG_DIR, 'solo.log'), 'a');
           const child = spawn(process.execPath, [SOLO_JS], {

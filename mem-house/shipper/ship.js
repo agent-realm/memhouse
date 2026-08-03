@@ -455,19 +455,37 @@ async function main() {
       if (Number.isFinite(n) && n > 0) intervalSec = n;
     }
     let full = argv.includes('--full');
+    // A failed pass does NOT wait the full interval. The common failure at startup is
+    // that the house is not up yet — the solo shim is still opening its data directory,
+    // or the container is still booting — and sleeping 300s there means the first ship is
+    // five minutes late for a condition that clears in under a second. systemd's
+    // After= orders process start, not readiness, and launchd has no ordering at all, so
+    // this is the only place the race can be closed for every path at once.
+    // Backs off to the normal interval so a genuinely unreachable house is not hammered.
+    const RETRY_START_MS = 2000;
+    let retryMs = RETRY_START_MS;
     do {
       const t0 = Date.now();
+      let failed = false;
       try {
         const r = await runShip(client, { full });
         console.log(`[mem-house] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}) → ` +
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
+        failed = true;
         console.error(`[mem-house] pass failed: ${e.message}`);
         if (!loop) process.exitCode = 1;
       }
       full = false; // --full applies to the first pass only; loop passes stay incremental
       if (loop) {
-        await new Promise((r) => setTimeout(r, intervalSec * 1000));
+        const waitMs = failed ? Math.min(retryMs, intervalSec * 1000) : intervalSec * 1000;
+        if (failed) {
+          console.error(`[mem-house] retrying in ${Math.round(waitMs / 1000)}s`);
+          retryMs = Math.min(retryMs * 2, intervalSec * 1000);
+        } else {
+          retryMs = RETRY_START_MS;
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
         resetCaches(); // adapters cache chat lists; drop them so new sessions surface
       }
     } while (loop);
