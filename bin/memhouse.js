@@ -900,6 +900,33 @@ function cmdUninstall() {
         }
       }
 
+      // Moving the local house has the same two hazards the solo move has, and they were
+      // fixed there first: an occupied destination, and a shipper this loop cannot see.
+      {
+        const from = String(priorCfg.solo) === '1' ? '' : portOf(priorCfg.url);
+        const to = String(housePort || '');
+        if (to && from && to !== from) {
+          // A service-managed shipper keeps its own environment. Moving the container and
+          // the config out from under it leaves it retrying a dead endpoint forever while
+          // `status` cheerfully reports a running service.
+          let svcSt = { installed: false };
+          try { svcSt = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported */ }
+          if (svcSt.installed) {
+            console.log(bad(`the shipper is service-managed and holds ${priorCfg.url} — moving the house would leave it retrying a dead endpoint.`));
+            console.log('  memhouse service uninstall, then re-deploy on the new port, then memhouse service install');
+            process.exitCode = 2; break;
+          }
+          // And probe the destination before demolishing a working house, as the solo
+          // move does: `run -p` only discovers the conflict after the old container is
+          // gone, which leaves the house down on a port that was working.
+          if (await portInUse(to)) {
+            console.log(bad(`port ${to} is already in use — not moving the house off ${from}.`));
+            console.log('  free that port, or pick another with --house-port.');
+            process.exitCode = 2; break;
+          }
+        }
+      }
+
       // Validation passed. From here the command changes things.
       //
       // A running solo shim owns the port this container wants — 8123 for both by default

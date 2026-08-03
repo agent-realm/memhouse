@@ -165,6 +165,25 @@ assert_out "and the original house is still serving" "connected:" env MEMHOUSE_H
 kill $BLOCKER 2>/dev/null
 env MEMHOUSE_HOME="$H9" $CLI stop >/dev/null 2>&1
 
+say "local: moving the house has the same two guards as moving the shim"
+HA="$TMP/home-lmove"; mkdir -p "$HA"
+env MEMHOUSE_HOME="$HA" $CLI deploy --local --house-port $PORT_CH --no-ship >/dev/null 2>&1
+python3 -c "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',$((PORT_CH+7))));s.listen(1);time.sleep(30)" &
+BLOCKER2=$!; sleep 1
+assert_exit "moving the house onto an occupied port is refused" 2 \
+  env MEMHOUSE_HOME="$HA" $CLI deploy --local --house-port $((PORT_CH+7)) --no-ship
+assert_out "and the house is still where it was" "connected:" env MEMHOUSE_HOME="$HA" $CLI status
+kill $BLOCKER2 2>/dev/null
+if have_systemd; then
+  env MEMHOUSE_HOME="$HA" $CLI service install >/dev/null 2>&1; sleep 2
+  assert_exit "moving it under a service-managed shipper is refused" 2 \
+    env MEMHOUSE_HOME="$HA" $CLI deploy --local --house-port $((PORT_CH+8)) --no-ship
+  env MEMHOUSE_HOME="$HA" $CLI service uninstall >/dev/null 2>&1
+else
+  skip "service-managed local move (no user manager)"
+fi
+env MEMHOUSE_HOME="$HA" $CLI deploy --down >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
