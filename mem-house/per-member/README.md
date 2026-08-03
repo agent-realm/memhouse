@@ -18,10 +18,11 @@ This README is the living index; the design docs are versioned and never rewritt
 | [`PLAN-v5-2026-08-03-16_01.md`](PLAN-v5-2026-08-03-16_01.md) | the model, why, phases, measured facts |
 | [`PROVISIONING-v5-2026-08-03-16_01.md`](PROVISIONING-v5-2026-08-03-16_01.md) | the grant set, kernel capability, standalone path |
 | [`SCHEMA-v4-2026-08-02-22_58.md`](SCHEMA-v4-2026-08-02-22_58.md) | room naming, shapes, sort keys, Merge rooms (its `sessions_v`-as-a-saved-query section is superseded by v5: it is a stored view per member) |
-| [`SHARING-v3-2026-08-02-22_49.md`](SHARING-v3-2026-08-02-22_49.md) | whole-room self-serve, partial rows via the owner |
+| [`SHARING-v4-2026-08-03-17_02.md`](SHARING-v4-2026-08-03-17_02.md) | whole-room self-serve (four grants, including the view), partial rows via the owner |
 | [`MIGRATION-v3-2026-08-02-22_49.md`](MIGRATION-v3-2026-08-02-22_49.md) | **deferred**, and not blocked |
 
-Superseded, kept as written: [v4 PLAN](PLAN-v4-2026-08-02-22_58.md) ·
+Superseded, kept as written: [v3 SHARING](SHARING-v3-2026-08-02-22_49.md) ·
+[v4 PLAN](PLAN-v4-2026-08-02-22_58.md) ·
 [v4 PROVISIONING](PROVISIONING-v4-2026-08-02-22_58.md) ·
 [v3 PLAN](PLAN-v3-2026-08-02-22_49.md) ·
 [v3 SCHEMA](SCHEMA-v3-2026-08-02-22_49.md) · [v2 PLAN](PLAN-v2-2026-08-02-22_42.md) ·
@@ -41,7 +42,9 @@ view, all `WITH GRANT OPTION`. Isolation stops
 being a row policy that must be right everywhere and becomes a grant that is simply
 absent — it fails closed. Sharing a whole room needs no operator. Team-wide reads come
 from `Merge` rooms anchored on the room type (`^messages_`), which reduce to each caller's
-own grants, auto-discover new members, and tolerate schema drift.
+own grants, auto-discover new members, and tolerate schema drift — provided the caller
+holds `SELECT` on the Merge room itself, which provisioning issues; without it the team
+room denies instead of narrowing.
 `user_id MATERIALIZED currentUser()` stays on every room: unforgeable by members, who are
 not granted `EXECUTE AS`.
 
