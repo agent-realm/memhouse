@@ -174,7 +174,8 @@ Next steps:
   # -> installs memhouse-search / memhouse-sessions / memhouse-sql into
   #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills (loads next session)
 
-Verify anytime:
+Verify anytime (this installer sets up the shared-room layout; a per-member house
+names its rooms \`sessions_<you>\` and is set up with \`memhouse install --per-member\`):
   set -a; . "$ENV_FILE"; set +a
   curl -sS --user "\$MEMHOUSE_USER:\$MEMHOUSE_PASSWORD" --data-binary \\
     "SELECT count() FROM sessions" "\$MEMHOUSE_URL/?database=\$MEMHOUSE_DB&final=1"
