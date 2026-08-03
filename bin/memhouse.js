@@ -996,8 +996,25 @@ function cmdUninstall() {
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
       console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));
+
+      // PERSIST THE CREDENTIAL BEFORE WAITING. The container may initialise the volume
+      // and still not answer in time — it crashes and comes back later under
+      // `--restart unless-stopped`, the host is loaded, the image is cold. If the only
+      // copy of a generated password leaves with this process, the next `deploy --local`
+      // finds an initialised volume with nothing to reuse and correctly refuses, and the
+      // house that eventually came up is unreachable forever. The image applies the
+      // password only at first init, so there is no way back from that.
+      if (!reusable) {
+        writeEnvFile({ ...priorCfg, url: r.url, user: 'memhouse_root', password: pw, solo: '0', soloPort: '' });
+        console.log(ok(`credential saved to ${ENV_FILE} before waiting — the volume is initialised with it`));
+      }
+
       if (!(await dep.waitReady(r.url))) {
         console.log(bad(`ClickHouse did not answer on ${r.url} — check: ${r.engine} logs ${dep.CONTAINER}`));
+        if (!reusable) {
+          console.log(`  the credential is already saved in ${ENV_FILE.replace(os.homedir(), '~')}; re-run`);
+          console.log('  `memhouse deploy --local` once it is up and it will be reused, not regenerated.');
+        }
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));

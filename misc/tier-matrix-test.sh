@@ -222,6 +222,18 @@ assert_out "and the new database is usable" "brandnew" \
   curl -s -X POST "http://127.0.0.1:$((PORT_SOLO+10))/?database=brandnew" --data-binary "SELECT currentDatabase() FORMAT TabSeparated"
 env MEMHOUSE_HOME="$HC" $CLI stop >/dev/null 2>&1
 
+say "a generated credential survives the CLI dying mid-startup"
+HD="$TMP/home-crash"; mkdir -p "$HD"
+( env MEMHOUSE_HOME="$HD" $CLI deploy --local --house-port $((PORT_CH+3)) --no-ship >/dev/null 2>&1 & echo $! > "$TMP/crash.pid" )
+sleep 4; kill "$(cat "$TMP/crash.pid")" 2>/dev/null; sleep 1
+if grep -q MEMHOUSE_PASSWORD "$HD/env" 2>/dev/null; then ok "credential persisted before readiness"
+else bad "credential lost with the process — the volume is initialised and unreachable"; fi
+sleep 12
+assert_out "the redeploy reuses it instead of refusing" "reusing the existing house credential" \
+  env MEMHOUSE_HOME="$HD" $CLI deploy --local --house-port $((PORT_CH+3)) --no-ship
+assert_out "and it authenticates" "connected:" env MEMHOUSE_HOME="$HD" $CLI status
+env MEMHOUSE_HOME="$HD" $CLI deploy --down >/dev/null 2>&1
+
 say "service integration"
 if ! have_systemd; then
   skip "no usable systemctl --user on this host (normal in a container)"
