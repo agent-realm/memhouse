@@ -48,6 +48,35 @@ for (let i = 0; i < rest.length; i++) {
 }
 const JSON_OUT = flags.json === true;
 
+// A config written by the solo tier points at a shim this build cannot start. Left
+// alone it reads as an ordinary external house that happens to be down, so `start`
+// launches a shipper and dashboard against a dead endpoint and `doctor` reports a
+// generic connection failure. Refuse, and say the two things that actually work.
+//
+// Commands that are the way OUT — repointing the config, tearing the install down, or
+// anything that never touches the house — stay allowed.
+const LEGACY_SOLO_OK = new Set(['setup', 'uninstall', 'discover', 'plugins', 'prompt', 'stop', null]);
+
+function legacySoloGuard() {
+  let file = {};
+  try { file = envfile.parse(fs.readFileSync(ENV_FILE, 'utf-8')); } catch { return false; }
+  if (file.MEMHOUSE_SOLO !== '1') return false;
+  if (LEGACY_SOLO_OK.has(cmd)) return false;
+  console.log(bad(`${ENV_FILE.replace(os.homedir(), '~')} was written by the solo tier, which this version removed.`));
+  console.log(`  It points at ${file.MEMHOUSE_URL || 'an embedded shim'}, and nothing here can start that.`);
+  console.log('');
+  console.log('  Your transcripts are not lost — memhouse ships FROM your local session stores,');
+  console.log('  so a new house rebuilds them. Point at one and re-ship:');
+  console.log('     memhouse deploy --local          (a ClickHouse in docker or podman)');
+  console.log('     memhouse setup --url … --user … --password …   (one you already run)');
+  console.log('     memhouse ship --full');
+  console.log('');
+  console.log('  The old embedded data is chdb-format and only readable by chdb; keep');
+  console.log(`  ${path.join(HOME_DIR, 'solo-data').replace(os.homedir(), '~')} if you want it, or delete it.`);
+  console.log('  Then: memhouse stop   (reaps a shim still running from the old version)');
+  return true;
+}
+
 // ── config ──────────────────────────────────────────────────────────────────────
 function readEnvFile() {
   try { return envfile.parse(fs.readFileSync(ENV_FILE, 'utf-8')); } catch { return {}; }
@@ -415,9 +444,15 @@ async function cmdStart() {
   console.log(`  dashboard → http://localhost:${cfg.port}`);
 }
 
+// `solo` is here and NOT in the start list on purpose. The tier is gone, but a machine
+// that ran it before this upgrade can still have a detached shim alive with its pid in
+// run/solo.pid — and `uninstall` deletes MEMHOUSE_HOME, which is where its data directory
+// lives. Reaping has to outlive the feature; starting must not.
+const LEGACY_DAEMONS = ['solo'];
+
 function cmdStop() {
   let stopped = 0;
-  for (const name of ['shipper', 'dashboard']) {
+  for (const name of ['shipper', 'dashboard', ...LEGACY_DAEMONS]) {
     const pid = pidOf(name);
     if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`${name} stopped (pid ${pid})`)); stopped++; } catch { /* raced */ } }
     try { fs.unlinkSync(path.join(RUN_DIR, name + '.pid')); } catch { /* absent */ }
@@ -631,7 +666,9 @@ function cmdUninstall() {
   // shipping transcripts — with a credential in a file the user now believes is gone.
   const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
   const st = svc.status();
-  if (st.kind && st.installed) {
+  // `legacy` too: a machine that ran the solo tier can have a stale unit and no current
+  // one, and skipping the service step there leaves it enabled over a deleted home.
+  if (st.kind && (st.installed || (st.legacy || []).length)) {
     const r = svc.uninstall();
     if (!r.ok) {
       // Removing the home now would delete the env file while a service keeps shipping
@@ -651,6 +688,8 @@ function cmdUninstall() {
 // ── dispatch ────────────────────────────────────────────────────────────────────
 (async () => {
   const cfg = resolveConfig();
+  if (legacySoloGuard()) { process.exitCode = 2; return; }
+
   switch (cmd) {
     case null: case 'help': console.log(HELP); break;
     case 'version': console.log(PKG.version); break;
@@ -909,6 +948,7 @@ function cmdUninstall() {
         if (!st.kind) { console.log(warn(`no service integration for '${process.platform}'`)); break; }
         console.log(st.installed ? ok(`service installed (${st.kind}): ${st.path}`) : warn('service not installed'));
         console.log(st.running ? ok('service running') : warn('service not running'));
+        for (const f of st.legacy || []) console.log(warn(`stale unit from an older version: ${f} — remove with: memhouse service uninstall`));
       }
       break;
     }
