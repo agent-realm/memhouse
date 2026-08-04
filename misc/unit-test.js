@@ -75,6 +75,42 @@ test('handles that would need quoting are refused', () => {
   }
 });
 
+test("a handle whose room name is a shared-layout object is refused", () => {
+  // `sessions_v` is the shared rollup view. A member named `v` would mint a room with
+  // that exact name.
+  assert.throws(() => rooms.assertUsableMember('v'), /reserved/);
+  // Case-sensitive: ClickHouse identifiers are, so `sessions_V` is a different object and
+  // refusing it would be over-reach.
+  assert.doesNotThrow(() => rooms.assertUsableMember('V'));
+  // Not a blanket ban on short handles.
+  for (const good of ['a', 'b', 'vv', 'v1', 'victor']) {
+    assert.doesNotThrow(() => rooms.assertUsableMember(good), `refused '${good}'`);
+  }
+});
+
+test('the Merge selector matches the shared rollup view — which is why mixing is refused', () => {
+  // Measured on ClickHouse 26.7.1: in a database holding sessions_alice, sessions_bob and
+  // the shared `sessions_v` view, `Merge(currentDatabase(), '^sessions_')` matched all
+  // THREE and all_sessions returned 3 rows for 2 sessions.
+  //
+  // This is asserted rather than fixed by narrowing the pattern on purpose: a member may
+  // legitimately be named anything matching [A-Za-z][A-Za-z0-9_]*, so no selector can
+  // separate `sessions_v` from a member room by shape. The fix is refusing a house that
+  // holds both layouts (provision.js), not a cleverer regex.
+  // Read the pattern out of the template rather than restating it, so narrowing the
+  // template without removing the refusal fails here.
+  const tpl = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'mem-house', 'per-member', 'schema-merge.sql.tpl'), 'utf-8');
+  const m = tpl.match(/Merge\(currentDatabase\(\), '([^']+)'\)/);
+  assert.ok(m, 'no Merge selector found in schema-merge.sql.tpl');
+  const sel = new RegExp(m[1]);
+  assert.ok(sel.test('sessions_v'), 'the collision this guard exists for must be real');
+  assert.ok(sel.test('sessions_alice'));
+  assert.ok(!sel.test('all_sessions'), 'the Merge room must never match itself');
+  assert.ok(rooms.SHARED_OBJECTS.has('sessions_v'));
+  for (const t of rooms.ROOM_TYPES) assert.ok(rooms.SHARED_OBJECTS.has(t), `${t} missing`);
+});
+
 test('perMemberEnabled reads exactly MEM_PER_MEMBER=1', () => {
   const saved = process.env.MEM_PER_MEMBER;
   try {

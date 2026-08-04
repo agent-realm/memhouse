@@ -29,6 +29,16 @@ function assertUsableMember(member) {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
     throw new Error(`cannot build room names for user '${member}': expected [A-Za-z][A-Za-z0-9_]*`);
   }
+  // A handle whose room name IS a shared-layout object name. Only `v` does this today
+  // (`sessions_v` is the shared rollup view), and only that one name matters — but the
+  // check is written against SHARED_OBJECTS so it stays true if either set is renamed.
+  // Case-sensitive on purpose: ClickHouse identifiers are, so `sessions_V` is a different
+  // object and rejecting it would be over-reach.
+  for (const t of ROOM_TYPES) {
+    if (SHARED_OBJECTS.has(`${t}_${member}`)) {
+      throw new Error(`'${member}' is reserved: ${t}_${member} is the shared layout's own object name`);
+    }
+  }
 }
 
 /**
@@ -85,6 +95,18 @@ function sessionsRollup({ sessions, messages }) {
 const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
 
 /**
+ * Every object the SHARED layout owns in a house — `../schema.sql`, plus the rollup view.
+ *
+ * `sessions_v` is the dangerous one. It sits inside the `^sessions_` namespace the Merge
+ * rooms select on, so a house holding both layouts merges the shared rollup VIEW into the
+ * member session rooms. Measured on 26.7.1: two member rooms holding one row each made
+ * `all_sessions` return three, and the extra row is not a session. The base tables do not
+ * collide (`sessions` has no trailing underscore) but their presence still means the
+ * house is running the other layout, and one shipper cannot serve both.
+ */
+const SHARED_OBJECTS = new Set(['sessions', 'messages', 'tool_calls', 'sessions_v']);
+
+/**
  * Names, given the member the server reported. Shared by every caller so the two
  * transports in the tree (@clickhouse/client and the CLI's raw fetch) cannot drift into
  * two different naming rules.
@@ -133,6 +155,6 @@ function mergeRooms() {
 }
 
 module.exports = {
-  ROOM_TYPES, READ_SETTINGS, perMemberEnabled, assertUsableMember, sessionsRollup,
-  roomNames, currentUser, resolveRooms, mergeRooms,
+  ROOM_TYPES, READ_SETTINGS, SHARED_OBJECTS, perMemberEnabled, assertUsableMember,
+  sessionsRollup, roomNames, currentUser, resolveRooms, mergeRooms,
 };

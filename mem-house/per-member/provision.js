@@ -26,7 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@clickhouse/client');
-const { ROOM_TYPES, mergeRooms, assertUsableMember } = require('./rooms');
+const { ROOM_TYPES, SHARED_OBJECTS, mergeRooms, assertUsableMember } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -51,6 +51,25 @@ function statements(sql) {
     .split(/;\s*$/m)
     .map((s) => s.replace(/^\s*--.*$/gm, '').trim())
     .filter(Boolean);
+}
+
+/**
+ * Which shared-layout objects this house already holds.
+ *
+ * A house cannot run both layouts, and `sessions_v` does not merely coexist badly — it
+ * breaks the Merge rooms. The shared rollup view is named `sessions_v`, which the
+ * `^sessions_` selector matches, so `all_sessions` merges an aggregate view into the base
+ * session rooms and returns rows that are not sessions. Measured on 26.7.1: two member
+ * rooms holding one row each returned three.
+ */
+async function sharedLayoutPresent(client, database) {
+  const names = [...SHARED_OBJECTS];
+  const rs = await client.query({
+    query: `SELECT name FROM system.tables WHERE database = {db:String} AND name IN ({names:Array(String)}) ORDER BY name`,
+    query_params: { db: database, names },
+    format: 'JSONEachRow',
+  });
+  return (await rs.json()).map((r) => r.name);
 }
 
 /** Which of the three Merge rooms actually exist — a member may be provisioned first. */
@@ -79,6 +98,23 @@ async function main() {
 
   console.log(`[mem] provisioning in ${cfg.url} database '${cfg.database}' as '${cfg.username}'`);
   const client = createClient({ ...cfg, clickhouse_settings: { async_insert: 0 } });
+
+  // 0. Refuse a mixed house, BEFORE creating anything. Provisioning member rooms beside
+  // the shared layout leaves a house whose Merge rooms silently over-count and whose
+  // shipper reads whichever layout its own config names. Creating the rooms first and
+  // failing at the Merge step would leave exactly that half-built house behind.
+  const shared = await sharedLayoutPresent(client, cfg.database);
+  if (shared.length) {
+    console.error(`[mem] '${cfg.database}' already holds the shared layout: ${shared.join(', ')}`);
+    if (shared.includes('sessions_v')) {
+      console.error('[mem] `sessions_v` matches the `^sessions_` Merge selector, so all_sessions would');
+      console.error('[mem] merge the shared rollup view into the member rooms and count rows that are');
+      console.error('[mem] not sessions.');
+    }
+    console.error('[mem] give per-member rooms a house of their own (MEM_DB), or drop the shared layout first.');
+    await client.close();
+    process.exit(2);
+  }
 
   // 1. rooms
   const tpl = fs.readFileSync(path.join(here, 'schema-member.sql.tpl'), 'utf-8');

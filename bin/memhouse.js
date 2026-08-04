@@ -884,14 +884,24 @@ function cmdUninstall() {
         // from a different house.
         let svcCfg = { installed: false, url: null };
         try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
-        // Endpoint AND database. Same URL with a different database is still somewhere
-        // else: `deploy --local --db memories` over a service holding `memhouse` would
-        // pass a URL-only check and split reads from service writes.
+        // Endpoint AND database AND room layout. The destination is all three: same URL
+        // with a different database is somewhere else (`deploy --local --db memories`
+        // over a service holding `mem`), and same URL and database with a different
+        // LAYOUT is somewhere else too — an installed MEM_PER_MEMBER=1 service followed
+        // by a plain `deploy --local` leaves the service shipping into sessions_<member>
+        // while the CLI and dashboard read the shared rooms. Neither side errors; they
+        // just stop being the same house.
+        const targetPerMember = String(priorCfg.perMember || '0') === '1';
         const svcElsewhere = svcCfg.installed
-          && (!sameEndpoint(svcCfg.url, targetUrl) || (svcCfg.db && svcCfg.db !== targetDb));
+          && (!sameEndpoint(svcCfg.url, targetUrl)
+              || (svcCfg.db && svcCfg.db !== targetDb)
+              || svcCfg.perMember !== targetPerMember);
         if (svcElsewhere) {
-          const where = svcCfg.url ? `${svcCfg.url} / ${svcCfg.db || '?'}` : 'an endpoint this command cannot read';
-          console.log(bad(`the shipper is service-managed and holds ${where} — deploying to ${targetUrl} / ${targetDb} would leave it shipping there.`));
+          const layout = (pm) => (pm ? 'per-member' : 'shared');
+          const where = svcCfg.url
+            ? `${svcCfg.url} / ${svcCfg.db || '?'} / ${layout(svcCfg.perMember)} rooms`
+            : 'an endpoint this command cannot read';
+          console.log(bad(`the shipper is service-managed and holds ${where} — deploying to ${targetUrl} / ${targetDb} / ${layout(targetPerMember)} rooms would leave it shipping there.`));
           console.log('  memhouse service uninstall, then deploy, then memhouse service install');
           process.exitCode = 2; break;
         }
