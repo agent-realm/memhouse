@@ -260,6 +260,9 @@ memhouse ${PKG.version} — agent conversation memory across 17 editors
 
 Setup        onboard              interactive wizard: discover → configure → ship → start
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
+                                  with admin: --admin-user --admin-password [--member NAME]
+                                  builds house + user + rooms + grants, then verifies as
+                                  the member. The admin credential is never stored.
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
              uninstall            stop daemons + remove ${HOME_DIR.replace(os.homedir(), '~')} (house data untouched)
@@ -348,8 +351,130 @@ async function cmdDiscover() {
   if (out.memoryHouse) console.log(warn('memory-house detected on this machine (they coexist fine)'));
 }
 
+// ── the member handle ───────────────────────────────────────────────────────────
+// The ClickHouse user IS the identity; rooms are named for whatever the server answers
+// to currentUser(). The home directory only produces a SUGGESTION, and a suggestion that
+// had to be changed is printed rather than applied quietly — sanitizing collides
+// (`ramazan.polat` and `ramazan-polat` both land on `ramazan_polat`), so the human has to
+// see it.
+function suggestMember() {
+  const base = path.basename(os.homedir() || '');
+  const clean = base.replace(/[^A-Za-z0-9_]/g, '_');
+  if (!/^[A-Za-z]/.test(clean)) return { handle: null, why: `'${base}' does not start with a letter` };
+  if (clean === 'root') return { handle: null, why: "'root' is a container artefact, not a person" };
+  return { handle: clean, changed: clean !== base ? base : null };
+}
+
+function generatePassword() {
+  // 32 chars from a set with no shell or SQL metacharacters — this value is pasted into
+  // terminals and quoted into unit files, and a clever password is not worth a support case.
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  return Array.from(crypto.randomBytes(32)).map((b) => alphabet[b % alphabet.length]).join('');
+}
+
+/**
+ * Mode B — admin bootstrap. Five verbs, then a reconnect AS THE MEMBER before anything is
+ * written, because a mode that only ever proves the admin could do it has proven nothing
+ * about the credential it is about to persist.
+ *
+ * The admin credential is never persisted: not to the env file, not to a unit, not to a
+ * log. A shipper running as the house owner makes per-member rooms decoration.
+ */
+async function adminBootstrap(cfg, admin) {
+  const adminCfg = { ...cfg, user: admin.user, password: admin.password };
+  const q = (sql, opts) => ch(adminCfg, sql, opts);
+
+  try { await q('SELECT 1', { database: '' }); }
+  catch (e) { console.log(bad(`admin connection failed: ${e.message}`)); return null; }
+
+  // 1. the house
+  try { await q(`CREATE DATABASE IF NOT EXISTS ${cfg.db}`, { database: '' }); }
+  catch (e) {
+    try { await q('SELECT 1'); }
+    catch { console.log(bad(`house '${cfg.db}' does not exist and '${admin.user}' cannot create it: ${e.message}`)); return null; }
+  }
+
+  // 2. the user. An EXISTING user is refused: adopting one silently hands the second
+  // human the first's identity and rooms, and user_id MATERIALIZED currentUser() would
+  // stamp them identically, so nothing downstream would ever notice.
+  const exists = (await chRows(adminCfg, `SELECT name FROM system.users WHERE name = '${admin.member}'`, { database: '' })).length > 0;
+  let password = flags['member-password'] || null;
+  if (exists) {
+    if (flags['adopt-user'] !== true) {
+      console.log(bad(`ClickHouse user '${admin.member}' already exists in this house.`));
+      console.log('  Creating rooms for them would hand you their identity — user_id is stamped from');
+      console.log('  currentUser(), so their rows and yours would be indistinguishable.');
+      console.log('  If this is you on a new machine, prove it:');
+      console.log(`     memhouse install --adopt-user --member ${admin.member} --member-password '…' …`);
+      console.log(`  If it is someone else, pick another handle:  --member <name>`);
+      return null;
+    }
+    if (!password) { console.log(bad('--adopt-user requires --member-password — the password is the proof')); return null; }
+    try { await ch({ ...cfg, user: admin.member, password }, 'SELECT 1', { database: '' }); }
+    catch { console.log(bad(`--adopt-user: '${admin.member}' did not authenticate with that password`)); return null; }
+    console.log(ok(`adopted existing user '${admin.member}' (password verified)`));
+  } else {
+    if (!password) {
+      password = generatePassword();
+      console.log('');
+      console.log(`  password for '${admin.member}':  ${password}`);
+      console.log('  Shown once. It goes into ~/.memhouse/env; to change it later:');
+      console.log(`     ALTER USER ${admin.member} IDENTIFIED BY '…'   then: memhouse setup --password …`);
+      console.log('');
+    }
+    try { await q(`CREATE USER ${admin.member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}'`, { database: '' }); }
+    catch (e) { console.log(bad(`could not create user '${admin.member}': ${e.message}`)); return null; }
+    console.log(ok(`created ClickHouse user '${admin.member}'`));
+  }
+
+  // 3. rooms, 4. grants, 5. Merge rooms + their grant — provision.js owns all of it, so
+  // there is one implementation of the grant set rather than two that drift.
+  const provision = path.join(REPO_ROOT, 'mem-house', 'per-member', 'provision.js');
+  const rc = spawnSync(process.execPath, [provision, '--member', admin.member, '--merge'], {
+    stdio: 'inherit',
+    env: { ...process.env, MEM_URL: cfg.url, MEM_USER: admin.user, MEM_PASSWORD: admin.password, MEM_DB: cfg.db },
+  });
+  if (rc.status !== 0) { console.log(bad('provisioning failed — nothing was written')); return null; }
+
+  // The step that makes this trustworthy: stop being admin, and prove the credential we
+  // are about to persist actually reaches the rooms.
+  const memberCfg = { ...cfg, user: admin.member, password };
+  try {
+    const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN ('sessions_${admin.member}','messages_${admin.member}','tool_calls_${admin.member}')`, { database: '' });
+    if (Number(seen[0]?.n) !== 3) { console.log(bad(`'${admin.member}' cannot see all three of their rooms — nothing written`)); return null; }
+  } catch (e) { console.log(bad(`'${admin.member}' could not connect after provisioning: ${e.message}`)); return null; }
+  console.log(ok(`verified as '${admin.member}' — admin credential discarded, not stored`));
+  return memberCfg;
+}
+
 async function cmdInstall({ interactive }) {
   let cfg = resolveConfig();
+  const adminUser = flags['admin-user'];
+
+  // Mode B — admin bootstrap. Decided by one question: do you hold admin here?
+  if (adminUser) {
+    const s = suggestMember();
+    const member = flags.member || s.handle;
+    if (!member) { console.log(bad(`no member handle: ${s.why}. Pass --member <name>.`)); return 1; }
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
+      console.log(bad(`'${member}' cannot name a room — expected [A-Za-z][A-Za-z0-9_]*`));
+      return 1;
+    }
+    if (!flags.member && s.changed) console.log(warn(`member handle '${s.changed}' sanitized to '${member}' — pass --member to choose another`));
+    const built = await adminBootstrap(cfg, {
+      user: adminUser, password: flags['admin-password'] || '', member,
+    });
+    if (!built) return 1;
+    cfg = built;
+    writeEnvFile(cfg);
+    console.log(ok(`config written: ${ENV_FILE}`));
+    if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
+    console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
+    console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
+    console.log('     node mem-house/per-member/provision.js --member <name> --merge');
+    return 0;
+  }
+
   const haveAll = flags.yes === true || (flags.url && flags.user !== undefined);
   if (interactive || !haveAll) {
     console.log('mem-house connection (Enter keeps the default):');
@@ -363,8 +488,18 @@ async function cmdInstall({ interactive }) {
     console.log(bad(`invalid database name '${cfg.db}' — use letters, digits, underscore`));
     return 1;
   }
-  writeEnvFile(cfg);
-  console.log(ok(`config written: ${ENV_FILE}`));
+  // An existing config pointing somewhere ELSE is not a thing to overwrite in passing: a
+  // shipper or an installed service is still pointed at the old house, and rewriting the
+  // file orphans it with no error anywhere.
+  const prior = readEnvFile();
+  if (prior.MEMHOUSE_URL && flags.force !== true
+      && (!sameEndpoint(prior.MEMHOUSE_URL, cfg.url) || (prior.MEMHOUSE_DB && prior.MEMHOUSE_DB !== cfg.db))) {
+    console.log(bad(`${ENV_FILE} already points at ${prior.MEMHOUSE_URL} / ${prior.MEMHOUSE_DB || '?'}`));
+    console.log(`  installing over it would leave any running shipper or service on the old house.`);
+    console.log('     memhouse setup --url … --db …     (move deliberately)');
+    console.log('     memhouse install --force …        (overwrite anyway)');
+    return 1;
+  }
   // Preflight WITHOUT selecting the house — on a fresh standalone ClickHouse the
   // database doesn't exist yet, and selecting it would fail before we can create it.
   try { await ch(cfg, 'SELECT 1', { database: '' }); }
@@ -405,6 +540,10 @@ async function cmdInstall({ interactive }) {
     return 1;
   }
   console.log(ok(`rooms for '${r.member}': ${want.join(', ')}`));
+  // Written LAST, and only once everything above proved out. Writing it first leaves a
+  // config file behind every failed attempt, and the next command reads it as truth.
+  writeEnvFile(cfg);
+  console.log(ok(`config written: ${ENV_FILE}`));
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
   }
