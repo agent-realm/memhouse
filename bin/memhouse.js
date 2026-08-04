@@ -1038,7 +1038,30 @@ function cmdUninstall() {
       const pre = dep.preflight({ tag: flags.tag || process.env.MEMHOUSE_CH_TAG || dep.managedTag() || dep.DEFAULT_TAG });
       if (!pre.ok) { console.log(bad(pre.msg)); process.exitCode = 1; break; }
       const initialised = pre.initialised;
-      const reusable = initialised && priorCfg.password ? priorCfg.password : null;
+      // The port this house will actually bind, decided ONCE and used everywhere below.
+      //
+      // The persisted URL is deliberately NOT in this chain. It can point at an external
+      // house — a kernel realm, ClickHouse Cloud — and reusing a remote endpoint's port
+      // as a local container binding is meaningless. What carries forward is the port an
+      // existing MANAGED container publishes, which is the only thing that says "the
+      // local house lives here".
+      const managedPort = dep.publishedPort();
+      const port = String(housePort || process.env.MEMHOUSE_CH_PORT || managedPort || 8123);
+      const targetUrl = `http://localhost:${port}`;
+      // `initialised` is a fact about the DOCKER VOLUME. `priorCfg` is a fact about
+      // whatever the user last pointed at. Those are different things, and treating any
+      // non-empty password as the volume's is how they get confused: with the config
+      // repointed at an external house, the external credential would be handed to a
+      // container that ignores it (the image applies CLICKHOUSE_PASSWORD only when it
+      // initialises a data directory), auth would fail against the password the volume
+      // actually holds, and the env file would be rewritten with the wrong one — losing
+      // the working external config on the way past.
+      //
+      // So reuse only when the persisted config IS this local house: same endpoint as the
+      // one we are about to bind. When it is not, fall through to the missing-credential
+      // refusal below, which already says the right things.
+      const configIsLocalHouse = !!priorCfg.url && sameEndpoint(priorCfg.url, targetUrl);
+      const reusable = initialised && configIsLocalHouse && priorCfg.password ? priorCfg.password : null;
 
       // Every way of asking for a different password against an existing house. The image
       // applies CLICKHOUSE_PASSWORD only when it INITIALISES a data directory, so any of
@@ -1059,23 +1082,19 @@ function cmdUninstall() {
       // be ignored by the server and then written over the config as if it worked.
       if (initialised && !reusable) {
         console.log(bad(`the managed volume '${dep.VOLUME}' already holds a house, but no credential for it is available.`));
+        if (priorCfg.password && !configIsLocalHouse) {
+          console.log(`  ${ENV_FILE.replace(os.homedir(), '~')} holds a credential for ${priorCfg.url}, which is not this house —`);
+          console.log(`  reusing it would hand ${targetUrl} a password its volume was never initialised with.`);
+        }
         console.log('  a generated one would be ignored by the server: the image sets the password only at first init.');
         console.log(`  recover it from the old ${ENV_FILE.replace(os.homedir(), '~')}, or reset the user from inside the house,`);
         console.log('  or start over and lose the memory:  memhouse deploy --down');
         process.exitCode = 2; break;
       }
       // Moving the local house has two hazards: an occupied destination, and a shipper
-      // this loop cannot see.
-      // The port this house will actually bind, decided ONCE and used everywhere below.
+      // this loop cannot see. `port` and `targetUrl` are decided above, before the
+      // credential-reuse question, because answering that question needs them.
       //
-      // The persisted URL is deliberately NOT in this chain. It can point at an external
-      // house — a kernel realm, ClickHouse Cloud — and reusing a remote endpoint's port
-      // as a local container binding is meaningless. What carries forward is the port an
-      // existing MANAGED container publishes, which is the only thing that says "the
-      // local house lives here".
-      const managedPort = dep.publishedPort();
-      const port = String(housePort || process.env.MEMHOUSE_CH_PORT || managedPort || 8123);
-      const targetUrl = `http://localhost:${port}`;
       // The running image tag carries forward too. A house deployed with `--tag 26.7` and
       // then bare-redeployed would have its healthy newer container removed and its
       // volume mounted into 25.11 — and an older ClickHouse may simply refuse data and
