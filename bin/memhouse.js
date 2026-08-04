@@ -880,12 +880,19 @@ function cmdUninstall() {
           console.log('  memhouse service uninstall, then deploy, then memhouse service install');
           process.exitCode = 2; break;
         }
-        // And probe the destination before demolishing a working house: `run -p` only
-        // discovers the conflict after the old container is gone, which leaves the house
-        // down on a port that was working. Only when the port is actually CHANGING —
-        // rebinding the port a managed container already holds is not a conflict.
-        if (managedPort && port !== managedPort && await portInUse(port)) {
-          console.log(bad(`port ${port} is already in use — not moving the house off ${managedPort}.`));
+        // And probe the destination before demolishing anything: `run -p` only discovers
+        // the conflict after the old container is gone, and by then the shipper and the
+        // dashboard have been stopped too.
+        //
+        // The only case that needs no probe is rebinding the port a managed container
+        // ALREADY holds — that is not a conflict, it is the same house. Everything else,
+        // including a first deployment and a switch from an external house, is a
+        // destination we have not checked. Gating on `managedPort &&` skipped exactly
+        // those.
+        if (port !== managedPort && await portInUse(port)) {
+          console.log(bad(managedPort
+            ? `port ${port} is already in use — not moving the house off ${managedPort}.`
+            : `port ${port} is already in use — nothing was started or stopped.`));
           console.log('  free that port, or pick another with --house-port.');
           process.exitCode = 2; break;
         }
@@ -932,7 +939,12 @@ function cmdUninstall() {
       }
       console.log(ok('ClickHouse ready'));
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
-      flags.db = flags.db || process.env.MEMHOUSE_DB || 'memhouse';
+      // The configured database carries forward. A house installed with `--db memories`
+      // that got `memhouse` back on a bare redeploy would look emptied — cmdInstall
+      // creates and selects the new one, rewrites the env file, and an installed service
+      // (whose endpoint has not changed, so the takeover check correctly allows it) keeps
+      // shipping to the old database while everything else reads the new one.
+      flags.db = flags.db || process.env.MEMHOUSE_DB || priorCfg.db || 'memhouse';
       flags.yes = true;
       process.exitCode = await cmdInstall({ interactive: false });
       break;
