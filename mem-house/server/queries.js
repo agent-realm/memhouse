@@ -45,9 +45,9 @@ function getClient() {
 
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
-// Room routing. Under MEM_PER_MEMBER the rooms are named for the member
+// Room routing. Rooms are named for the member
 // (`messages_alice`), so a read layer hardcoding `messages` either hits a permission
-// error or — worse, on a house that still holds shared rooms — silently returns the old
+// error or, against a house provisioned for someone else, silently returns the wrong
 // shared-layout data. Every query below names its rooms as `{{sessions_v}}` and friends,
 // and this is the single place they are resolved.
 //
@@ -906,12 +906,11 @@ async function schema() {
     tables: tbls.map((t) => t.name),
     schema: out,
     rooms: {
-      perMember: r.perMember,
       member: r.member,
       sessions: r.sessions,
       messages: r.messages,
       tool_calls: r.tool_calls,
-      // A name in the shared layout, a parenthesised SELECT per member. Either drops
+      // A parenthesised SELECT, not a name. It drops
       // into a `FROM … AS c` unchanged, which is what the examples do with it.
       sessions_v: r.sessions_v,
     },

@@ -173,9 +173,9 @@ function install({ shipJs, envFile, logDir, interval = 300, home = null }) {
   fs.mkdirSync(logDir, { recursive: true });
   const node = process.execPath;
 
-  // The whole persisted config, so MEM_PER_MEMBER travels with it: a per-member install
+  // The whole persisted config, so the house a unit points at travels with it: an install
   // whose service forgot the layout switch would come back after a reboot writing to the
-  // shared rooms — which either fails on permissions or, on a house that still has them,
+  // another member's rooms — which either fails on permissions or, if it can read them,
   // quietly ships into the wrong place.
   const env = parseEnvFile(envFile);
   // MEMHOUSE_HOME is not in the env file — it is where the env file itself lives — and a
@@ -329,15 +329,15 @@ function isRunning(kind, unit, label) {
  * the current config — the two drift the moment anything is redeployed, and callers
  * asking "does this service care about the house I am removing?" need the unit's answer.
  *
- * Returns { installed, url, db, perMember } — null/false when undeterminable.
+ * Returns { installed, url, db } — null/false when undeterminable.
  */
 function installedConfig() {
   const kind = platform();
-  if (!kind) return { installed: false, url: null, db: null, perMember: false };
+  if (!kind) return { installed: false, url: null, db: null };
   const p = unitPaths()[kind];
-  if (!fs.existsSync(p)) return { installed: false, url: null, db: null, perMember: false };
+  if (!fs.existsSync(p)) return { installed: false, url: null, db: null };
   let text = '';
-  try { text = fs.readFileSync(p, 'utf-8'); } catch { return { installed: true, url: null, db: null, perMember: false }; }
+  try { text = fs.readFileSync(p, 'utf-8'); } catch { return { installed: true, url: null, db: null }; }
   const env = {};
   if (kind === 'systemd') {
     for (const m of text.matchAll(/^Environment=([A-Z0-9_]+)=(.*)$/gm)) {
@@ -357,7 +357,6 @@ function installedConfig() {
     // The endpoint is not the whole identity. A service on the same URL but a different
     // DATABASE — or a different room layout — is still shipping somewhere else.
     db: env.MEMHOUSE_DB || null,
-    perMember: env.MEM_PER_MEMBER === '1',
   };
 }
 

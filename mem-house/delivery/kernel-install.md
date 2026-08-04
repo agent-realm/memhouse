@@ -65,7 +65,7 @@ un-spoofably (`MATERIALIZED currentUser()`, `async_insert=0`).
 ## 4. Visibility: own-only vs team pool
 
 - **Own-only** (memory-house's model — each member sees only their own rows): the
-  **ego (the `kernel` user) or the mayor** applies `mem-house/rls.sql` (three row
+  **ego (the `kernel` user) or the mayor** mints each member's rooms (three
   policies bound to the `member` role). The owner cannot — `CREATE ROW POLICY` needs
   ACCESS MANAGEMENT, which the kernel withholds from agency owners by design.
 - **Team pool** (everyone sees everything): apply no policy; the owner GRANTs from

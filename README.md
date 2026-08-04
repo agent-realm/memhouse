@@ -20,7 +20,7 @@ memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
 
 | Path | What |
 |---|---|
-| `mem-house/` | the product: `DESIGN.md`, `schema.sql`, `rls.sql`, `shipper/`, `server/`, `delivery/` |
+| `mem-house/` | the product: `DESIGN.md`, `per-member/`, `shipper/`, `server/`, `delivery/` |
 | `editors/` | the 17 editor adapters (inherited from agentlytics; the crown jewels) |
 | `pricing.js` + `pricing.json` | the cost engine |
 | `ui/` | the dashboard SPA (built to `public/`, served unchanged by the memhouse server) |
@@ -110,17 +110,21 @@ service instead — systemd `--user` on Linux, a launchd LaunchAgent on macOS �
 takes over from the pidfile daemons. On Linux a `--user` unit stops at logout
 unless lingering is on, so install detects that and prints the `loginctl` command.
 
-### One set of rooms per member (unreleased)
+### One set of rooms per member
 
-`MEM_PER_MEMBER=1` (or `install --per-member`) switches the house from three shared
-rooms separated by a row policy to a set of rooms per member — `messages_alice`,
-`sessions_alice`, `tool_calls_alice` — where isolation is a grant that is simply
-absent rather than a policy that must be right everywhere. The session rollup stays a
-saved query over those rooms rather than a stored view, so there is no fourth object to
-provision, grant or collide with the team rooms; `memhouse sessions-query` prints it.
-Rooms are minted by the house owner (`mem-house/per-member/provision.js`); sharing
-a whole room is then self-serve, with no operator. Design and measurements:
-`mem-house/per-member/`.
+Every member owns their rooms — `messages_alice`, `sessions_alice`,
+`tool_calls_alice`. This is the only layout. Isolation is a grant that is simply
+absent, not a row policy that has to be right on every table and every read path, so it
+fails closed. A shared read is a Merge room (`all_sessions`) plus a GRANT, which reduces
+to whatever rooms the caller can already read — strictly less machinery than the policy
+it replaced.
+
+The session rollup is a saved query over those rooms rather than a stored view, so there
+is no fourth object to provision, grant, or collide with the team rooms;
+`memhouse sessions-query` prints it. On a house you own, `memhouse install` mints your
+three rooms and you are done. On someone else's, the owner mints them
+(`mem-house/per-member/provision.js`) and sharing a whole room is then self-serve, with
+no operator. Design and measurements: `mem-house/per-member/`.
 
 Every command is dual-mode: interactive for humans, `--yes`/flags/`--json` for
 agents — so an agent can self-install its own memory (`memhouse install --yes …`,

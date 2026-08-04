@@ -262,7 +262,7 @@ Everything else in the tree reads:
 | `user_id MATERIALIZED currentUser()` | your own insert | it *is* your insert | neither; part of the table |
 
 **The margin is the point: memhouse has no materialized views at all.** Every derived object is a
-plain `CREATE OR REPLACE VIEW` — verified across `mem-house/schema.sql` and
+plain `CREATE OR REPLACE VIEW` — verified across `mem-house/per-member/` and
 `agency/house-schema.sql`. So there is no borderline case to argue about, no scheduled refresh, no
 insert trigger. The shipper is not merely *a* resident; it is provably the *only* candidate in the
 repo. Strip it and every remaining moving part is a routine over rows nobody is writing any more.
@@ -313,10 +313,10 @@ but deliberately **not** in `README.md`'s top half, which holds to the public re
 |---|---|
 | **town** | the ClickHouse server instance the house is provisioned into |
 | **realm** | the deployment that town belongs to |
-| **ego** | the `kernel` ClickHouse user — runs `install-agency`, mints members, applies `rls.sql` |
-| **mayor** | the **human** owner: approves the install; can apply `rls.sql` directly (interim path) |
+| **ego** | the `kernel` ClickHouse user — runs `install-agency`, mints members and their rooms |
+| **mayor** | the **human** owner: approves the install; can mint rooms directly (interim path) |
 | **asking for something** | `install-agency{name:'memhouse'}`, `register-member{handle}` — rows in `sys.calls` |
-| **what you may do** | the owner grants on `mem.*`, plus the own-only row policies in `rls.sql` |
+| **what you may do** | the grants the owner issued on your own rooms; no policy, and nothing granted on anyone else's |
 
 ## Vocabulary specific to memhouse
 
@@ -387,6 +387,6 @@ Recorded so a later pass does not redo them:
 - **Manifest keys** — this repo has **no `realm.toml`** (no `.toml` files at all), so the
   `[[hall]]` → `[[house]]` / `[[house.room]]` / `entry_house` rename does not reach it. The
   `[[resident]]` block above is how memhouse *would* declare itself when a manifest lands.
-- **Materialized views** — none, anywhere. Verified across `mem-house/schema.sql` and
+- **Materialized views** — none, anywhere. Verified across `mem-house/per-member/` and
   `agency/house-schema.sql`; every derived object is `CREATE OR REPLACE VIEW`. This is what makes
   the resident test unambiguous here rather than a close call.

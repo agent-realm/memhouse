@@ -32,39 +32,34 @@ FORMAT PrettyCompact
 SQL
 ```
 
-## Room names
+## Room names — always suffixed
 
-Two layouts exist, and the table names differ between them. `~/.memhouse/env` says
-which one this house uses:
+Every member owns their own rooms, named for their ClickHouse user:
+`messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There are no unsuffixed rooms;
+the bare names fail with `UNKNOWN_TABLE` rather than returning nothing. You hold no grant
+on anyone else's rooms, so isolation is not something a query can work around.
 
-- `MEM_PER_MEMBER` unset or `0` — shared rooms. Use the names below as written.
-- `MEM_PER_MEMBER=1` — every member has their own rooms, named for their ClickHouse
-  user: `messages_alice`, `sessions_alice`, `tool_calls_alice`. A member holds no grant
-  on anyone else's, so the unsuffixed names below do not merely return nothing — they
-  fail with `UNKNOWN_TABLE`.
-  **There is no `sessions_v` in this layout.** The session rollup is a saved query over
-  those same rooms, not a stored object; `memhouse sessions-query` prints it for whoever
-  you are connected as, ready to paste into a `FROM (...) AS c` position.
-
-Resolve the suffix once, then substitute it into every table name:
+Resolve your own name once and substitute it into every table name below:
 
 ```bash
-MEM_SUFFIX=""
-if [ "${MEM_PER_MEMBER:-0}" = "1" ]; then
-  MEM_SUFFIX="_$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
-    --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-    "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
-fi
-# rooms: messages${MEM_SUFFIX}, sessions${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
-# rollup: `sessions_v` in the shared layout; `$(memhouse sessions-query)` per-member
+MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
+  --data-binary "SELECT currentUser() FORMAT TabSeparated" \
+  "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
+# rooms: messages_$MEM_ME, sessions_$MEM_ME, tool_calls_$MEM_ME
 ```
 
-**Whichever rollup you use, read with `join_use_nulls=1`.** The connection recipe above
-already sets it. Without it, ClickHouse's default outer-join behaviour gives an
-unmatched `m.seq` a default value instead of NULL, so a session with no messages reports
-`total_msgs = 1` rather than 0 — measured, not theoretical. The shared `sessions_v` view
-carries the setting internally; the per-member saved query cannot, because a subquery has
-no `SETTINGS` clause of its own.
+**There is no `sessions_v` object.** The session rollup is a saved query over those same
+rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
+paste into a `FROM (...) AS c` position.
+
+**Read the rollup with `join_use_nulls=1`.** The connection recipe above sets it. Without
+it, ClickHouse gives an unmatched `m.seq` a default instead of NULL, so a session with no
+messages reports `total_msgs = 1` rather than 0 — measured, not theoretical. A subquery
+has no `SETTINGS` clause of its own, so the setting has to come from the caller.
+
+If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
+across every member at once, narrowed to whatever grants you actually have — a Merge room
+reduces to the rooms the caller can read, so it fails closed rather than denying outright.
 
 ## Default listing
 
@@ -73,7 +68,7 @@ SELECT session_id, name, source, host, project,
        started, ended, total_msgs, user_msgs, assistant_msgs,
        output_tokens,
        substring(first_prompt, 1, 80) AS first_prompt
-FROM sessions_v
+FROM (the rollup from `memhouse sessions-query`)
 ORDER BY ended DESC
 LIMIT 20
 FORMAT PrettyCompact
@@ -94,7 +89,7 @@ Per-editor rollup ("where has my work been happening?"):
 ```sql
 SELECT source, count() AS sessions, sum(total_msgs) AS msgs,
        sum(output_tokens) AS out_tokens, max(ended) AS last_activity
-FROM sessions_v
+FROM (the rollup from `memhouse sessions-query`)
 GROUP BY source
 ORDER BY sessions DESC
 FORMAT PrettyCompact
@@ -104,7 +99,7 @@ Busiest projects this month:
 
 ```sql
 SELECT project, count() AS sessions, sum(assistant_msgs) AS assistant_msgs
-FROM sessions_v
+FROM (the rollup from `memhouse sessions-query`)
 WHERE ended > now() - INTERVAL 30 DAY AND project != ''
 GROUP BY project
 ORDER BY sessions DESC
@@ -125,5 +120,5 @@ FORMAT PrettyCompact
 
 A compact table: when, name (or first prompt), source, host, project, msgs,
 tokens. Offer to pull a full transcript next
-(`SELECT role, text FROM messages WHERE session_id = '…' ORDER BY seq`) or to
+(`SELECT role, text FROM messages_<you> WHERE session_id = '…' ORDER BY seq`) or to
 run memhouse-search for a specific quote.

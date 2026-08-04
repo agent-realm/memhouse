@@ -53,13 +53,11 @@ trap cleanup EXIT
 
 command -v podman >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 || { echo "no container engine — nothing to test"; exit 2; }
 
-say "per-member: install must not create the shared schema"
+say "per-member: install fails closed without a house"
 H2="$TMP/home-pm"; mkdir -p "$H2"
 # No server needed: it must refuse before it can even resolve rooms.
-assert_out "install --per-member fails closed without a house" "connection failed|has no |could not" \
-  env MEMHOUSE_HOME="$H2" MEM_PER_MEMBER=1 $CLI install --yes --url http://127.0.0.1:1 --user u --password p --db mem --no-ship
-assert_out "ship --ensure-schema refuses under MEM_PER_MEMBER" "provision.js --member" \
-  env MEM_PER_MEMBER=1 MEMHOUSE_URL=http://127.0.0.1:1 node "$REPO/mem-house/shipper/ship.js" --ensure-schema
+assert_out "install fails closed without a house" "connection failed|has no |could not" \
+  env MEMHOUSE_HOME="$H2" $CLI install --yes --url http://127.0.0.1:1 --user u --password p --db mem --no-ship
 
 say "local tier: credential survives a redeploy"
 H3="$TMP/home-local"; mkdir -p "$H3"

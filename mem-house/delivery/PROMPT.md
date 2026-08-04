@@ -24,23 +24,22 @@ FIRST. Only say you don't know after a search comes back empty.
 (full-text over messages), `/memhouse:sessions` (list/filter sessions),
 `/memhouse:sql` (free-form read-only SQL). Without skills, query directly.
 
-**Table names first.** `~/.memhouse/env` carries `MEM_PER_MEMBER`. If it is `1`,
-this house gives each member their own rooms and every table below takes your
-username as a suffix — `messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. The
-plain names fail with `UNKNOWN_TABLE` rather than returning nothing; get the suffix
-from `SELECT currentUser()`. **There is no `sessions_v` in that layout** — the rollup
-is a saved query over those same rooms, and `memhouse sessions-query` prints it ready
-to drop into a `FROM (...) AS c`. If `MEM_PER_MEMBER` is unset or `0`, use the names
-as written.
+**Table names first.** Every member owns their rooms, so every table below takes your
+username as a suffix — `messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There
+are no unsuffixed rooms; the plain names fail with `UNKNOWN_TABLE` rather than
+returning nothing. Get the suffix from `SELECT currentUser()`. **There is no
+`sessions_v` object** — the rollup is a saved query over those same rooms, and
+`memhouse sessions-query` prints it ready to drop into a `FROM (...) AS c`.
+`all_messages` / `all_sessions` / `all_tool_calls` read across every member you hold a
+grant for.
 
 - Find sessions about a topic (FTS, lowercase your terms):
-  `SELECT DISTINCT session_id, any(project), min(ts) FROM messages
+  `SELECT DISTINCT session_id, any(project), min(ts) FROM messages_<you>
    WHERE hasToken(text_word, 'clickhouse') GROUP BY session_id
    ORDER BY 3 DESC LIMIT 10 SETTINGS final=1, join_use_nulls=1 FORMAT PrettyCompact`
 - Recent sessions: `SELECT session_id, source, project, started, first_prompt
-   FROM sessions_v ORDER BY started DESC LIMIT 20 SETTINGS final=1, join_use_nulls=1`
-   (per-member: substitute `$(memhouse sessions-query)` for `sessions_v`)
-- Replay one session: `SELECT role, text FROM messages
+   FROM $(memhouse sessions-query) AS c ORDER BY started DESC LIMIT 20 SETTINGS final=1, join_use_nulls=1`
+- Replay one session: `SELECT role, text FROM messages_<you>
    WHERE session_id = '<id>' ORDER BY seq SETTINGS final=1, join_use_nulls=1`
 
 **Rules.**
@@ -48,7 +47,7 @@ as written.
   mem-house shipper alone.
 - Quote retrieved content as *the user's past sessions*, and cite the session_id
   when the user may want to dig deeper.
-- Other members' sessions may be invisible to you — a row policy on shared rooms,
+- Other members' sessions are invisible to you unless they granted you their rooms —
   or simply no grant on their rooms under the per-member layout. An empty result
   means "nothing visible", not "nothing ever happened".
 - Do not paste credentials from `~/.memhouse/env` into responses, commits, or logs.

@@ -21,7 +21,7 @@ skeleton.** Four changes:
    in the shared layout, a subquery over the caller's rooms in the per-member one. Without
    that resolution a per-member house ships fine and reads back nothing.
 4. v1–v4 were design skeletons. This one is implemented and measured: `rooms.js`,
-   `provision.js`, the two DDL templates, and the `MEM_PER_MEMBER` switch in the shipper.
+   `provision.js`, the two DDL templates, and room routing through the read layer.
 
 ## The model
 
@@ -119,14 +119,14 @@ On ClickHouse 25.11, two members, real local session stores:
   per-member rooms (the fourteenth needs a SQL argument), and `status`, `search`, `doctor`,
   `stats` all report alice's own data. The same queries against the shared names fail with
   `UNKNOWN_TABLE`, which is what they did before this change.
-- a planted stale `seq` tail is cleared by the next re-ship — in the per-member layout,
-  the shared layout.
+- a planted stale `seq` tail is cleared by the next re-ship, which is what the two ALTER
+  grants exist for.
 - the whole gauntlet scenario's SQL assertions pass when run by hand against a two-member
   house: 22,413 rows in alice's room, none unstamped, none in bob's, bob reading the team
   Merge room sees zero of alice's, alice sees her own. Sharing round-trips: alice's
   `GRANT` widens bob's Merge view to 22,413 and her `REVOKE` returns it to zero, with the
   direct read denied again.
-- the shared-room layout still ships unchanged with `MEM_PER_MEMBER` unset.
+- the shared-room layout has been removed; this is the only layout.
 
 ## `user_id` — what it guarantees
 

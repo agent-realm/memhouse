@@ -1,12 +1,12 @@
 # per-member rooms
 
-A fork of the mem-house data model: **one house, a set of rooms per member**, instead of
-one house with three rooms shared by everyone and separated by a row policy.
+**One house, a set of rooms per member.** This replaced a shared layout — three rooms
+named `sessions`/`messages`/`tool_calls` for everyone, separated by row policies — which
+has been removed. There is no switch and no fallback: this is the data model.
 
-**The design is implemented** — `rooms.js`, `provision.js`, the two DDL templates, room
-routing through the read layer, and the `MEM_PER_MEMBER` switch — and proven end to end on
-ClickHouse 26.7.1 and 25.11. The shared-room layout in `../DESIGN.md` and `../schema.sql`
-still ships and is unchanged; per-member is opt-in.
+**The design is implemented** — `rooms.js`, `provision.js`, the two DDL templates, and
+room routing through the read layer — and proven end to end on ClickHouse 26.7.1 and
+25.11.
 
 | Document | What |
 |---|---|

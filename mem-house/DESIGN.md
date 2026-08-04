@@ -56,11 +56,11 @@ side by side as separate agencies, each in its own house. Naming: the product is
    indexes built in (CH ≥ 26.2).
 3. **Kernel-installable agency.** Same install path proven for agentlytics-agency:
    `install-agency{memhouse}` → house + `memhouse_root` + credential; members via
-   `register-member` + owner `GRANT`; own-only visibility via the row policy
-   (`rls.sql`) applied by the ego (the `kernel` user) or the mayor. The shipper is
+   `register-member` + owner `GRANT` on that member's own rooms. Own-only visibility
+   needs no policy: a member is granted their rooms and nobody else's. The shipper is
    the resident that lands with it. Identity is `user_id MATERIALIZED currentUser()`
-   (requires `async_insert=0`). Sharing modes: own-only (policy TO member) or
-   team-pool (no policy).
+   (requires `async_insert=0`). Sharing is a further GRANT, issued by the member
+   themselves (grant-option) or the owner.
 4. **Borrowed UI, zero fork.** The React SPA consumes REST JSON, not tables. The
    mem-house server implements the **same `/api/*` contract** as agentlytics'
    `server.js` (same routes, same response shapes) over the mem-house schema, and
@@ -70,8 +70,9 @@ side by side as separate agencies, each in its own house. Naming: the product is
 
 | Path | What | Notes |
 |---|---|---|
-| `schema.sql` | the house schema (typed) | unqualified names; owner applies in its house |
-| `rls.sql` | own-only row policies | the ego (`kernel`) or the mayor applies (owner lacks ACCESS MANAGEMENT) |
+| `per-member/rooms.js` | room-name resolution + the session rollup | one naming rule for both transports |
+| `per-member/schema-member.sql.tpl` | one member's three rooms (typed) | the owner via `provision.js`, or the member on a house they own |
+| `per-member/schema-merge.sql.tpl` | the three team Merge rooms | owner-managed; reduce to the caller's grants |
 | `shipper/ship.js` | parse-on-client shipper CLI — the resident (`worker`) | reuses `../../editors`; incremental; idempotent |
 | `server/server.js` | REST API + dashboard | same API contract as agentlytics; serves `../../public` |
 | `delivery/` | delivery kit | installer, skills, plugin, AGENT-INSTALL.md, prompt |

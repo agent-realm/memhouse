@@ -31,39 +31,34 @@ SQL
 `FORMAT PrettyCompact` for display; `FORMAT JSONEachRow` when you want to parse
 the rows yourself.
 
-## Room names
+## Room names — always suffixed
 
-Two layouts exist, and the table names differ between them. `~/.memhouse/env` says
-which one this house uses:
+Every member owns their own rooms, named for their ClickHouse user:
+`messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There are no unsuffixed rooms;
+the bare names fail with `UNKNOWN_TABLE` rather than returning nothing. You hold no grant
+on anyone else's rooms, so isolation is not something a query can work around.
 
-- `MEM_PER_MEMBER` unset or `0` — shared rooms. Use the names below as written.
-- `MEM_PER_MEMBER=1` — every member has their own rooms, named for their ClickHouse
-  user: `messages_alice`, `sessions_alice`, `tool_calls_alice`. A member holds no grant
-  on anyone else's, so the unsuffixed names below do not merely return nothing — they
-  fail with `UNKNOWN_TABLE`.
-  **There is no `sessions_v` in this layout.** The session rollup is a saved query over
-  those same rooms, not a stored object; `memhouse sessions-query` prints it for whoever
-  you are connected as, ready to paste into a `FROM (...) AS c` position.
-
-Resolve the suffix once, then substitute it into every table name:
+Resolve your own name once and substitute it into every table name below:
 
 ```bash
-MEM_SUFFIX=""
-if [ "${MEM_PER_MEMBER:-0}" = "1" ]; then
-  MEM_SUFFIX="_$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
-    --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-    "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
-fi
-# rooms: messages${MEM_SUFFIX}, sessions${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
-# rollup: `sessions_v` in the shared layout; `$(memhouse sessions-query)` per-member
+MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
+  --data-binary "SELECT currentUser() FORMAT TabSeparated" \
+  "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
+# rooms: messages_$MEM_ME, sessions_$MEM_ME, tool_calls_$MEM_ME
 ```
 
-**Whichever rollup you use, read with `join_use_nulls=1`.** The connection recipe above
-already sets it. Without it, ClickHouse's default outer-join behaviour gives an
-unmatched `m.seq` a default value instead of NULL, so a session with no messages reports
-`total_msgs = 1` rather than 0 — measured, not theoretical. The shared `sessions_v` view
-carries the setting internally; the per-member saved query cannot, because a subquery has
-no `SETTINGS` clause of its own.
+**There is no `sessions_v` object.** The session rollup is a saved query over those same
+rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
+paste into a `FROM (...) AS c` position.
+
+**Read the rollup with `join_use_nulls=1`.** The connection recipe above sets it. Without
+it, ClickHouse gives an unmatched `m.seq` a default instead of NULL, so a session with no
+messages reports `total_msgs = 1` rather than 0 — measured, not theoretical. A subquery
+has no `SETTINGS` clause of its own, so the setting has to come from the caller.
+
+If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
+across every member at once, narrowed to whatever grants you actually have — a Merge room
+reduces to the rooms the caller can read, so it fails closed rather than denying outright.
 
 ## How to search (the FTS columns)
 
@@ -83,8 +78,8 @@ phrase → one `LIKE` clause for the whole phrase.
 SELECT m.ts, m.source, m.project, m.role, m.session_id,
        s.name AS session,
        substring(m.text, 1, 300) AS snippet
-FROM messages AS m
-LEFT JOIN sessions AS s USING (session_id)
+FROM messages_<you> AS m
+LEFT JOIN sessions_<you> AS s USING (session_id)
 WHERE m.text_ngram LIKE '%postgres%' AND m.text_ngram LIKE '%migration%'
 ORDER BY m.ts DESC
 LIMIT 30
@@ -95,7 +90,7 @@ FORMAT PrettyCompact
 
 ```sql
 SELECT ts, project, session_id, substring(text, 1, 200) AS snippet
-FROM messages
+FROM messages_<you>
 WHERE hasToken(text_word, 'rls')
   AND source = 'claude-code'
   AND ts > now() - INTERVAL 14 DAY
@@ -109,8 +104,8 @@ FORMAT PrettyCompact
 ```sql
 SELECT m.session_id, any(s.name) AS session, any(m.project) AS project,
        count() AS hits, max(m.ts) AS last_hit
-FROM messages AS m
-LEFT JOIN sessions AS s USING (session_id)
+FROM messages_<you> AS m
+LEFT JOIN sessions_<you> AS s USING (session_id)
 WHERE m.text_ngram LIKE '%clickhouse cache%'
 GROUP BY m.session_id
 ORDER BY hits DESC
@@ -134,6 +129,6 @@ FORMAT PrettyCompact
 
 Summarize hits grouped by session (name, source, project, date, 1–2 best
 snippets each) and give the total hit count. Offer to pull the full transcript
-of the best session (`SELECT role, text FROM messages WHERE session_id = '…'
+of the best session (`SELECT role, text FROM messages_<you> WHERE session_id = '…'
 ORDER BY seq`). If zero hits, retry with broader/fewer terms and report the
-corpus size (`SELECT count() FROM messages`).
+corpus size (`SELECT count() FROM messages_<you>`).

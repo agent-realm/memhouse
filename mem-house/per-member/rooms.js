@@ -1,56 +1,46 @@
-// Room-name resolution for the per-member layout.
+// Room-name resolution.
 //
-// The shared layout has three rooms named `sessions`, `messages`, `tool_calls`. The
-// per-member layout gives every member their own, named TYPE-FIRST:
-// `sessions_<member>`, `messages_<member>`, `tool_calls_<member>`.
+// Every member owns their rooms, named TYPE-FIRST: `sessions_<member>`,
+// `messages_<member>`, `tool_calls_<member>`. Type-first is what lets the Merge rooms
+// anchor on a fixed room type (`^sessions_`) and never match themselves.
 //
-// Which layout is in play is decided by MEM_PER_MEMBER, so one shipper serves both while
-// this fork is unproven. The member is never supplied by the caller — it is read back from
-// the server with currentUser(), the same value the rooms' user_id column is stamped with.
-// A client that could name its own member could write into someone else's rooms.
+// THIS IS THE ONLY LAYOUT. There was a shared one — three rooms named `sessions`,
+// `messages`, `tool_calls`, with row policies narrowing each caller to their own rows —
+// and it is gone. A shared read is a Merge room plus a GRANT, which is strictly less
+// machinery than a policy that has to be right on every table and every read path; and
+// isolation by absent grant fails closed, where a row policy fails open the moment one is
+// missing.
 //
-// `sessions_v` IS A SAVED QUERY HERE, NOT A ROOM. `SCHEMA-v4` decided that and it was
-// briefly implemented as a stored view instead; the view cost a name inside the
-// `^sessions_` namespace the Merge rooms select on (it was silently merged into
-// `all_sessions`, doubling every count), a fourth grant per member, and a fourth object
-// to provision, roll forward and drop. A saved query is substituted with the caller's own
+// The member is never supplied by the caller — it is read back from the server with
+// currentUser(), the same value the rooms' user_id column is stamped with. A client that
+// could name its own member could write into someone else's rooms.
+//
+// `sessions_v` IS A SAVED QUERY, NOT A ROOM. It was briefly a stored view, which cost a
+// name inside the `^sessions_` namespace the Merge rooms select on (silently merged into
+// `all_sessions`, doubling every count), a fourth grant per member, and a fourth object to
+// provision, roll forward and drop. A saved query is substituted with the caller's own
 // room names and runs under the caller's credential, so it inherits their grants and
 // raises no view-ownership question at all.
 
 const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
 
-function perMemberEnabled() {
-  return process.env.MEM_PER_MEMBER === '1';
-}
-
 // ClickHouse usernames are permissive; room names are not. Refuse anything that would
 // need quoting or could change how a Merge regex or a name-splitter reads.
 function assertUsableMember(member) {
-  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
+  if (typeof member !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
     throw new Error(`cannot build room names for user '${member}': expected [A-Za-z][A-Za-z0-9_]*`);
-  }
-  // A handle whose room name IS a shared-layout object name. Only `v` does this today
-  // (`sessions_v` is the shared rollup view), and only that one name matters — but the
-  // check is written against SHARED_OBJECTS so it stays true if either set is renamed.
-  // Case-sensitive on purpose: ClickHouse identifiers are, so `sessions_V` is a different
-  // object and rejecting it would be over-reach.
-  for (const t of ROOM_TYPES) {
-    if (SHARED_OBJECTS.has(`${t}_${member}`)) {
-      throw new Error(`'${member}' is reserved: ${t}_${member} is the shared layout's own object name`);
-    }
   }
 }
 
 /**
  * The session rollup, as SQL text rather than a name.
  *
- * Two properties of the shared `sessions_v` view must survive the port, and both are load
- * bearing: the join is a LEFT JOIN, so a session with no messages still appears with zero
- * aggregates instead of vanishing from every count; and `join_use_nulls = 1` makes the
- * unmatched message columns NULL so `coalesce` yields true zeros rather than counting the
- * placeholder row. The setting is applied by the CALLER (a client setting, not a trailing
- * SETTINGS clause) because this text is used as a subquery, and a subquery cannot carry
- * its own SETTINGS.
+ * Two properties are load bearing: the join is a LEFT JOIN, so a session with no messages
+ * still appears with zero aggregates instead of vanishing from every count; and
+ * `join_use_nulls = 1` makes the unmatched message columns NULL so `coalesce` yields true
+ * zeros rather than counting the placeholder row. The setting is applied by the CALLER (a
+ * client setting, not a trailing SETTINGS clause) because this text is used as a subquery,
+ * and a subquery cannot carry its own SETTINGS.
  */
 function sessionsRollup({ sessions, messages }) {
   return `(
@@ -88,41 +78,23 @@ function sessionsRollup({ sessions, messages }) {
 }
 
 /**
- * The settings every read needs, whichever layout is in play. `final` collapses
- * ReplacingMergeTree versions; `join_use_nulls` is what the rollup's coalesce depends on
- * and used to ride along inside the view's own SETTINGS clause.
+ * The settings every read needs. `final` collapses ReplacingMergeTree versions;
+ * `join_use_nulls` is what the rollup's coalesce depends on.
  */
 const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
-
-/**
- * Every object the SHARED layout owns in a house — `../schema.sql`, plus the rollup view.
- *
- * `sessions_v` is the dangerous one. It sits inside the `^sessions_` namespace the Merge
- * rooms select on, so a house holding both layouts merges the shared rollup VIEW into the
- * member session rooms. Measured on 26.7.1: two member rooms holding one row each made
- * `all_sessions` return three, and the extra row is not a session. The base tables do not
- * collide (`sessions` has no trailing underscore) but their presence still means the
- * house is running the other layout, and one shipper cannot serve both.
- */
-const SHARED_OBJECTS = new Set(['sessions', 'messages', 'tool_calls', 'sessions_v']);
 
 /**
  * Names, given the member the server reported. Shared by every caller so the two
  * transports in the tree (@clickhouse/client and the CLI's raw fetch) cannot drift into
  * two different naming rules.
  *
- * `member` null means the shared layout. `sessions_v` is the shared layout's stored view
- * by name, and the per-member layout's rollup as SQL text — both usable in the same
- * `FROM ... AS c` position, which is the whole point.
+ * `sessions_v` is the rollup as SQL text, usable in the same `FROM ... AS c` position a
+ * view name would occupy — which is what lets the read layer treat it as just another
+ * resolved name.
  */
 function roomNames(member, user = member) {
-  const out = { member, user, perMember: member !== null };
-  if (member === null) {
-    for (const t of ROOM_TYPES) out[t] = t;
-    out.sessions_v = 'sessions_v';
-    return out;
-  }
   assertUsableMember(member);
+  const out = { member, user };
   for (const t of ROOM_TYPES) out[t] = `${t}_${member}`;
   out.sessions_v = sessionsRollup(out);
   return out;
@@ -138,14 +110,14 @@ async function currentUser(client) {
 
 /**
  * Resolve the rooms for whoever this client is connected as.
- * Returns { sessions, messages, tool_calls, sessions_v, member, user, perMember }.
+ * Returns { sessions, messages, tool_calls, sessions_v, member, user }.
  *
- * `user` is the identity the server reports, and is resolved in BOTH layouts — writers
- * need the value itself, not just the name it produces. See ship.js's delete.
+ * `user` is the identity the server reports. Writers need the value itself, not just the
+ * name it produces — see ship.js's delete, which must BIND the user rather than call
+ * currentUser() inside a mutation, where it is not evaluated in the caller's context.
  */
 async function resolveRooms(client) {
   const user = await currentUser(client);
-  if (!perMemberEnabled()) return roomNames(null, user);
   return roomNames(user, user);
 }
 
@@ -155,6 +127,6 @@ function mergeRooms() {
 }
 
 module.exports = {
-  ROOM_TYPES, READ_SETTINGS, SHARED_OBJECTS, perMemberEnabled, assertUsableMember,
+  ROOM_TYPES, READ_SETTINGS, assertUsableMember,
   sessionsRollup, roomNames, currentUser, resolveRooms, mergeRooms,
 };

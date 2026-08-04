@@ -105,12 +105,6 @@ function resolveConfig() {
     password: pick('password', 'MEMHOUSE_PASSWORD', ''),
     db: pick('db', 'MEMHOUSE_DB', 'mem'),
     port: pick('port', 'MEMHOUSE_PORT', '4640'),
-    // Which room layout this house uses. It has to be part of the persisted config, not a
-    // variable that happens to be exported in one shell: the shipper, the dashboard, the
-    // CLI's own queries and the installed OS service must all agree, or one of them reads
-    // (or writes) the wrong rooms.
-    perMember: (flags['per-member'] === true ? '1' : null)
-      ?? process.env.MEM_PER_MEMBER ?? file.MEM_PER_MEMBER ?? '0',
   };
 }
 
@@ -119,7 +113,6 @@ function childEnv(cfg) {
     ...process.env,
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
-    MEM_PER_MEMBER: String(cfg.perMember || '0'),
   };
 }
 
@@ -135,7 +128,6 @@ function writeEnvFile(cfg) {
     `MEMHOUSE_PASSWORD=${sq(cfg.password)}`,
     `MEMHOUSE_DB=${sq(cfg.db)}`,
     `MEMHOUSE_PORT=${sq(cfg.port)}`,
-    `MEM_PER_MEMBER=${sq(cfg.perMember || '0')}`,
     '',
   ].join('\n');
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
@@ -216,10 +208,9 @@ function shipperHealth() {
 let _rooms = null;
 async function roomsFor(cfg) {
   if (_rooms) return _rooms;
-  if (String(cfg.perMember || '0') !== '1') { _rooms = roomNames(null); return _rooms; }
   const rows = await chRows(cfg, 'SELECT currentUser() AS u');
   const member = rows[0] && rows[0].u;
-  if (!member) throw new Error('could not determine currentUser() for per-member room resolution');
+  if (!member) throw new Error('could not determine currentUser() for room resolution');
   _rooms = roomNames(member);
   return _rooms;
 }
@@ -292,7 +283,6 @@ House        deploy --local       run ClickHouse in docker/podman, then install
              service uninstall | status
 
 Config: flags > MEMHOUSE_* env > ${ENV_FILE.replace(os.homedir(), '~')} > defaults.
-Layout: --per-member (or MEM_PER_MEMBER=1) uses one set of rooms per member; persisted.
 Engine: MEMHOUSE_ENGINE pins docker or podman when both are installed and one cannot answer.
 `;
 
@@ -389,27 +379,32 @@ async function cmdInstall({ interactive }) {
     catch { console.log(bad(`house '${cfg.db}' does not exist and cannot be created: ${e.message}`)); return 1; }
   }
   console.log(ok(`house '${cfg.db}' ready`));
-  // Rooms. In the shared layout the installer creates them; in the per-member layout the
-  // OWNER mints them and the member cannot (nor should) run the shared schema — so here
-  // the step is a check, not a creation, and it names the command that fixes it.
-  if (String(cfg.perMember) === '1') {
-    const r = await roomsFor(cfg);
-    // Three rooms. The session rollup is a saved query over them, not a fourth object.
-    const want = ROOM_TYPES.map((t) => r[t]);
-    let present = [];
-    try {
-      const list = `'${want.join("','")}'`;
-      present = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${list})`, { database: '' })).map((x) => x.name);
-    } catch (e) { console.log(bad(`could not list rooms: ${e.message}`)); return 1; }
-    const missing = want.filter((n) => !present.includes(n));
-    if (missing.length) {
-      console.log(bad(`per-member layout: '${r.member}' has no ${missing.join(', ')} in '${cfg.db}'`));
-      console.log('  rooms are minted by the house owner, not by install. Ask them to run:');
-      console.log(`    node mem-house/per-member/provision.js --member ${r.member}`);
-      return 1;
-    }
-    console.log(ok(`rooms present for '${r.member}': ${want.join(', ')}`));
-  } else if (run(SHIP_JS, ['--ensure-schema'], cfg) !== 0) return 1;
+  // Rooms — the caller's own three. On a house you own this creates them and you are
+  // done, which is the solo path. On a house someone else owns you hold no CREATE TABLE,
+  // and that is not a failure to paper over: rooms and grants are minted by the owner, so
+  // the step reports what is missing and names the command that fixes it.
+  const r = await roomsFor(cfg);
+  // Three rooms. The session rollup is a saved query over them, not a fourth object.
+  const want = ROOM_TYPES.map((t) => r[t]);
+  const present = async () => {
+    const list = `'${want.join("','")}'`;
+    return (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${list})`, { database: '' })).map((x) => x.name);
+  };
+  let have = [];
+  try { have = await present(); } catch (e) { console.log(bad(`could not list rooms: ${e.message}`)); return 1; }
+  if (have.length !== want.length) {
+    // Try to mint them as ourselves before asking anyone for anything.
+    run(SHIP_JS, ['--ensure-schema'], cfg);
+    try { have = await present(); } catch { /* reported below */ }
+  }
+  const missing = want.filter((n) => !have.includes(n));
+  if (missing.length) {
+    console.log(bad(`'${r.member}' has no ${missing.join(', ')} in '${cfg.db}', and could not create them`));
+    console.log('  you hold no CREATE TABLE here, so the house owner mints them. Ask them to run:');
+    console.log(`    node mem-house/per-member/provision.js --member ${r.member}`);
+    return 1;
+  }
+  console.log(ok(`rooms for '${r.member}': ${want.join(', ')}`));
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
   }
@@ -502,7 +497,7 @@ async function cmdStatus() {
   try {
     out.connected = true && !!(await ch(cfg, 'SELECT 1'));
     const r = await roomsFor(cfg);
-    if (r.perMember) out.member = r.member;
+    out.member = r.member;
     const s = await chRows(cfg, `SELECT count() AS sessions FROM ${r.sessions_v}`);
     const m = await chRows(cfg, `SELECT count() AS msgs, formatDateTime(max(ingested_at), '%Y-%m-%d %H:%i:%S') AS freshest FROM ${r.messages}`);
     out.sessions = Number(s[0]?.sessions || 0);
@@ -513,7 +508,7 @@ async function cmdStatus() {
   if (JSON_OUT) return console.log(JSON.stringify(out, null, 2));
   console.log(out.config ? ok(`config: ${out.config}`) : warn('no config (memhouse install)'));
   console.log(out.connected ? ok(`connected: ${cfg.url} / ${cfg.db} as ${cfg.user}`) : bad(`not connected: ${out.error || cfg.url}`));
-  if (out.member) console.log(ok(`layout: per-member rooms for '${out.member}'`));
+  if (out.member) console.log(ok(`rooms for '${out.member}'`));
   if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
   console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
@@ -530,9 +525,9 @@ async function cmdDoctor() {
   add(fs.existsSync(ENV_FILE), `config ${ENV_FILE}`, 'run: memhouse install');
   try { await ch(cfg, 'SELECT 1', { database: '' }); add(true, `clickhouse reachable (${cfg.url})`); }
   catch (e) { add(false, `clickhouse reachable (${cfg.url})`, e.message); }
-  let rooms = roomNames(null);
+  let rooms = null;
   try { rooms = await roomsFor(cfg); } catch (e) { add(false, 'room resolution', e.message); }
-  if (rooms.perMember) add(true, `layout: per-member rooms for '${rooms.member}'`);
+  if (rooms) add(true, `rooms for '${rooms.member}'`);
   try {
     // Three rooms. The session rollup every read path goes through is a saved query over
     // exactly these, so if they are here it is too — there is no fourth object to lose.
@@ -540,7 +535,7 @@ async function cmdDoctor() {
     const want = objects.map((n) => `'${n}'`).join(',');
     const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
     add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
-      rooms.perMember ? `run, as the owner: node mem-house/per-member/provision.js --member ${rooms.member}` : 'run: memhouse install (ensure-schema)');
+      `run: memhouse install, or as the owner: node mem-house/per-member/provision.js --member ${rooms.member}`);
   } catch (e) { add(false, 'schema check', e.message); }
   try {
     const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
@@ -767,7 +762,7 @@ function cmdUninstall() {
       const cfg = resolveConfig();
       const r = await roomsFor(cfg);
       console.log(r.sessions_v);
-      if (!JSON_OUT && r.perMember) {
+      if (!JSON_OUT) {
         console.error(`-- rollup for '${r.member}'. Read with final=1 and join_use_nulls=1.`);
       }
       break;
@@ -884,24 +879,14 @@ function cmdUninstall() {
         // from a different house.
         let svcCfg = { installed: false, url: null };
         try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
-        // Endpoint AND database AND room layout. The destination is all three: same URL
-        // with a different database is somewhere else (`deploy --local --db memories`
-        // over a service holding `mem`), and same URL and database with a different
-        // LAYOUT is somewhere else too — an installed MEM_PER_MEMBER=1 service followed
-        // by a plain `deploy --local` leaves the service shipping into sessions_<member>
-        // while the CLI and dashboard read the shared rooms. Neither side errors; they
-        // just stop being the same house.
-        const targetPerMember = String(priorCfg.perMember || '0') === '1';
+        // Endpoint AND database. Same URL with a different database is still somewhere
+        // else: `deploy --local --db memories` over a service holding `mem` would pass a
+        // URL-only check and split reads from service writes.
         const svcElsewhere = svcCfg.installed
-          && (!sameEndpoint(svcCfg.url, targetUrl)
-              || (svcCfg.db && svcCfg.db !== targetDb)
-              || svcCfg.perMember !== targetPerMember);
+          && (!sameEndpoint(svcCfg.url, targetUrl) || (svcCfg.db && svcCfg.db !== targetDb));
         if (svcElsewhere) {
-          const layout = (pm) => (pm ? 'per-member' : 'shared');
-          const where = svcCfg.url
-            ? `${svcCfg.url} / ${svcCfg.db || '?'} / ${layout(svcCfg.perMember)} rooms`
-            : 'an endpoint this command cannot read';
-          console.log(bad(`the shipper is service-managed and holds ${where} — deploying to ${targetUrl} / ${targetDb} / ${layout(targetPerMember)} rooms would leave it shipping there.`));
+          const where = svcCfg.url ? `${svcCfg.url} / ${svcCfg.db || '?'}` : 'an endpoint this command cannot read';
+          console.log(bad(`the shipper is service-managed and holds ${where} — deploying to ${targetUrl} / ${targetDb} would leave it shipping there.`));
           console.log('  memhouse service uninstall, then deploy, then memhouse service install');
           process.exitCode = 2; break;
         }

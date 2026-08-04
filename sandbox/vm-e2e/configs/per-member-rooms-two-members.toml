@@ -11,8 +11,8 @@
 # "Config schema". sql-count runs in-clone via ssh against an explicit endpoint, so it
 # needs no CLI subcommand on the subject.
 #
-# NOTE: this scenario targets the per-member fork (MEM_PER_MEMBER=1, house `mem`), not
-# the shipped shared-room layout. It is expected to FAIL against master.
+# NOTE: this scenario targets the per-member data model in house `mem`. It is expected to
+# FAIL against master, which still ships the removed shared-room layout.
 #
 # PRECONDITION — the house is NOT reset by the clone. The gauntlet's "hypervisor is the
 # reset" tenet covers the VM, not the external ClickHouse. Before running, the house must

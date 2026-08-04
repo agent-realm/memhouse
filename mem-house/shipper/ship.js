@@ -17,7 +17,7 @@
 // CLI:  node ship.js                one incremental pass
 //       node ship.js --loop [sec]   repeat every sec seconds (default 300)
 //       node ship.js --full         ignore the incremental skip (re-ship everything)
-//       node ship.js --ensure-schema  apply ../schema.sql and exit
+//       node ship.js --ensure-schema  create the caller's own rooms and exit
 //       node ship.js --stats        per-source counts from sessions_v and exit
 //
 // Env (DESIGN.md contract): MEMHOUSE_URL / MEMHOUSE_USER / MEMHOUSE_PASSWORD /
@@ -30,7 +30,7 @@ const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
-const { resolveRooms, perMemberEnabled, READ_SETTINGS } = require('../per-member/rooms');
+const { resolveRooms, READ_SETTINGS } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -98,20 +98,21 @@ function makeClient() {
   });
 }
 
-// Apply ../schema.sql statement by statement. Comments are stripped BEFORE the ';'
-// split — schema comments legitimately contain semicolons.
+// Create the CALLER'S OWN rooms, from ../per-member/schema-member.sql.tpl. Comments are
+// stripped BEFORE the ';' split — schema comments legitimately contain semicolons.
+//
+// This is the solo path: on a house you own, `memhouse install` mints your three rooms and
+// you are done. It creates nobody else's — the template is rendered for currentUser(), the
+// same identity the rooms' user_id is stamped with, so a client cannot name its way into
+// someone else's rooms.
+//
+// It does NOT issue grants or create the Merge rooms. A solo owner needs neither. Adding a
+// SECOND member — grants, Merge rooms, sharing — is owner work and lives in
+// ../per-member/provision.js.
 async function ensureSchema(client) {
-  // schema.sql is the SHARED layout — three rooms named `sessions`/`messages`/
-  // `tool_calls` plus `sessions_v`. Applying it to a per-member house would create a
-  // second, unused set of rooms beside the members' own, and fail outright for a member
-  // who holds no CREATE TABLE. Rooms in that layout are minted per member by the owner.
-  if (perMemberEnabled()) {
-    throw new Error(
-      'MEM_PER_MEMBER=1: rooms are created per member by the owner, not by --ensure-schema.\n'
-      + '  Run, as the owner:  node mem-house/per-member/provision.js --member <name>',
-    );
-  }
-  const sql = fs.readFileSync(path.join(__dirname, '..', 'schema.sql'), 'utf-8');
+  const { member } = await resolveRooms(client);
+  const tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+  const sql = tpl.replaceAll('{{MEMBER}}', member);
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
   for (const q of stmts) {
@@ -406,8 +407,7 @@ function reportAdapterErrors(warned) {
 }
 
 // Per-source rollup straight from sessions_v (final=1 so ReplacingMergeTree collapses).
-// The view is per-member under MEM_PER_MEMBER, so it resolves like the rooms do — reading
-// the shared `sessions_v` from a per-member house reports someone else's totals or none.
+// The rollup resolves like the rooms do — it is a subquery over the caller's own rooms.
 async function printStats(client) {
   const rooms = await resolveRooms(client);
   const rs = await client.query({

@@ -5,9 +5,8 @@
 // mis-decoded credential authenticates as nobody.
 //
 // Two cases here exist specifically to keep a defect from coming back:
-//   * `viewName` must not produce a name the Merge selector can match. It did, and
-//     `all_sessions` double-counted every session (161 -> 322) until the view moved to
-//     the `v_` prefix.
+//   * a Merge selector must not match the Merge room it defines. One did, and
+//     `all_sessions` double-counted every session (161 -> 322).
 //   * `envfile.parse` must decode the `'\''` escape it writes. A parser that only
 //     stripped the outer quotes handed the shipper a different password than the
 //     interactive commands used, and the only symptom was an auth failure.
@@ -27,31 +26,24 @@ function test(name, fn) {
 }
 
 // ── room names ──────────────────────────────────────────────────────────────────
-test('shared layout uses the bare names', () => {
-  const r = rooms.roomNames(null);
-  assert.strictEqual(r.sessions, 'sessions');
-  assert.strictEqual(r.messages, 'messages');
-  assert.strictEqual(r.tool_calls, 'tool_calls');
-  assert.strictEqual(r.sessions_v, 'sessions_v');
-  assert.strictEqual(r.perMember, false);
-});
-
-test('per-member layout suffixes rooms with the member', () => {
+test('rooms are suffixed with the member', () => {
   const r = rooms.roomNames('alice');
   assert.strictEqual(r.sessions, 'sessions_alice');
   assert.strictEqual(r.messages, 'messages_alice');
   assert.strictEqual(r.tool_calls, 'tool_calls_alice');
-  assert.strictEqual(r.perMember, true);
   assert.strictEqual(r.member, 'alice');
 });
 
+test('there is no shared layout to fall back to', () => {
+  // roomNames used to accept null for three bare rooms. A caller that still passes null
+  // must fail loudly rather than silently addressing rooms nobody writes.
+  for (const bad of [null, undefined]) assert.throws(() => rooms.roomNames(bad), /expected/);
+});
+
 test('the session rollup is a QUERY, not a fourth object', () => {
-  const shared = rooms.roomNames(null);
   const alice = rooms.roomNames('alice');
-  // Shared layout: the stored view schema.sql actually creates, by name.
-  assert.strictEqual(shared.sessions_v, 'sessions_v');
-  // Per-member: SQL text, substituted into the same `FROM ... AS c` position.
-  assert.ok(alice.sessions_v.startsWith('('), 'per-member rollup must be a subquery');
+  // SQL text, substituted into the same `FROM ... AS c` position a view name would hold.
+  assert.ok(alice.sessions_v.startsWith('('), 'the rollup must be a subquery');
   assert.ok(alice.sessions_v.includes('FROM sessions_alice AS s'), alice.sessions_v);
   assert.ok(alice.sessions_v.includes('LEFT JOIN messages_alice AS m'), 'the LEFT JOIN must survive');
   // No name means nothing for the Merge selectors to swallow — the whole class of
@@ -75,51 +67,23 @@ test('handles that would need quoting are refused', () => {
   }
 });
 
-test("a handle whose room name is a shared-layout object is refused", () => {
-  // `sessions_v` is the shared rollup view. A member named `v` would mint a room with
-  // that exact name.
-  assert.throws(() => rooms.assertUsableMember('v'), /reserved/);
-  // Case-sensitive: ClickHouse identifiers are, so `sessions_V` is a different object and
-  // refusing it would be over-reach.
-  assert.doesNotThrow(() => rooms.assertUsableMember('V'));
-  // Not a blanket ban on short handles.
-  for (const good of ['a', 'b', 'vv', 'v1', 'victor']) {
-    assert.doesNotThrow(() => rooms.assertUsableMember(good), `refused '${good}'`);
-  }
-});
-
-test('the Merge selector matches the shared rollup view — which is why mixing is refused', () => {
-  // Measured on ClickHouse 26.7.1: in a database holding sessions_alice, sessions_bob and
-  // the shared `sessions_v` view, `Merge(currentDatabase(), '^sessions_')` matched all
-  // THREE and all_sessions returned 3 rows for 2 sessions.
+test('every Merge selector matches member rooms and never itself', () => {
+  // Read the patterns out of the template rather than restating them, so a change there
+  // has to face this test.
   //
-  // This is asserted rather than fixed by narrowing the pattern on purpose: a member may
-  // legitimately be named anything matching [A-Za-z][A-Za-z0-9_]*, so no selector can
-  // separate `sessions_v` from a member room by shape. The fix is refusing a house that
-  // holds both layouts (provision.js), not a cleverer regex.
-  // Read the pattern out of the template rather than restating it, so narrowing the
-  // template without removing the refusal fails here.
+  // Self-match is the property that matters now that there is one layout: `^sessions_`
+  // must catch `sessions_<anyone>` and must NOT catch `all_sessions`, or the Merge room
+  // reads itself. Type-first naming is what buys this — `<member>_sessions` could not.
   const tpl = require('fs').readFileSync(
     require('path').join(__dirname, '..', 'mem-house', 'per-member', 'schema-merge.sql.tpl'), 'utf-8');
-  const m = tpl.match(/Merge\(currentDatabase\(\), '([^']+)'\)/);
-  assert.ok(m, 'no Merge selector found in schema-merge.sql.tpl');
-  const sel = new RegExp(m[1]);
-  assert.ok(sel.test('sessions_v'), 'the collision this guard exists for must be real');
-  assert.ok(sel.test('sessions_alice'));
-  assert.ok(!sel.test('all_sessions'), 'the Merge room must never match itself');
-  assert.ok(rooms.SHARED_OBJECTS.has('sessions_v'));
-  for (const t of rooms.ROOM_TYPES) assert.ok(rooms.SHARED_OBJECTS.has(t), `${t} missing`);
-});
-
-test('perMemberEnabled reads exactly MEM_PER_MEMBER=1', () => {
-  const saved = process.env.MEM_PER_MEMBER;
-  try {
-    for (const [v, want] of [['1', true], ['0', false], ['true', false], [undefined, false]]) {
-      if (v === undefined) delete process.env.MEM_PER_MEMBER; else process.env.MEM_PER_MEMBER = v;
-      assert.strictEqual(rooms.perMemberEnabled(), want, `MEM_PER_MEMBER=${v}`);
-    }
-  } finally {
-    if (saved === undefined) delete process.env.MEM_PER_MEMBER; else process.env.MEM_PER_MEMBER = saved;
+  const pats = [...tpl.matchAll(/Merge\(currentDatabase\(\), '([^']+)'\)/g)].map((m) => m[1]);
+  assert.strictEqual(pats.length, rooms.ROOM_TYPES.length, 'one Merge room per room type');
+  const all = Object.values(rooms.mergeRooms());
+  for (const [i, t] of rooms.ROOM_TYPES.entries()) {
+    const sel = new RegExp(pats[i]);
+    assert.ok(sel.test(`${t}_alice`), `${pats[i]} must match ${t}_alice`);
+    assert.ok(sel.test(`${t}_v`), `${pats[i]} must match ${t}_v — 'v' is an ordinary handle now`);
+    for (const room of all) assert.ok(!sel.test(room), `${pats[i]} must not match the Merge room ${room}`);
   }
 });
 
@@ -165,7 +129,7 @@ const SVC = {
   node: '/usr/bin/node',
   script: '/opt/memhouse/ship.js',
   args: ['--loop', '300'],
-  env: { MEMHOUSE_URL: 'http://h:8123', MEMHOUSE_PASSWORD: "ab'cd\\ef", MEM_PER_MEMBER: '1' },
+  env: { MEMHOUSE_URL: 'http://h:8123', MEMHOUSE_PASSWORD: "ab'cd\\ef", MEMHOUSE_DB: 'mem' },
   logDir: '/var/log/memhouse',
   logName: 'shipper.log',
 };
@@ -173,7 +137,7 @@ const SVC = {
 test('systemd unit inlines env with systemd quoting, not shell quoting', () => {
   const unit = service._render.systemdUnit({ ...SVC, description: 'd' });
   assert.ok(unit.includes('Environment=MEMHOUSE_PASSWORD="ab\'cd\\\\ef"'), unit);
-  assert.ok(unit.includes('Environment=MEM_PER_MEMBER="1"'), 'layout switch must travel with the unit');
+  assert.ok(unit.includes('Environment=MEMHOUSE_DB="mem"'), 'the house must travel with the unit');
   assert.ok(!unit.includes('EnvironmentFile'), 'the shell-quoted file must not be read by systemd');
   assert.ok(unit.includes('ExecStart=/usr/bin/node /opt/memhouse/ship.js --loop 300'));
 });

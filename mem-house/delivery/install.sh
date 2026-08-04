@@ -3,7 +3,7 @@
 #
 # Checks node >= 20 and a reachable ClickHouse, writes ~/.memhouse/env
 # (MEMHOUSE_* vars), applies the house schema via the shipper
-# (`ship.js --ensure-schema`), runs a first ship, and prints how to start the
+# (`ship.js --ensure-schema` mints the caller's own rooms), runs a first ship, and prints how to start the
 # dashboard and set up continuous shipping (`--loop`).
 #
 # Usage:
@@ -103,7 +103,7 @@ ONE="$(curl -sS --connect-timeout 5 --fail-with-body \
 [ "$ONE" = "1" ] || die "unexpected reply from $CH_URL: $ONE"
 info "ClickHouse ok"
 
-# Ensure the house exists before ensure-schema (schema.sql is unqualified and the
+# Ensure the house exists before ensure-schema (the room DDL is unqualified and the
 # shipper binds to MEMHOUSE_DB — on a virgin standalone server the database must
 # be created first). On a kernel realm the house is already provisioned; if the
 # user lacks CREATE DATABASE but the house is reachable, that's fine too.
@@ -174,7 +174,7 @@ Next steps:
   # -> installs memhouse-search / memhouse-sessions / memhouse-sql into
   #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills (loads next session)
 
-Verify anytime (this installer sets up the shared-room layout; a per-member house
+Verify anytime (rooms are per member; a house you do not own
 names its rooms \`sessions_<you>\` and is set up with \`memhouse install --per-member\`):
   set -a; . "$ENV_FILE"; set +a
   curl -sS --user "\$MEMHOUSE_USER:\$MEMHOUSE_PASSWORD" --data-binary \\

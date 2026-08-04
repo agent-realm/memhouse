@@ -13,7 +13,7 @@ given). If they give a question, write the SQL yourself from the schema below.
 
 **Read-only rule:** the shipper (`ship.js`) is the only writer. Never INSERT/
 ALTER/DROP from here — member credentials typically hold only
-`INSERT, SELECT ON mem.*`, and on shared instances own-only row policies
+`INSERT, SELECT` on your own rooms only — there is no policy to work around, and
 scope reads to your rows.
 
 ## Connection
@@ -34,39 +34,34 @@ SQL
 
 `FORMAT PrettyCompact` for display, `FORMAT JSONEachRow` to parse.
 
-## Room names
+## Room names — always suffixed
 
-Two layouts exist, and the table names differ between them. `~/.memhouse/env` says
-which one this house uses:
+Every member owns their own rooms, named for their ClickHouse user:
+`messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There are no unsuffixed rooms;
+the bare names fail with `UNKNOWN_TABLE` rather than returning nothing. You hold no grant
+on anyone else's rooms, so isolation is not something a query can work around.
 
-- `MEM_PER_MEMBER` unset or `0` — shared rooms. Use the names below as written.
-- `MEM_PER_MEMBER=1` — every member has their own rooms, named for their ClickHouse
-  user: `messages_alice`, `sessions_alice`, `tool_calls_alice`. A member holds no grant
-  on anyone else's, so the unsuffixed names below do not merely return nothing — they
-  fail with `UNKNOWN_TABLE`.
-  **There is no `sessions_v` in this layout.** The session rollup is a saved query over
-  those same rooms, not a stored object; `memhouse sessions-query` prints it for whoever
-  you are connected as, ready to paste into a `FROM (...) AS c` position.
-
-Resolve the suffix once, then substitute it into every table name:
+Resolve your own name once and substitute it into every table name below:
 
 ```bash
-MEM_SUFFIX=""
-if [ "${MEM_PER_MEMBER:-0}" = "1" ]; then
-  MEM_SUFFIX="_$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
-    --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-    "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
-fi
-# rooms: messages${MEM_SUFFIX}, sessions${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
-# rollup: `sessions_v` in the shared layout; `$(memhouse sessions-query)` per-member
+MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
+  --data-binary "SELECT currentUser() FORMAT TabSeparated" \
+  "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
+# rooms: messages_$MEM_ME, sessions_$MEM_ME, tool_calls_$MEM_ME
 ```
 
-**Whichever rollup you use, read with `join_use_nulls=1`.** The connection recipe above
-already sets it. Without it, ClickHouse's default outer-join behaviour gives an
-unmatched `m.seq` a default value instead of NULL, so a session with no messages reports
-`total_msgs = 1` rather than 0 — measured, not theoretical. The shared `sessions_v` view
-carries the setting internally; the per-member saved query cannot, because a subquery has
-no `SETTINGS` clause of its own.
+**There is no `sessions_v` object.** The session rollup is a saved query over those same
+rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
+paste into a `FROM (...) AS c` position.
+
+**Read the rollup with `join_use_nulls=1`.** The connection recipe above sets it. Without
+it, ClickHouse gives an unmatched `m.seq` a default instead of NULL, so a session with no
+messages reports `total_msgs = 1` rather than 0 — measured, not theoretical. A subquery
+has no `SETTINGS` clause of its own, so the setting has to come from the caller.
+
+If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
+across every member at once, narrowed to whatever grants you actually have — a Merge room
+reduces to the rooms the caller can read, so it fails closed rather than denying outright.
 
 ## Schema (the house)
 
@@ -91,7 +86,7 @@ Token spend by model:
 ```sql
 SELECT model, sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,
        sum(cache_read_tokens) AS cache_read
-FROM messages
+FROM messages_<you>
 WHERE model NOT IN ('', '<synthetic>')
 GROUP BY model
 ORDER BY out_tok DESC
@@ -102,7 +97,7 @@ Which tools do I use most (memhouse exclusive — memory-house has no tool table
 
 ```sql
 SELECT tool_name, count() AS calls, uniqExact(session_id) AS sessions
-FROM tool_calls
+FROM tool_calls_<you>
 GROUP BY tool_name
 ORDER BY calls DESC
 LIMIT 20
@@ -113,7 +108,7 @@ Busiest days, last two weeks:
 
 ```sql
 SELECT toDate(ts) AS day, uniqExact(session_id) AS sessions, count() AS msgs
-FROM messages
+FROM messages_<you>
 WHERE ts > now() - INTERVAL 14 DAY
 GROUP BY day
 ORDER BY day DESC
@@ -124,7 +119,7 @@ Activity by editor this week / subagent share:
 
 ```sql
 SELECT source, count() AS msgs, countIf(is_subagent) AS subagent_msgs
-FROM messages
+FROM messages_<you>
 WHERE ts > now() - INTERVAL 7 DAY
 GROUP BY source
 ORDER BY msgs DESC
@@ -135,7 +130,7 @@ Longest sessions by wall-clock:
 
 ```sql
 SELECT name, project, source, duration_sec, total_msgs, output_tokens
-FROM sessions_v
+FROM (the rollup from `memhouse sessions-query`)
 ORDER BY duration_sec DESC
 LIMIT 10
 FORMAT PrettyCompact
