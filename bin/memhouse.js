@@ -53,15 +53,25 @@ const JSON_OUT = flags.json === true;
 // launches a shipper and dashboard against a dead endpoint and `doctor` reports a
 // generic connection failure. Refuse, and say the two things that actually work.
 //
-// Commands that are the way OUT — repointing the config, tearing the install down, or
-// anything that never touches the house — stay allowed.
-const LEGACY_SOLO_OK = new Set(['setup', 'uninstall', 'discover', 'plugins', 'prompt', 'stop', null]);
+// Commands that are the way OUT stay allowed — including, emphatically, the ones the
+// refusal message itself recommends. A guard that blocks its own advice leaves the user
+// editing the env file by hand.
+//
+//   deploy   — `--local` rewrites the config, which is what ENDS this state; `--down`
+//              only removes a container.
+//   service  — `status` is how the stale-unit warning is seen and `uninstall` is how it
+//              is removed; only `service install` is blocked, since installing a unit
+//              pointed at the dead shim is the one thing here that makes it worse.
+const LEGACY_SOLO_OK = new Set([
+  'setup', 'uninstall', 'discover', 'plugins', 'prompt', 'stop', 'deploy', 'help', 'version', null,
+]);
 
 function legacySoloGuard() {
   let file = {};
   try { file = envfile.parse(fs.readFileSync(ENV_FILE, 'utf-8')); } catch { return false; }
   if (file.MEMHOUSE_SOLO !== '1') return false;
   if (LEGACY_SOLO_OK.has(cmd)) return false;
+  if (cmd === 'service' && positional[0] !== 'install') return false;
   console.log(bad(`${ENV_FILE.replace(os.homedir(), '~')} was written by the solo tier, which this version removed.`));
   console.log(`  It points at ${file.MEMHOUSE_URL || 'an embedded shim'}, and nothing here can start that.`);
   console.log('');
@@ -73,7 +83,10 @@ function legacySoloGuard() {
   console.log('');
   console.log('  The old embedded data is chdb-format and only readable by chdb; keep');
   console.log(`  ${path.join(HOME_DIR, 'solo-data').replace(os.homedir(), '~')} if you want it, or delete it.`);
-  console.log('  Then: memhouse stop   (reaps a shim still running from the old version)');
+  console.log('  Then, for anything the old version left behind:');
+  console.log('     memhouse stop              (reaps a shim still running)');
+  console.log('     memhouse service status    (shows a stale unit, if there is one)');
+  console.log('     memhouse service uninstall (removes it)');
   return true;
 }
 
