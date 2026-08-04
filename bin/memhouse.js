@@ -750,12 +750,10 @@ function cmdUninstall() {
       // dashboard is worse than the problem it is refusing, and in the missing-credential
       // case those processes may be the last things holding a usable connection.
       const priorCfg = resolveConfig();
-      // Ask the engine everything `up()` would refuse for, BEFORE anything is stopped.
-      // `volumeExists()` alone is not enough: it collapses foreign and indeterminate to
-      // "no volume", so a foreign container under the fixed name was only discovered
-      // inside up(), by which point the shipper and dashboard were already dead.
-      // The tag goes in too: `up()` validates the image, but by then the shipper and the
-      // dashboard have been stopped, so a typo costs a working pipeline to discover.
+      // Ask the engine everything `up()` would refuse for, BEFORE anything is stopped —
+      // ownership of BOTH fixed names, and the image. `up()` checks all of it too, but by
+      // then the shipper and the dashboard are dead, so a foreign container or a typo'd
+      // tag costs a working pipeline to discover.
       const pre = dep.preflight({ tag: flags.tag || process.env.MEMHOUSE_CH_TAG || dep.DEFAULT_TAG });
       if (!pre.ok) { console.log(bad(pre.msg)); process.exitCode = 1; break; }
       const initialised = pre.initialised;

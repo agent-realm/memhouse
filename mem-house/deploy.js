@@ -233,13 +233,6 @@ async function waitReady(url, { attempts = 60, delayMs = 2000 } = {}) {
   return false;
 }
 
-/** Does the managed data volume already exist and belong to us? */
-function volumeExists() {
-  const eng = engine();
-  if (!eng) return false;
-  return ownership(eng, 'volume', VOLUME) === 'ours';
-}
-
 /** The host port the managed container publishes, or '' if there is none to read. */
 function publishedPort() {
   const eng = engine();
@@ -321,7 +314,7 @@ function ensureImage(eng, tag) {
 }
 
 module.exports = {
-  engine, owningEngine, availableEngines, ensureImage, publishedPort, up, down, waitReady, volumeExists, preflight,
+  engine, owningEngine, availableEngines, ensureImage, publishedPort, up, down, waitReady, preflight,
   CONTAINER, VOLUME, DEFAULT_TAG,
   // exported for the unit gate: classifying an engine message wrong is silent
   _NOT_FOUND: NOT_FOUND,
