@@ -9,22 +9,27 @@ import PageHeader from '../components/PageHeader'
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Filler)
 
 // Two backends share this SPA: the typed mem-house house (sessions / messages /
-// tool_calls + the sessions_v rollup) and the legacy agentlytics cache (chats /
-// chat_stats). Both are ClickHouse — the flavor is detected from /api/schema
-// (sessions_v present → typed) and the matching example set is offered.
+// tool_calls + the session rollup) and the legacy agentlytics cache (chats /
+// chat_stats). Both are ClickHouse, and the flavor comes from /api/schema.
+//
+// The typed examples are TEMPLATED, not literal. A per-member house names its rooms for
+// the member and has no `sessions_v` object at all — the rollup is a saved query — so
+// `/api/schema` reports the resolved names and `{{room}}` tokens are substituted here.
+// Detecting the flavor by `tables.includes('sessions_v')` stopped working for the same
+// reason: it reported an indeterminate schema and offered nothing.
 const TYPED_EXAMPLES = [
-  { label: 'Sessions per editor', sql: `SELECT source, count() AS count FROM sessions_v GROUP BY source ORDER BY count DESC` },
-  { label: 'Top 10 projects', sql: `SELECT project, count() AS sessions, sum(total_msgs) AS messages FROM sessions_v WHERE project != '' GROUP BY project ORDER BY sessions DESC LIMIT 10` },
-  { label: 'Messages per day', sql: `SELECT toDate(ts) AS day, count() AS count FROM messages GROUP BY day ORDER BY day` },
-  { label: 'Top models', sql: `SELECT model, count() AS count FROM messages WHERE model NOT IN ('', '<synthetic>') GROUP BY model ORDER BY count DESC LIMIT 10` },
-  { label: 'Top tools', sql: `SELECT tool_name, count() AS count FROM tool_calls GROUP BY tool_name ORDER BY count DESC LIMIT 15` },
-  { label: 'Token usage by editor', sql: `SELECT source, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM sessions_v GROUP BY source ORDER BY input_tokens DESC` },
-  { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM sessions_v WHERE mode != '' GROUP BY mode ORDER BY count DESC` },
-  { label: 'Hourly distribution', sql: `SELECT toHour(ts) AS hour, count() AS count FROM messages GROUP BY hour ORDER BY hour` },
+  { label: 'Sessions per editor', sql: `SELECT source, count() AS count FROM {{sessions_v}} AS c GROUP BY source ORDER BY count DESC` },
+  { label: 'Top 10 projects', sql: `SELECT project, count() AS sessions, sum(total_msgs) AS messages FROM {{sessions_v}} AS c WHERE project != '' GROUP BY project ORDER BY sessions DESC LIMIT 10` },
+  { label: 'Messages per day', sql: `SELECT toDate(ts) AS day, count() AS count FROM {{messages}} GROUP BY day ORDER BY day` },
+  { label: 'Top models', sql: `SELECT model, count() AS count FROM {{messages}} WHERE model NOT IN ('', '<synthetic>') GROUP BY model ORDER BY count DESC LIMIT 10` },
+  { label: 'Top tools', sql: `SELECT tool_name, count() AS count FROM {{tool_calls}} GROUP BY tool_name ORDER BY count DESC LIMIT 15` },
+  { label: 'Token usage by editor', sql: `SELECT source, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM {{sessions_v}} AS c GROUP BY source ORDER BY input_tokens DESC` },
+  { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM {{sessions_v}} AS c WHERE mode != '' GROUP BY mode ORDER BY count DESC` },
+  { label: 'Hourly distribution', sql: `SELECT toHour(ts) AS hour, count() AS count FROM {{messages}} GROUP BY hour ORDER BY hour` },
   // Grouped by (session_id, user_id), matching the table's ORDER BY. In a team-pool
   // house two members can ship the same adapter-local session id; grouping on
   // session_id alone would merge them and make any(source) an arbitrary member's.
-  { label: 'Full-text search', sql: `SELECT session_id, user_id, any(source) AS source, count() AS hits FROM messages WHERE text_ngram LIKE '%clickhouse%' GROUP BY session_id, user_id ORDER BY hits DESC LIMIT 10` },
+  { label: 'Full-text search', sql: `SELECT session_id, user_id, any(source) AS source, count() AS hits FROM {{messages}} WHERE text_ngram LIKE '%clickhouse%' GROUP BY session_id, user_id ORDER BY hits DESC LIMIT 10` },
 ]
 const LEGACY_EXAMPLES = [
   { label: 'Sessions per editor', sql: `SELECT source, count() AS count FROM chats GROUP BY source ORDER BY count DESC` },
@@ -36,6 +41,12 @@ const LEGACY_EXAMPLES = [
   { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM chats WHERE mode IS NOT NULL GROUP BY mode ORDER BY count DESC` },
   { label: 'Hourly distribution', sql: `SELECT toHour(toDateTime(intDiv(created_at, 1000))) AS hour, count() AS count FROM chats WHERE created_at IS NOT NULL GROUP BY hour ORDER BY hour` },
 ]
+
+// `{{room}}` -> the resolved name (or, for the rollup on a per-member house, the whole
+// subquery). Same token shape the server's own query layer uses.
+function applyRooms(sql, rooms) {
+  return sql.replace(/\{\{([a-z_]+)\}\}/g, (m, name) => rooms[name] ?? m)
+}
 
 export default function SqlViewer() {
   const { dark } = useTheme()
@@ -58,13 +69,18 @@ export default function SqlViewer() {
   useEffect(() => {
     fetchSchema().then(s => {
       setSchema(s)
-      // Three outcomes, not two. The typed house has the sessions_v rollup; the
-      // legacy one has chats. Anything else — an error object with no `tables`, a
-      // half-applied schema with neither marker — is indeterminate, and offering
-      // either set would hand the user queries that error.
+      // Three outcomes, not two. The typed house is whichever one /api/schema resolved
+      // rooms for; the legacy one has `chats`. Anything else — an error object with no
+      // `tables`, a half-applied schema with neither marker — is indeterminate, and
+      // offering either set would hand the user queries that error.
+      //
+      // `rooms` is the authority, not a table name: a per-member house has no
+      // `sessions_v` object, so the old `tables.includes('sessions_v')` test called a
+      // perfectly healthy typed house indeterminate.
       const tables = s?.tables
-      const ex = !Array.isArray(tables) ? null
-        : tables.includes('sessions_v') ? TYPED_EXAMPLES
+      const rooms = s?.rooms
+      const ex = rooms?.sessions ? TYPED_EXAMPLES.map(e => ({ ...e, sql: applyRooms(e.sql, rooms) }))
+        : !Array.isArray(tables) ? null
           : tables.includes('chats') ? LEGACY_EXAMPLES
             : null
       setExamples(ex)
