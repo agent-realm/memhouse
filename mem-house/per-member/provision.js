@@ -88,20 +88,28 @@ async function main() {
   }
   console.log(`[mem] rooms ready for '${member}': ${ROOM_TYPES.map((t) => `${t}_${member}`).join(', ')}`);
 
-  // 2. grants — explicit, one per room
+  // 2. grants — two statements per room, and the split is the point.
+  //
+  // ALL, NOT re-grantable: the member owns their room outright, DROP and TRUNCATE
+  // included, because it is their memory to destroy. It also covers the mutation
+  // privileges the shipper needs without naming them — the shipper clears a session's
+  // rows before re-inserting, and which of ALTER UPDATE / ALTER DELETE a server demands
+  // varies by version (`DELETE FROM` is a lightweight delete, implemented as
+  // `ALTER TABLE … UPDATE _row_exists = 0`, so 25.11 wants ALTER UPDATE where 26.7 wanted
+  // ALTER DELETE). Granting one and not the other produces a pass that fails elsewhere.
+  //
+  // SELECT, re-grantable: a share is READ-ONLY BY CONSTRUCTION rather than by convention.
+  // `GRANT ALL … WITH GRANT OPTION` expands to 45 privileges on 26.7 — DROP TABLE,
+  // TRUNCATE, CREATE ROW POLICY, SYSTEM DROP REPLICA among them — and every one of those
+  // would become something a member could hand to a colleague while meaning "let them
+  // read my sessions". Measured: with this split, `GRANT SELECT … TO bob` succeeds and
+  // `GRANT DROP TABLE … TO bob` is refused 497.
   for (const t of ROOM_TYPES) {
-    await client.command({
-      // The mutation grants are required, not optional: the shipper clears a known
-      // session's rows before re-inserting so a shorter re-parse cannot leave stale seq
-      // tails. BOTH are needed, and which one bites depends on the server version —
-      // `DELETE FROM` is a *lightweight* delete, implemented as
-      // `ALTER TABLE ... UPDATE _row_exists = 0`, so 25.11 demands
-      // `ALTER UPDATE(_row_exists)` while 26.7 asked for `ALTER DELETE`. Granting one
-      // produces a pass that fails on the other server, so grant both.
-      query: `GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON ${cfg.database}.${t}_${member} TO ${member} WITH GRANT OPTION`,
-    });
+    const room = `${cfg.database}.${t}_${member}`;
+    await client.command({ query: `GRANT ALL ON ${room} TO ${member}` });
+    await client.command({ query: `GRANT SELECT ON ${room} TO ${member} WITH GRANT OPTION` });
   }
-  console.log(`[mem] granted SELECT, INSERT, ALTER UPDATE, ALTER DELETE WITH GRANT OPTION on 3 rooms to '${member}'`);
+  console.log(`[mem] granted ALL on 3 rooms to '${member}'; SELECT is the only re-grantable one`);
 
   // 3. Merge rooms
   if (flag('merge')) {

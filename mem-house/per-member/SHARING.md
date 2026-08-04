@@ -1,8 +1,12 @@
 # SHARING — two tiers
-v4 said a share is four grants, because each
-member then had a stored `sessions_v`. That view is gone — the rollup is a saved query
-again (SCHEMA v5) — so **a share is three grants**, and the fourth one v4 warned you not
-to forget no longer exists to forget.
+
+**A share is three grants**, one per room, and there is no fourth: the rollup is a saved
+query over exactly those rooms rather than a stored object, so a recipient who can read
+the rooms can run it.
+
+A share is also **read-only by construction**. `WITH GRANT OPTION` is attached to the
+member's `SELECT` grant and not to their `ALL` grant ([PROVISIONING](PROVISIONING.md)),
+so alice cannot hand bob mutation or drop rights on her room even by mistake.
 
 ## Tier 1 — whole room, self-serve
 

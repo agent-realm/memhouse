@@ -157,9 +157,10 @@ Migration is not a phase and must not shape MVP decisions.
   two?
 - **Is `EXECUTE AS` scopeable** to `mem.*` rather than `*.*`? Bounds what an owner
   credential can impersonate.
-- **Should a share be `SELECT`-only?** Grant-option covers every privilege in the grant, so
-  a member can hand a colleague the mutation rights on their own room. Convention says read-only;
-  nothing enforces it.
+- ~~**Should a share be `SELECT`-only?**~~ **RESOLVED.** Grant-option is attached to the
+  member's `SELECT` grant and not to their `ALL` grant, so a share can only ever be
+  read-only. Measured on 26.7.2: `GRANT SELECT … TO bob` succeeds,
+  `GRANT DROP TABLE … TO bob` is refused 497.
 
 ## Out of scope
 

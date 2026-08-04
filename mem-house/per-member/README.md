@@ -43,9 +43,6 @@ not granted `EXECUTE AS`.
 3. **Standalone path** — a user with no kernel is both owner and member; one credential or
    two?
 4. **Is `EXECUTE AS` scopeable** to `mem.*` rather than `*.*`?
-5. **Should a share be `SELECT`-only?** Grant-option covers the whole grant, so a member can
-   hand a colleague the mutation rights on their own room. Convention says read-only; nothing
-   enforces it.
-6. **Is a saved rollup enough for agents?** It has no name to type. `memhouse
+5. **Is a saved rollup enough for agents?** It has no name to type. `memhouse
    sessions-query` prints it, which is a worse affordance than a name and the price of
    having nothing to own, grant or collide.

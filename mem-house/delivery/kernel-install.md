@@ -17,8 +17,8 @@ This is an operator runbook, so it speaks machine vocabulary throughout — Clic
 python3 executor/executor.py provision memhouse
 ```
 
-Submits `install-agency{name:'memhouse'}`; the mayor — the human owner — approves;
-the executor (running as the ego, the `kernel` user) creates database `mem`
+Submits `install-agency{name:'memhouse'}`; the human owner approves; the executor
+(running as the realm's privileged user) creates database `mem`
 (the house), owner `memhouse_root`
 (`realm_user` profile), and owner grants. It returns a one-time **credential** —
 rotate on first connect (`issue-credential{user:'memhouse_root'}`).
@@ -50,7 +50,7 @@ injection surface). It is the only thing here that writes without being asked.
 For each person joining, split across the two authorities:
 
 ```bash
-# The EGO (the `kernel` user) mints the identity; the mayor approves:
+# The realm's privileged user mints the identity; the human owner approves:
 python3 executor/executor.py submit register-member '{"handle":"alice"}'
 python3 executor/executor.py approve <call_id> && python3 executor/executor.py drain
 
@@ -65,7 +65,7 @@ un-spoofably (`MATERIALIZED currentUser()`, `async_insert=0`).
 ## 4. Visibility: own-only vs team pool
 
 - **Own-only** (memory-house's model — each member sees only their own rows): the
-  **ego (the `kernel` user) or the mayor** mints each member's rooms (three
+  **the realm's privileged user, or the owner** mints each member's rooms (three
   policies bound to the `member` role). The owner cannot — `CREATE ROW POLICY` needs
   ACCESS MANAGEMENT, which the kernel withholds from agency owners by design.
 - **Team pool** (everyone sees everything): apply no policy; the owner GRANTs from

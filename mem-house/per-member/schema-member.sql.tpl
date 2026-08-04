@@ -1,7 +1,6 @@
 -- mem — one member's rooms. Applied per member; {{MEMBER}} is the ClickHouse username.
 --
--- Room bodies are the typed common schema from ../schema.sql, unchanged except for the
--- names. Room naming is TYPE-FIRST (sessions_<m>, not <m>_sessions) so the Merge rooms
+-- Room naming is TYPE-FIRST (sessions_<m>, not <m>_sessions) so the Merge rooms
 -- can anchor on a fixed room type and never match themselves.
 --
 -- user_id MATERIALIZED currentUser() is retained even though the room names the member:

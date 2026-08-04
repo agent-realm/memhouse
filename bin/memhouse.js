@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'mem-house', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'mem-house', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'mem-house', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES } = require(path.join(REPO_ROOT, 'mem-house', 'per-member', 'rooms'));
+const { roomNames, ROOM_TYPES, mergeRooms } = require(path.join(REPO_ROOT, 'mem-house', 'per-member', 'rooms'));
 const envfile = require(path.join(REPO_ROOT, 'mem-house', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -260,6 +260,7 @@ memhouse ${PKG.version} — agent conversation memory across 17 editors
 
 Setup        onboard              interactive wizard: discover → configure → ship → start
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
+                                  --print-sql            print the SQL, run it yourself
                                   with admin: --admin-user --admin-password [--member NAME]
                                   builds house + user + rooms + grants, then verifies as
                                   the member. The admin credential is never stored.
@@ -373,6 +374,60 @@ function generatePassword() {
 }
 
 /**
+ * Option 1 — the SQL, for a human with admin who would rather not hand it over.
+ *
+ * This is the whole install as statements: nothing else runs behind it, and running it by
+ * hand produces exactly what `--admin-user` would have produced. It is rendered from the
+ * same templates provision.js applies, so the two cannot drift into different houses.
+ */
+function memberSql(db, member, password) {
+  const here = path.join(REPO_ROOT, 'mem-house', 'per-member');
+  // The templates are written unqualified because provision.js applies them with the
+  // house already selected. A human pastes this somewhere unknown — clickhouse-client,
+  // the play UI, curl — so every name is qualified here and there is no `USE`.
+  //
+  // `currentDatabase()` in the Merge engine is the trap, and it is silent:
+  // it is evaluated at CREATE time, not at read time, so a block run without the house
+  // selected builds Merge rooms pointing at `default` that return zero rows forever. The
+  // literal name goes in instead.
+  const qualify = (sql) => sql
+    .replace(/CREATE TABLE IF NOT EXISTS (\w+)/g, `CREATE TABLE IF NOT EXISTS ${db}.$1`)
+    .replace(/ AS (\w+)\nENGINE = Merge/g, ` AS ${db}.$1\nENGINE = Merge`)
+    .replace(/Merge\(currentDatabase\(\)/g, `Merge('${db}'`);
+  const rooms = qualify(fs.readFileSync(path.join(here, 'schema-member.sql.tpl'), 'utf-8')
+    .replaceAll('{{MEMBER}}', member));
+  const merge = qualify(fs.readFileSync(path.join(here, 'schema-merge.sql.tpl'), 'utf-8')
+    .replaceAll('{{TEMPLATE_MEMBER}}', member));
+  const grants = ROOM_TYPES.flatMap((t) => [
+    `GRANT ALL ON ${db}.${t}_${member} TO ${member};`,
+    `GRANT SELECT ON ${db}.${t}_${member} TO ${member} WITH GRANT OPTION;`,
+  ]).join('\n');
+  const mergeGrants = Object.values(mergeRooms())
+    .map((n) => `GRANT SELECT ON ${db}.${n} TO ${member};`).join('\n');
+  return `-- memhouse: everything '${member}' needs in house '${db}'. Run as a user with
+-- ACCESS MANAGEMENT (a stock 'default' with access_management=1 will do).
+--
+-- Every name is qualified and there is no USE, so this runs anywhere: clickhouse-client,
+-- the play UI, curl, a GUI. Order matters only in that the database comes first.
+
+CREATE DATABASE IF NOT EXISTS ${db};
+CREATE USER ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
+
+${rooms.trim()}
+
+-- ALL is not re-grantable; SELECT is. The member owns their rooms outright — DROP
+-- included, it is their memory — but a share can only ever be read-only.
+${grants}
+
+-- Team-wide reads. A Merge room reduces to the rooms the CALLER holds grants for, so
+-- this narrows rather than denies, and picks up members added later with no DDL.
+${merge.trim()}
+
+${mergeGrants}
+`;
+}
+
+/**
  * Mode B — admin bootstrap. Five verbs, then a reconnect AS THE MEMBER before anything is
  * written, because a mode that only ever proves the admin could do it has proven nothing
  * about the credential it is about to persist.
@@ -447,20 +502,40 @@ async function adminBootstrap(cfg, admin) {
   return memberCfg;
 }
 
+// The handle, decided once for whichever option runs. Returns null after reporting.
+function resolveMemberHandle() {
+  const s = suggestMember();
+  const member = flags.member || s.handle;
+  if (!member) { console.log(bad(`no member handle: ${s.why}. Pass --member <name>.`)); return null; }
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
+    console.log(bad(`'${member}' cannot name a room — expected [A-Za-z][A-Za-z0-9_]*`));
+    return null;
+  }
+  if (!flags.member && s.changed) console.log(warn(`member handle '${s.changed}' sanitized to '${member}' — pass --member to choose another`));
+  return member;
+}
+
 async function cmdInstall({ interactive }) {
   let cfg = resolveConfig();
   const adminUser = flags['admin-user'];
 
-  // Mode B — admin bootstrap. Decided by one question: do you hold admin here?
+  // Option 1 — print the SQL and stop. For the common case: you have admin on this
+  // ClickHouse and would rather run four statements yourself than hand a credential to an
+  // installer. Nothing is written and nothing is contacted.
+  if (flags['print-sql'] === true) {
+    const member = resolveMemberHandle();
+    if (!member) return 1;
+    const password = flags['member-password'] || generatePassword();
+    console.log(memberSql(cfg.db, member, password));
+    console.log(`-- Then, once that has run:`);
+    console.log(`--   memhouse install --url ${cfg.url} --db ${cfg.db} --user ${member} --password '${password}'`);
+    return 0;
+  }
+
+  // Option 2 — admin bootstrap. Decided by one question: do you hold admin here?
   if (adminUser) {
-    const s = suggestMember();
-    const member = flags.member || s.handle;
-    if (!member) { console.log(bad(`no member handle: ${s.why}. Pass --member <name>.`)); return 1; }
-    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
-      console.log(bad(`'${member}' cannot name a room — expected [A-Za-z][A-Za-z0-9_]*`));
-      return 1;
-    }
-    if (!flags.member && s.changed) console.log(warn(`member handle '${s.changed}' sanitized to '${member}' — pass --member to choose another`));
+    const member = resolveMemberHandle();
+    if (!member) return 1;
     const built = await adminBootstrap(cfg, {
       user: adminUser, password: flags['admin-password'] || '', member,
     });
@@ -535,8 +610,9 @@ async function cmdInstall({ interactive }) {
   const missing = want.filter((n) => !have.includes(n));
   if (missing.length) {
     console.log(bad(`'${r.member}' has no ${missing.join(', ')} in '${cfg.db}', and could not create them`));
-    console.log('  you hold no CREATE TABLE here, so the house owner mints them. Ask them to run:');
-    console.log(`    node mem-house/per-member/provision.js --member ${r.member}`);
+    console.log('  You hold no CREATE TABLE here. Someone with ACCESS MANAGEMENT has to run this —');
+    console.log('  print it with:  memhouse install --print-sql --member ' + r.member);
+    console.log('  or hand it over:  memhouse install --admin-user … --admin-password …');
     return 1;
   }
   console.log(ok(`rooms for '${r.member}': ${want.join(', ')}`));

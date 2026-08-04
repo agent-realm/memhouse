@@ -1,8 +1,8 @@
 # PROVISIONING — minting a member and their rooms
-v5's grant set is right about the two
-`ALTER` privileges and wrong about the count: it granted a fourth statement for a stored
-`sessions_v`, and that view is gone — the rollup is a saved query again, as SCHEMA v4
-had decided and SCHEMA v5 explains. **Three statements per member, not four.**
+
+Two statements per room, six per member, and no seventh for the rollup: the session
+rollup is a saved query over exactly these rooms, so a member who can read them can run
+it. See [INSTALL.md](INSTALL.md) for the three ways this gets applied.
 
 ## A note on names before the SQL
 
@@ -20,17 +20,33 @@ Nothing migrates on upgrade.
 
 ## The grant set
 
-Three statements per member, one per room. There is no fourth: the session rollup is a
-saved query over exactly these rooms, so a member who can read them can run it.
+Two statements per room. The split is the point.
 
 ```sql
-GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.sessions_<m>   TO <m> WITH GRANT OPTION;
-GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.messages_<m>   TO <m> WITH GRANT OPTION;
-GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.tool_calls_<m> TO <m> WITH GRANT OPTION;
+GRANT ALL    ON mem.sessions_<m>   TO <m>;
+GRANT SELECT ON mem.sessions_<m>   TO <m> WITH GRANT OPTION;
+GRANT ALL    ON mem.messages_<m>   TO <m>;
+GRANT SELECT ON mem.messages_<m>   TO <m> WITH GRANT OPTION;
+GRANT ALL    ON mem.tool_calls_<m> TO <m>;
+GRANT SELECT ON mem.tool_calls_<m> TO <m> WITH GRANT OPTION;
 ```
 
 Plus `SELECT` on whichever Merge rooms exist, which is what makes the team room narrow to
 the caller's own rooms instead of denying outright.
+
+**`ALL`, not re-grantable.** The member owns their room outright — `DROP` and `TRUNCATE`
+included, because it is their memory to destroy. It also covers the mutation privileges
+below without naming them, which is what stops the version-dependent trap.
+
+**`SELECT`, re-grantable.** A share is read-only **by construction**. `GRANT ALL … WITH
+GRANT OPTION` expands to 45 privileges on 26.7 — `DROP TABLE`, `TRUNCATE`,
+`CREATE ROW POLICY`, `SYSTEM DROP REPLICA` among them — every one of which a member could
+then hand to a colleague while meaning "let them read my sessions". Measured on 26.7.2:
+`GRANT SELECT … TO bob` succeeds, `GRANT DROP TABLE … TO bob` is refused 497, and the
+member can still drop their own room.
+
+Never `ON mem.*`. A member who can read `mem.*` can read every other member's rooms, and
+then this is a shared house with longer table names.
 
 ### Why the mutation grants are not optional
 
@@ -83,15 +99,16 @@ overwrite it by re-shipping — so this widens what a member can destroy about t
 and nothing about anyone else. Grants remain per-room and explicit, so `ALTER DELETE` on
 `messages_alice` says nothing about `messages_bob`.
 
-It is still strictly narrower than `DROP TABLE`, which remains the open question below: a
-member can empty a room but not remove it, and the room's schema stays under owner control.
+`DROP TABLE` is included too (see below): a member can remove their own room, not just
+empty it.
 
 ### Consequence of `WITH GRANT OPTION`
 
-Grant-option covers every privilege in the statement, so alice can grant bob the mutation
-rights on `messages_alice`, not merely `SELECT`. That is alice choosing to let a colleague
-destroy her own rows — her data, her call — but sharing should still be `SELECT`-only by
-convention (`SHARING`). Nothing in the engine enforces the convention.
+Grant-option covers every privilege **in the statement it is attached to**, which is why
+it is attached to the `SELECT` statement and not the `ALL` one. Alice can hand bob read
+access to `messages_alice` and nothing else; she cannot hand him the mutation or drop
+rights even by mistake. The convention `SHARING` describes is now enforced by the engine
+rather than by everyone remembering it.
 
 A share is the three rooms and nothing else. The recipient runs the same rollup query over
 them under their own credential, so there is no fourth grant to forget — which is the
@@ -104,32 +121,25 @@ The owner (`mem_root`) holds `ALL ON mem.* WITH GRANT OPTION`, so a second membe
 an existing house needs no new owner setup — house, owner, and Merge rooms are already
 there.
 
-> **OPEN:** does the member also get `CREATE TABLE` / `DROP TABLE` on their own rooms?
-> Measured: a member so granted creates their rooms and is denied outside their prefix,
-> which would let `--ensure-schema` run as the member and make onboarding need no owner
-> involvement at all. Against: the member can then drop their own memory, and schema
-> rollout stops being centrally enforceable. Deferred with the uninstall/drop work.
+**RESOLVED:** the member does get `CREATE TABLE` / `DROP TABLE` on their own rooms — it
+is inside `ALL`. That is what lets `--ensure-schema` run as the member and makes the solo
+install one command with no owner involvement. The cost is accepted: a member can drop
+their own memory. The thing that was actually worth preventing — a member handing those
+rights to someone else — is prevented by the grant-option split above.
 
 ## Kernel path
 
-Capabilities run multi-statement branching SQL, so provisioning is one capability rather
-than a runbook.
+**Not finalized.** The realm holds the privileged credential and mints members; what the
+installer asks it for and what it gets back is not designed yet.
 
-```
-install-agency{mem}             -- once: house + mem_root + owner grants + Merge rooms
-register-member{handle}         -- ego mints the identity, mayor approves
-provision-member-rooms{handle}  -- 3 rooms + 3 grants (+ merge grants), idempotent
-```
-
-`provision-member-rooms` should create the three rooms from the DDL template, issue the
-three grants, and be safe to re-run — it is also the hook for rolling a
-schema change across rooms.
+What is settled regardless: the room layout, the grant set above, and the identity rule
+(the ClickHouse user is the identity). What is open is only who plays admin and how the
+handle is chosen. Whatever that turns out to be, provisioning wants to be ONE idempotent
+step — three rooms plus their grants — because it is also the hook for rolling a schema
+change across rooms.
 
 Nothing touches the Merge rooms on member join: they are a regex over room names and
 **auto-discover** rooms created after them.
-
-> **OPEN:** does this capability run as the ego or as `mem_root`? The owner holds the
-> rights; the ego owns the approval flow. Probably owner, invoked by the ego.
 
 ## Standalone path
 
