@@ -825,7 +825,7 @@ function cmdUninstall() {
       // ownership of BOTH fixed names, and the image. `up()` checks all of it too, but by
       // then the shipper and the dashboard are dead, so a foreign container or a typo'd
       // tag costs a working pipeline to discover.
-      const pre = dep.preflight({ tag: flags.tag || process.env.MEMHOUSE_CH_TAG || dep.DEFAULT_TAG });
+      const pre = dep.preflight({ tag: flags.tag || process.env.MEMHOUSE_CH_TAG || dep.managedTag() || dep.DEFAULT_TAG });
       if (!pre.ok) { console.log(bad(pre.msg)); process.exitCode = 1; break; }
       const initialised = pre.initialised;
       const reusable = initialised && priorCfg.password ? priorCfg.password : null;
@@ -866,6 +866,15 @@ function cmdUninstall() {
       const managedPort = dep.publishedPort();
       const port = String(housePort || process.env.MEMHOUSE_CH_PORT || managedPort || 8123);
       const targetUrl = `http://localhost:${port}`;
+      // The running image tag carries forward too. A house deployed with `--tag 26.7` and
+      // then bare-redeployed would have its healthy newer container removed and its
+      // volume mounted into 25.11 — and an older ClickHouse may simply refuse data and
+      // metadata a newer one wrote. Nothing persists the tag, so read it off the
+      // container that is running.
+      const tag = flags.tag || process.env.MEMHOUSE_CH_TAG || dep.managedTag() || dep.DEFAULT_TAG;
+      // The database is part of the destination, not a detail of it — see the service
+      // check below, which must compare it.
+      const targetDb = flags.db || process.env.MEMHOUSE_DB || priorCfg.db || 'memhouse';
       {
         // A service-managed shipper keeps the environment it was installed with, so ANY
         // switch that repoints the config leaves it shipping somewhere else — not only an
@@ -875,8 +884,14 @@ function cmdUninstall() {
         // from a different house.
         let svcCfg = { installed: false, url: null };
         try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
-        if (svcCfg.installed && !sameEndpoint(svcCfg.url, targetUrl)) {
-          console.log(bad(`the shipper is service-managed and holds ${svcCfg.url || 'an endpoint this command cannot read'} — deploying here would leave it shipping there.`));
+        // Endpoint AND database. Same URL with a different database is still somewhere
+        // else: `deploy --local --db memories` over a service holding `memhouse` would
+        // pass a URL-only check and split reads from service writes.
+        const svcElsewhere = svcCfg.installed
+          && (!sameEndpoint(svcCfg.url, targetUrl) || (svcCfg.db && svcCfg.db !== targetDb));
+        if (svcElsewhere) {
+          const where = svcCfg.url ? `${svcCfg.url} / ${svcCfg.db || '?'}` : 'an endpoint this command cannot read';
+          console.log(bad(`the shipper is service-managed and holds ${where} — deploying to ${targetUrl} / ${targetDb} would leave it shipping there.`));
           console.log('  memhouse service uninstall, then deploy, then memhouse service install');
           process.exitCode = 2; break;
         }
@@ -913,7 +928,7 @@ function cmdUninstall() {
       }
       const pw = reusable || crypto.randomBytes(16).toString('hex');
       if (reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
-      const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
+      const r = dep.up({ password: pw, port, tag });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
       console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));
 
@@ -939,12 +954,7 @@ function cmdUninstall() {
       }
       console.log(ok('ClickHouse ready'));
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
-      // The configured database carries forward. A house installed with `--db memories`
-      // that got `memhouse` back on a bare redeploy would look emptied — cmdInstall
-      // creates and selects the new one, rewrites the env file, and an installed service
-      // (whose endpoint has not changed, so the takeover check correctly allows it) keeps
-      // shipping to the old database while everything else reads the new one.
-      flags.db = flags.db || process.env.MEMHOUSE_DB || priorCfg.db || 'memhouse';
+      flags.db = targetDb;
       flags.yes = true;
       process.exitCode = await cmdInstall({ interactive: false });
       break;

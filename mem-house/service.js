@@ -299,9 +299,12 @@ function runState(kind, unit, label) {
     if (out === 'active') return 'running';
     // `is-active` answers inactive/failed/activating on a manager it can reach. Anything
     // else — empty output, a connection error on stderr — means it could not tell us.
-    if (['inactive', 'failed', 'activating', 'deactivating', 'unknown'].includes(out)) {
-      return out === 'activating' ? 'running' : 'stopped';
-    }
+    // `deactivating` is a unit still shutting down, not one that has stopped. Calling it
+    // stopped let uninstall delete a credential-bearing unit whose process was still
+    // alive. Both transitional states count as running, so teardown keeps the file and
+    // refuses until systemd reports a terminal state.
+    if (['activating', 'deactivating'].includes(out)) return 'running';
+    if (['inactive', 'failed'].includes(out)) return 'stopped';
     return 'unknown';
   }
   const r = spawnSync('launchctl', ['print', `gui/${process.getuid()}/${label}`], { encoding: 'utf-8' });
@@ -326,15 +329,15 @@ function isRunning(kind, unit, label) {
  * the current config — the two drift the moment anything is redeployed, and callers
  * asking "does this service care about the house I am removing?" need the unit's answer.
  *
- * Returns { installed, url } — `url` null when it cannot be determined.
+ * Returns { installed, url, db, perMember } — null/false when undeterminable.
  */
 function installedConfig() {
   const kind = platform();
-  if (!kind) return { installed: false, url: null };
+  if (!kind) return { installed: false, url: null, db: null, perMember: false };
   const p = unitPaths()[kind];
-  if (!fs.existsSync(p)) return { installed: false, url: null };
+  if (!fs.existsSync(p)) return { installed: false, url: null, db: null, perMember: false };
   let text = '';
-  try { text = fs.readFileSync(p, 'utf-8'); } catch { return { installed: true, url: null }; }
+  try { text = fs.readFileSync(p, 'utf-8'); } catch { return { installed: true, url: null, db: null, perMember: false }; }
   const env = {};
   if (kind === 'systemd') {
     for (const m of text.matchAll(/^Environment=([A-Z0-9_]+)=(.*)$/gm)) {
@@ -348,7 +351,14 @@ function installedConfig() {
       env[m[1]] = m[2].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
     }
   }
-  return { installed: true, url: env.MEMHOUSE_URL || null };
+  return {
+    installed: true,
+    url: env.MEMHOUSE_URL || null,
+    // The endpoint is not the whole identity. A service on the same URL but a different
+    // DATABASE — or a different room layout — is still shipping somewhere else.
+    db: env.MEMHOUSE_DB || null,
+    perMember: env.MEM_PER_MEMBER === '1',
+  };
 }
 
 function status() {

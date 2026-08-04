@@ -233,6 +233,18 @@ async function waitReady(url, { attempts = 60, delayMs = 2000 } = {}) {
   return false;
 }
 
+/** The image tag the managed container is running, or '' if there is none to read. */
+function managedTag() {
+  const eng = engine();
+  if (!eng) return '';
+  const r = spawnSync(eng, ['inspect', '-f', '{{.Config.Image}}', CONTAINER], { encoding: 'utf-8' });
+  if (r.error || r.status !== 0) return '';
+  const image = (r.stdout || '').trim();
+  const at = image.lastIndexOf(':');
+  // A ':' in a registry host:port is not a tag separator — only one after the last '/'.
+  return at > image.lastIndexOf('/') ? image.slice(at + 1) : '';
+}
+
 /** The host port the managed container publishes, or '' if there is none to read. */
 function publishedPort() {
   const eng = engine();
@@ -314,7 +326,7 @@ function ensureImage(eng, tag) {
 }
 
 module.exports = {
-  engine, owningEngine, availableEngines, ensureImage, publishedPort, up, down, waitReady, preflight,
+  engine, owningEngine, availableEngines, ensureImage, publishedPort, managedTag, up, down, waitReady, preflight,
   CONTAINER, VOLUME, DEFAULT_TAG,
   // exported for the unit gate: classifying an engine message wrong is silent
   _NOT_FOUND: NOT_FOUND,
