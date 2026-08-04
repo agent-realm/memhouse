@@ -9,9 +9,9 @@
 -- physical tables; views (sessions_v) inherit the querying user's policy via messages/
 -- sessions.
 
-CREATE ROW POLICY IF NOT EXISTS own_sessions ON memhouse.sessions
+CREATE ROW POLICY IF NOT EXISTS own_sessions ON mem.sessions
     FOR SELECT USING user_id = currentUser() TO member;
-CREATE ROW POLICY IF NOT EXISTS own_messages ON memhouse.messages
+CREATE ROW POLICY IF NOT EXISTS own_messages ON mem.messages
     FOR SELECT USING user_id = currentUser() TO member;
-CREATE ROW POLICY IF NOT EXISTS own_tool_calls ON memhouse.tool_calls
+CREATE ROW POLICY IF NOT EXISTS own_tool_calls ON mem.tool_calls
     FOR SELECT USING user_id = currentUser() TO member;

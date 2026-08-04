@@ -300,7 +300,7 @@ but deliberately **not** in `README.md`'s top half, which holds to the public re
 
 | Term | Here it is |
 |---|---|
-| **agency** | `memhouse` — the memory agency: the `memhouse` house plus its shipper resident. Also the public word for what you install here |
+| **agency** | `memhouse` — the memory agency: the `mem` house plus its shipper resident. Also the public word for what you install here |
 | **house** | the `memhouse` ClickHouse database (`MEMHOUSE_DB`, default `memhouse`) |
 | **room** | `sessions`, `messages`, `tool_calls` |
 | **resident** | the shipper — `mem-house/shipper/ship.js`; earlier `agency/ingest.js`. `kind = "worker"`, `on = "loop"`. **The only resident here** |
@@ -316,7 +316,7 @@ but deliberately **not** in `README.md`'s top half, which holds to the public re
 | **ego** | the `kernel` ClickHouse user — runs `install-agency`, mints members, applies `rls.sql` |
 | **mayor** | the **human** owner: approves the install; can apply `rls.sql` directly (interim path) |
 | **asking for something** | `install-agency{name:'memhouse'}`, `register-member{handle}` — rows in `sys.calls` |
-| **what you may do** | the owner grants on `memhouse.*`, plus the own-only row policies in `rls.sql` |
+| **what you may do** | the owner grants on `mem.*`, plus the own-only row policies in `rls.sql` |
 
 ## Vocabulary specific to memhouse
 

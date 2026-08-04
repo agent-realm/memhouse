@@ -8,14 +8,14 @@
 #
 # Usage:
 #   ./install.sh                                  # interactive (prompts for missing values)
-#   ./install.sh --url http://localhost:8123 --user memhouse_root --password 'pw' --db memhouse
+#   ./install.sh --url http://localhost:8123 --user memhouse_root --password 'pw' --db mem
 #   ./install.sh --yes                            # non-interactive, defaults / env / existing env file
 #
 # Flags:
 #   --url URL         ClickHouse HTTP(S) endpoint   (default http://localhost:8123)
 #   --user USER       ClickHouse user               (default memhouse_root; 'default' works for a local CH)
 #   --password PW     credential                    (default empty)
-#   --db DB           the house (database)          (default memhouse)
+#   --db DB           the house (database)          (default mem)
 #   --port PORT       dashboard/API port            (default 4640)
 #   --yes             never prompt; take flags > current env > ~/.memhouse/env > defaults
 #   --no-ship         stop after writing env + ensure-schema (skip the first ship)
@@ -43,7 +43,7 @@ fi
 CH_URL="${MEMHOUSE_URL:-http://localhost:8123}"
 CH_USER="${MEMHOUSE_USER:-memhouse_root}"
 CH_PASSWORD="${MEMHOUSE_PASSWORD:-}"
-CH_DB="${MEMHOUSE_DB:-memhouse}"
+CH_DB="${MEMHOUSE_DB:-mem}"
 DASH_PORT="${MEMHOUSE_PORT:-4640}"
 
 ASSUME_YES=0
@@ -174,7 +174,8 @@ Next steps:
   # -> installs memhouse-search / memhouse-sessions / memhouse-sql into
   #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills (loads next session)
 
-Verify anytime:
+Verify anytime (this installer sets up the shared-room layout; a per-member house
+names its rooms \`sessions_<you>\` and is set up with \`memhouse install --per-member\`):
   set -a; . "$ENV_FILE"; set +a
   curl -sS --user "\$MEMHOUSE_USER:\$MEMHOUSE_PASSWORD" --data-binary \\
     "SELECT count() FROM sessions" "\$MEMHOUSE_URL/?database=\$MEMHOUSE_DB&final=1"

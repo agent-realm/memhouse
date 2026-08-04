@@ -18,7 +18,7 @@ python3 executor/executor.py provision memhouse
 ```
 
 Submits `install-agency{name:'memhouse'}`; the mayor — the human owner — approves;
-the executor (running as the ego, the `kernel` user) creates database `memhouse`
+the executor (running as the ego, the `kernel` user) creates database `mem`
 (the house), owner `memhouse_root`
 (`realm_user` profile), and owner grants. It returns a one-time **credential** —
 rotate on first connect (`issue-credential{user:'memhouse_root'}`).
@@ -31,7 +31,7 @@ memhouse install --yes \
   --url https://<kernel-host>:8443 \
   --user memhouse_root \
   --password <credential-from-provision> \
-  --db memhouse
+  --db mem
 ```
 
 That writes `~/.memhouse/env`, applies the schema, and runs the first ship.
@@ -54,8 +54,8 @@ For each person joining, split across the two authorities:
 python3 executor/executor.py submit register-member '{"handle":"alice"}'
 python3 executor/executor.py approve <call_id> && python3 executor/executor.py drain
 
-# OWNER grants house access (memhouse_root has grant-option on memhouse.*):
-#   GRANT INSERT, SELECT ON memhouse.* TO alice
+# OWNER grants house access (memhouse_root has grant-option on mem.*):
+#   GRANT INSERT, SELECT ON mem.* TO alice
 ```
 
 Each member then runs the shipper with **their own** credential
@@ -78,6 +78,6 @@ Pick one; do not mix on the same role.
 ```bash
 memhouse stats                              # per-source counts as the owner
 # as a member (own-only): counts reflect only that member's rows
-curl -s -u "alice:<pw>" "$MEMHOUSE_URL/?database=memhouse" \
+curl -s -u "alice:<pw>" "$MEMHOUSE_URL/?database=mem" \
   --data-binary "SELECT count() FROM sessions_v SETTINGS final=1"
 ```

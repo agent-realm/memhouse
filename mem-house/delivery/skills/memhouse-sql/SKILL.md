@@ -13,25 +13,60 @@ given). If they give a question, write the SQL yourself from the schema below.
 
 **Read-only rule:** the shipper (`ship.js`) is the only writer. Never INSERT/
 ALTER/DROP from here — member credentials typically hold only
-`INSERT, SELECT ON memhouse.*`, and on shared instances own-only row policies
+`INSERT, SELECT ON mem.*`, and on shared instances own-only row policies
 scope reads to your rows.
 
 ## Connection
 
 Credentials from `~/.memhouse/env` (or exported `MEMHOUSE_*`). Always read with
 `final=1` — every table is `ReplacingMergeTree(ingested_at)`, so without it you
-can double-count stale row versions:
+can double-count stale row versions — and `join_use_nulls=1`, which the session
+rollup depends on (see below):
 
 ```bash
 set -a; [ -f ~/.memhouse/env ] && . ~/.memhouse/env; set +a
 curl -sS --fail-with-body --user "${MEMHOUSE_USER:-memhouse_root}:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "${MEMHOUSE_URL:-http://localhost:8123}/?database=${MEMHOUSE_DB:-memhouse}&final=1" <<'SQL'
+  --data-binary @- "${MEMHOUSE_URL:-http://localhost:8123}/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
 ```
 
 `FORMAT PrettyCompact` for display, `FORMAT JSONEachRow` to parse.
+
+## Room names
+
+Two layouts exist, and the table names differ between them. `~/.memhouse/env` says
+which one this house uses:
+
+- `MEM_PER_MEMBER` unset or `0` — shared rooms. Use the names below as written.
+- `MEM_PER_MEMBER=1` — every member has their own rooms, named for their ClickHouse
+  user: `messages_alice`, `sessions_alice`, `tool_calls_alice`. A member holds no grant
+  on anyone else's, so the unsuffixed names below do not merely return nothing — they
+  fail with `UNKNOWN_TABLE`.
+  **There is no `sessions_v` in this layout.** The session rollup is a saved query over
+  those same rooms, not a stored object; `memhouse sessions-query` prints it for whoever
+  you are connected as, ready to paste into a `FROM (...) AS c` position.
+
+Resolve the suffix once, then substitute it into every table name:
+
+```bash
+MEM_SUFFIX=""
+if [ "${MEM_PER_MEMBER:-0}" = "1" ]; then
+  MEM_SUFFIX="_$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
+    --data-binary "SELECT currentUser() FORMAT TabSeparated" \
+    "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
+fi
+# rooms: messages${MEM_SUFFIX}, sessions${MEM_SUFFIX}, tool_calls${MEM_SUFFIX}
+# rollup: `sessions_v` in the shared layout; `$(memhouse sessions-query)` per-member
+```
+
+**Whichever rollup you use, read with `join_use_nulls=1`.** The connection recipe above
+already sets it. Without it, ClickHouse's default outer-join behaviour gives an
+unmatched `m.seq` a default value instead of NULL, so a session with no messages reports
+`total_msgs = 1` rather than 0 — measured, not theoretical. The shared `sessions_v` view
+carries the setting internally; the per-member saved query cannot, because a subquery has
+no `SETTINGS` clause of its own.
 
 ## Schema (the house)
 

@@ -50,7 +50,7 @@ cat > ~/.memhouse/env <<'EOF'
 MEMHOUSE_URL=http://localhost:8123
 MEMHOUSE_USER=memhouse_root
 MEMHOUSE_PASSWORD=<credential>
-MEMHOUSE_DB=memhouse
+MEMHOUSE_DB=mem
 EOF
 chmod 600 ~/.memhouse/env
 ```

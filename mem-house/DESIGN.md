@@ -83,7 +83,7 @@ side by side as separate agencies, each in its own house. Naming: the product is
 | `MEMHOUSE_URL` | `http://localhost:8123` | ClickHouse HTTP(S) endpoint |
 | `MEMHOUSE_USER` | `memhouse_root` | CH user (owner, or a member's own credential) |
 | `MEMHOUSE_PASSWORD` | *(empty)* | credential |
-| `MEMHOUSE_DB` | `memhouse` | the house |
+| `MEMHOUSE_DB` | `mem` | the house |
 | `MEMHOUSE_PORT` | `4640` | dashboard/API port |
 
 Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
@@ -102,6 +102,15 @@ Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
 - Incremental shipping: read existing `(session_id, last_updated_at, message_count)`
   (FINAL) and skip chats that haven't grown/changed; a full re-ship must remain
   safe (ReplacingMergeTree collapses).
+- Re-shipping a known session **deletes its message/tool rows first**: `ReplacingMergeTree`
+  collapses same-key rows but cannot remove a row the new parse no longer produces, so a
+  shrunken re-parse would leave a stale `seq` tail forever.
+- **A mutation predicate must bind the user, never call `currentUser()`.** A mutation does
+  not evaluate it in the caller's context: measured on ClickHouse 25.11 and chdb, the same
+  `DELETE` matched 0 rows with `user_id = currentUser()` and 2000 with the value bound —
+  silently, both times. Read the identity once (`SELECT currentUser()`) and pass it as a
+  query parameter. This applies to `DELETE`/`ALTER … UPDATE`, not to `SELECT`, where
+  `currentUser()` behaves as expected.
 - Costs are computed in the server from `pricing.js` (repo root) over per-model
   token sums; `<synthetic>` and empty models excluded from model lists.
 
@@ -114,6 +123,10 @@ to use mem-house as memory), `kernel-install.md` (provision as agency `memhouse`
 
 ## Non-goals (v0)
 
-Relay/team-server (the kernel + RLS already covers sharing), launchd daemonization
-(ship `--loop` instead), migration tooling from memory-house's `memory` db, and
-per-adapter true message timestamps.
+Relay/team-server (the kernel + RLS already covers sharing), migration tooling from
+memory-house's `memory` db, and per-adapter true message timestamps.
+
+OS-level daemonization **was** a non-goal — "ship `--loop` instead" — and is no longer:
+`memhouse service install` writes a systemd `--user` unit or a launchd LaunchAgent. The
+reason the non-goal did not survive is that `--loop` outlives the shell and nothing else,
+so a machine that reboots stops shipping until somebody notices.
