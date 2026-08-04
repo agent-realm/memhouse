@@ -20,7 +20,8 @@
 // Grants are explicit, one statement per room. No wildcards are used anywhere; the only
 // pattern in the design is the Merge regex, anchored on a fixed room type.
 //
-// Env: MEM_URL / MEM_USER / MEM_PASSWORD / MEM_DB (defaults mirror the shipper's).
+// Env: MEM_URL / MEM_USER / MEM_PASSWORD / MEM_DB, falling back to MEMHOUSE_* and then
+// to the shipper's own defaults — http://localhost:8123, memhouse_root, memhouse.
 
 const fs = require('fs');
 const path = require('path');
@@ -31,11 +32,16 @@ const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
 const opt = (n, d = null) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
 
+// Defaults MUST match what the shipper and CLI use, or an operator who overrides only
+// the thing that differs — a password, say — silently provisions rooms in a house the
+// product never reads, or fails to authenticate as a user that does not exist. The
+// design docs write the house as `mem` for readability; the DEFAULT is `memhouse`,
+// which is what MEMHOUSE_DB is everywhere else.
 const cfg = {
   url: process.env.MEM_URL || process.env.MEMHOUSE_URL || 'http://localhost:8123',
-  username: process.env.MEM_USER || process.env.MEMHOUSE_USER || 'mem_root',
+  username: process.env.MEM_USER || process.env.MEMHOUSE_USER || 'memhouse_root',
   password: process.env.MEM_PASSWORD || process.env.MEMHOUSE_PASSWORD || '',
-  database: process.env.MEM_DB || process.env.MEMHOUSE_DB || 'mem',
+  database: process.env.MEM_DB || process.env.MEMHOUSE_DB || 'memhouse',
 };
 
 // Statements are split on ';' at end of line — the templates contain no ';' inside a
@@ -71,6 +77,7 @@ async function main() {
   await bootstrap.command({ query: `CREATE DATABASE IF NOT EXISTS ${cfg.database}` });
   await bootstrap.close();
 
+  console.log(`[mem] provisioning in ${cfg.url} database '${cfg.database}' as '${cfg.username}'`);
   const client = createClient({ ...cfg, clickhouse_settings: { async_insert: 0 } });
 
   // 1. rooms

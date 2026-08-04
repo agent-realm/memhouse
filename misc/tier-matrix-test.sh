@@ -214,12 +214,16 @@ say "teardown ignores a service that points somewhere else"
 if ! have_systemd; then
   skip "unrelated-service teardown (no user manager)"
 else
-  # A service pointing at an EXTERNAL house — nothing to do with the managed container.
-  HR="$TMP/home-otherservice"; mkdir -p "$HR"
-  env MEMHOUSE_HOME="$HR" $CLI setup --yes --url http://127.0.0.1:$((PORT_CH+90)) --user u --password p --db mem >/dev/null 2>&1
-  env MEMHOUSE_HOME="$HR" $CLI service install >/dev/null 2>&1; sleep 2
+  # Order matters: the local house must exist BEFORE the unrelated service is installed.
+  # Deploying it afterwards is now correctly refused — a service pointing elsewhere blocks
+  # any deploy that would repoint the config — so building the fixture the other way round
+  # tests nothing.
   HS="$TMP/home-localside"; mkdir -p "$HS"
   env MEMHOUSE_HOME="$HS" $CLI deploy --local --house-port $((PORT_CH+17)) --no-ship >/dev/null 2>&1
+  # A service pointing at an EXTERNAL house — nothing to do with the managed container.
+  HR="$TMP/home-otherservice"; mkdir -p "$HR"
+  env MEMHOUSE_HOME="$HR" $CLI setup --yes --url http://127.0.0.1:$((PORT_CH+90)) --user u --password p --db memhouse >/dev/null 2>&1
+  env MEMHOUSE_HOME="$HR" $CLI service install >/dev/null 2>&1; sleep 2
   assert_exit "an unrelated service does not block teardown" 0 env MEMHOUSE_HOME="$HS" $CLI deploy --down
   env MEMHOUSE_HOME="$HR" $CLI uninstall >/dev/null 2>&1
 fi

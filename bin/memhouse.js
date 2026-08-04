@@ -173,6 +173,23 @@ function portInUse(port) {
   });
 }
 
+/**
+ * Same house? Host AND port, normalised. Comparing ports alone called a service pointing
+ * at `http://remote-house:8123` a match for a local container publishing 8123.
+ * localhost/127.0.0.1/::1 are the same machine and must compare equal.
+ */
+function sameEndpoint(a, b) {
+  const norm = (u) => {
+    try {
+      const x = new URL(u);
+      const host = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(x.hostname) ? 'local' : x.hostname;
+      return `${host}:${x.port || (x.protocol === 'https:' ? '443' : '80')}`;
+    } catch { return null; }
+  };
+  const na = norm(a); const nb = norm(b);
+  return na !== null && nb !== null && na === nb;
+}
+
 /** Port from a configured URL, '' when it has none or the URL is unparseable. */
 function portOf(u) {
   try { return new URL(u).port || ''; } catch { return ''; }
@@ -774,8 +791,10 @@ function cmdUninstall() {
         try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
         if (svcCfg.installed) {
           const pub = dep.publishedPort();
-          const svcPort = portOf(svcCfg.url);
-          const targetsThisHouse = !svcCfg.url || !pub || svcPort === pub;
+          // Host AND port. Port alone classified a service pointing at
+          // `http://remote-house:8123` as targeting a local container publishing 8123,
+          // so an unrelated production shipper blocked this teardown.
+          const targetsThisHouse = !svcCfg.url || !pub || sameEndpoint(svcCfg.url, `http://localhost:${pub}`);
           if (targetsThisHouse) {
             console.log(bad(`a shipper service is installed and points at ${svcCfg.url || 'a house this command cannot identify'} — removing this house would leave it retrying a dead endpoint.`));
             console.log('  memhouse service uninstall, then memhouse deploy --down');
@@ -837,34 +856,38 @@ function cmdUninstall() {
       }
       // Moving the local house has two hazards: an occupied destination, and a shipper
       // this loop cannot see.
+      // The port this house will actually bind, decided ONCE and used everywhere below.
+      //
+      // The persisted URL is deliberately NOT in this chain. It can point at an external
+      // house — a kernel realm, ClickHouse Cloud — and reusing a remote endpoint's port
+      // as a local container binding is meaningless. What carries forward is the port an
+      // existing MANAGED container publishes, which is the only thing that says "the
+      // local house lives here".
+      const managedPort = dep.publishedPort();
+      const port = String(housePort || process.env.MEMHOUSE_CH_PORT || managedPort || 8123);
+      const targetUrl = `http://localhost:${port}`;
       {
-        // Persisted, not merged: resolveConfig() folds in the same env vars the target is
-        // derived from, so the comparison could never fire.
-        const fileCfg = readEnvFile();
-        const from = portOf(fileCfg.MEMHOUSE_URL || '');
-        // Same precedence `dep.up()` uses below. Reading only the flag let
-        // `MEMHOUSE_CH_PORT=<occupied> deploy --local` skip the destination probe, remove
-        // the working container, and then fail to bind.
-        const to = String(housePort || process.env.MEMHOUSE_CH_PORT || '');
-        if (to && from && to !== from) {
-          // A service-managed shipper keeps its own environment. Moving the container and
-          // the config out from under it leaves it retrying a dead endpoint forever while
-          // `status` cheerfully reports a running service.
-          let svcSt = { installed: false };
-          try { svcSt = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported */ }
-          if (svcSt.installed) {
-            console.log(bad(`the shipper is service-managed and holds ${priorCfg.url} — moving the house would leave it retrying a dead endpoint.`));
-            console.log('  memhouse service uninstall, then re-deploy on the new port, then memhouse service install');
-            process.exitCode = 2; break;
-          }
-          // And probe the destination before demolishing a working house: `run -p` only
-          // discovers the conflict after the old container is gone, which leaves the
-          // house down on a port that was working.
-          if (await portInUse(to)) {
-            console.log(bad(`port ${to} is already in use — not moving the house off ${from}.`));
-            console.log('  free that port, or pick another with --house-port.');
-            process.exitCode = 2; break;
-          }
+        // A service-managed shipper keeps the environment it was installed with, so ANY
+        // switch that repoints the config leaves it shipping somewhere else — not only an
+        // explicit port move. A bare `deploy --local` over a config pointing at an
+        // external house is the case that used to slip through: `to` was empty, the check
+        // was skipped, and `status` would then report a running shipper beside counts
+        // from a different house.
+        let svcCfg = { installed: false, url: null };
+        try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
+        if (svcCfg.installed && !sameEndpoint(svcCfg.url, targetUrl)) {
+          console.log(bad(`the shipper is service-managed and holds ${svcCfg.url || 'an endpoint this command cannot read'} — deploying here would leave it shipping there.`));
+          console.log('  memhouse service uninstall, then deploy, then memhouse service install');
+          process.exitCode = 2; break;
+        }
+        // And probe the destination before demolishing a working house: `run -p` only
+        // discovers the conflict after the old container is gone, which leaves the house
+        // down on a port that was working. Only when the port is actually CHANGING —
+        // rebinding the port a managed container already holds is not a conflict.
+        if (managedPort && port !== managedPort && await portInUse(port)) {
+          console.log(bad(`port ${port} is already in use — not moving the house off ${managedPort}.`));
+          console.log('  free that port, or pick another with --house-port.');
+          process.exitCode = 2; break;
         }
       }
 
@@ -883,12 +906,6 @@ function cmdUninstall() {
       }
       const pw = reusable || crypto.randomBytes(16).toString('hex');
       if (reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
-      // The persisted URL is part of the precedence chain: a bare re-deploy after
-      // `--house-port 18123` would otherwise remove the working container and rebuild it
-      // on 8123, relocating the house and rewriting its URL — or leaving it stopped if
-      // 8123 is taken.
-      const persistedPort = portOf(priorCfg.url);
-      const port = String(housePort || process.env.MEMHOUSE_CH_PORT || persistedPort || 8123);
       const r = dep.up({ password: pw, port, tag: flags.tag || process.env.MEMHOUSE_CH_TAG });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
       console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));
