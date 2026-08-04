@@ -1,0 +1,169 @@
+# per-member rooms
+**v6 reverts one decision v5 made under review pressure.** v5 gave every member a stored
+`sessions_v`. SCHEMA v4 had already decided that the rollup is a *saved query*, and
+overriding that reactively — inside a review round, to fix a read-layer finding — cost a
+name inside the Merge selector's namespace (161 sessions counted as 322), a rename, a
+reserved prefix, a fourth grant and a fourth object to provision and roll forward. The
+query is back. SCHEMA v5 records the detour in full.
+
+**v5 corrects the grant set, adds the member's own view, and stops calling this a
+skeleton.** Four changes:
+
+1. The grant set was `SELECT, INSERT`, which is insufficient — the shipper clears a
+   session's rows before re-inserting, so every incremental pass needs both
+   `ALTER UPDATE` and `ALTER DELETE` (which of the two is demanded varies by server
+   version). The error surfaced only on the *second* ship of a *changed* session, which is
+   why four document versions carried it. See PROVISIONING v5.
+2. The delete predicate **must bind the user** rather than call `currentUser()`. A mutation
+   does not evaluate it in the caller's context, so the delete matched nothing and removed
+   nothing, silently. Measured on 25.11 and on chdb; it affected the shared layout too.
+3. The read layer resolves the rollup as **SQL text** rather than a name: the stored view
+   in the shared layout, a subquery over the caller's rooms in the per-member one. Without
+   that resolution a per-member house ships fine and reads back nothing.
+4. v1–v4 were design skeletons. This one is implemented and measured: `rooms.js`,
+   `provision.js`, the two DDL templates, and the `MEM_PER_MEMBER` switch in the shipper.
+
+## The model
+
+House **`mem`**. Three rooms per member:
+
+```
+mem.sessions_<member>
+mem.messages_<member>
+mem.tool_calls_<member>
+```
+
+Owner-managed Merge rooms for team-wide reads:
+
+```sql
+mem.all_sessions    = Merge('mem', '^sessions_')
+mem.all_messages    = Merge('mem', '^messages_')
+mem.all_tool_calls  = Merge('mem', '^tool_calls_')
+```
+
+Canon: house = database, room = table, member = a registered user with grants.
+
+## Why
+
+**Isolation is structural.** A grant that is absent exposes nothing; a row policy has to
+be correct on every room for every role, and one wrong predicate exposes everything. It
+fails closed.
+
+**Sharing is self-serve.** A member holding grant-option on their own rooms shares with a
+colleague directly. Under row policies the same act needs `CREATE ROW POLICY`, which the
+kernel withholds from agency owners.
+
+**Personal reads stop paying for everyone else.** The shared rooms order
+`(session_id, user_id, seq)`, so filtering by member cannot prefix-scan. At a hundred
+members every personal query and full-text lookup scans roughly 100× what it needs.
+
+**Per-member lifecycle is atomic** — delete, export, retention, and quota are per-room
+operations rather than mutations across a shared table.
+
+## Grants
+
+Three per member, explicit, one per room — plus SELECT on the Merge rooms:
+
+```sql
+GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.sessions_<m>   TO <m> WITH GRANT OPTION;
+GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.messages_<m>   TO <m> WITH GRANT OPTION;
+GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.tool_calls_<m> TO <m> WITH GRANT OPTION;
+```
+
+The two `ALTER` grants are load-bearing, not defensive: the shipper's re-ship is
+clear-then-insert, so a growing transcript cannot leave a stale `seq` tail when a re-parse
+yields fewer rows. `WITH GRANT OPTION` is what makes whole-room sharing self-serve. Three
+statements is not a burden — the kernel runs multi-statement SQL.
+
+## What stays
+
+- `user_id MATERIALIZED currentUser()` on every room; `async_insert=0` on writers.
+- Typed columns, `extra JSON`, `ReplacingMergeTree(ingested_at)`, `final=1` reads, both
+  full-text layers on messages.
+- Parse-on-client; the shipper runs the 17 adapters and writes typed rows.
+- `sessions_v` as a **saved query** run under the caller, not a stored view — the v1–v4
+  decision, restored. The read layer resolves it as text in the same place it resolves a
+  room name, so both layouts share one code path.
+- The REST contract and the borrowed dashboard.
+
+## Measured facts (ClickHouse 26.7.1)
+
+1. Members **self-provision** inside their own prefix and are denied outside it.
+2. `Merge` **fails closed on permissions** — a caller sees only the underlying rooms they
+   hold grants for, with no leak and no error. This requires SELECT on the Merge room
+   ITSELF: without it the team room denies outright instead of narrowing, which is a
+   different and worse behaviour. Provisioning grants it (re-measured on 25.11).
+3. `Merge` **auto-discovers** rooms created after it exists.
+4. `Merge` **tolerates schema drift**, returning a column's default for rooms lacking it —
+   so schema rollout is progressive, not lock-step. It **rejects mutations**; use
+   `ADD COLUMN`, Merge room first.
+5. Row-policy rights are **house-scopeable** (`GRANT ACCESS MANAGEMENT ON mem.*`). Owner
+   only — the scope is the house, not a room.
+6. **`EXECUTE AS` exists**, changes `currentUser()`, and is a grantable privilege denied to
+   members by default.
+7. **The shipper needs both mutation grants** on its own rooms, or incremental passes
+   fail — 26.7 named `ALTER DELETE`, 25.11 named `ALTER UPDATE(_row_exists)`. New in v5.
+8. **`currentUser()` in a mutation predicate matches nothing.** A `DELETE` filtered on
+   `user_id = currentUser()` removed 0 rows where the same predicate with the bound value
+   removed 2000 — on ClickHouse 25.11 and on chdb alike, with no error either time. New
+   in v5.
+
+## Measured end-to-end (the implementation, not the design)
+
+On ClickHouse 25.11, two members, real local session stores:
+
+- alice ships 161 sessions / 22,413 message rows / 16,197 tool rows into her own rooms;
+  bob's rooms are untouched.
+- alice reading **or writing** bob's rooms is denied, and so is reading bob's view.
+- the whole read layer resolves: 13 of 14 dashboard query functions run green against
+  per-member rooms (the fourteenth needs a SQL argument), and `status`, `search`, `doctor`,
+  `stats` all report alice's own data. The same queries against the shared names fail with
+  `UNKNOWN_TABLE`, which is what they did before this change.
+- a planted stale `seq` tail is cleared by the next re-ship — in the per-member layout,
+  the shared layout.
+- the whole gauntlet scenario's SQL assertions pass when run by hand against a two-member
+  house: 22,413 rows in alice's room, none unstamped, none in bob's, bob reading the team
+  Merge room sees zero of alice's, alice sees her own. Sharing round-trips: alice's
+  `GRANT` widens bob's Merge view to 22,413 and her `REVOKE` returns it to zero, with the
+  direct read denied again.
+- the shared-room layout still ships unchanged with `MEM_PER_MEMBER` unset.
+
+## `user_id` — what it guarantees
+
+Unforgeable **by a member**, since members do not hold `EXECUTE AS`. Forgeable by the
+owner or any grantee. The trust boundary is the owner, not the engine — the normal
+arrangement, but do not overstate it anywhere user-facing. **Members must never hold
+`EXECUTE AS`.**
+
+## Phases
+
+1. Schema + naming — room DDL template, key order, Merge rooms. **Done.**
+2. Provisioning — kernel capability and standalone path. **Standalone done**
+   (`provision.js`); the kernel capability is not written.
+3. Query layer — the member view and room-name resolution. **Done** — `rooms.js` plus
+   templated room names through `queries.js`, `ship.js` and the CLI.
+4. Sharing — room-level self-serve; row-level via the owner. **Room-level proven**;
+   row-level not implemented.
+
+Migration is not a phase and must not shape MVP decisions.
+
+## Open questions
+
+- **May members create and drop their own rooms?** Works, safely scoped; but a member
+  could drop their own memory and schema rollout stops being central. Deferred with the
+  uninstall/drop work.
+- **Key order** — is `user_id` still worth an `ORDER BY` slot now the room is the tenant?
+- **Standalone path** — a user with no kernel is both owner and member; one credential or
+  two?
+- **Is `EXECUTE AS` scopeable** to `mem.*` rather than `*.*`? Bounds what an owner
+  credential can impersonate.
+- **Should a share be `SELECT`-only?** Grant-option covers every privilege in the grant, so
+  a member can hand a colleague the mutation rights on their own room. Convention says read-only;
+  nothing enforces it.
+
+## Out of scope
+
+- Migration. Deferred; unblocked in principle by `EXECUTE AS`.
+- `agent_id` / crew identity. Within a crew sharing one credential an agent tag is
+  client-supplied and is not a security boundary.
+- Adapters, REST contract, dashboard.
