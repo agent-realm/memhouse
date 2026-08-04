@@ -8,8 +8,8 @@ allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 
 # memhouse-search — search conversation memory
 
-Search the full message history in the memhouse house (`messages` + `sessions`
-tables on ClickHouse).
+Search the full message history in the memhouse house. Every room is named for your
+ClickHouse user — `messages_<you>`, `sessions_<you>` — see **Room names** below.
 
 ## Connection
 

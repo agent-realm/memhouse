@@ -174,9 +174,10 @@ Next steps:
   # -> installs memhouse-search / memhouse-sessions / memhouse-sql into
   #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills (loads next session)
 
-Verify anytime (rooms are per member; a house you do not own
-names its rooms \`sessions_<you>\` and is set up with \`memhouse install --per-member\`):
+Verify anytime (rooms are named for your ClickHouse user):
   set -a; . "$ENV_FILE"; set +a
+  ME=\$(curl -sS --user "\$MEMHOUSE_USER:\$MEMHOUSE_PASSWORD" \\
+    --data-binary "SELECT currentUser() FORMAT TabSeparated" "\$MEMHOUSE_URL/")
   curl -sS --user "\$MEMHOUSE_USER:\$MEMHOUSE_PASSWORD" --data-binary \\
-    "SELECT count() FROM sessions" "\$MEMHOUSE_URL/?database=\$MEMHOUSE_DB&final=1"
+    "SELECT count() FROM sessions_\$ME" "\$MEMHOUSE_URL/?database=\$MEMHOUSE_DB&final=1"
 EOF

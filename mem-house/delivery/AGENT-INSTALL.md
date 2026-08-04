@@ -76,11 +76,13 @@ warns by name about any adapter it had to skip — that warning is the only sign
 that step 1's `--allow-scripts` flag was missed and five editors are dark.
 
 `stats` should show one row per source (claude-code, codex, gemini-cli, …) with
-non-zero sessions/messages. Or verify by SQL:
+non-zero sessions/messages. Or verify by SQL — rooms are named for your ClickHouse
+user, and the session rollup is a saved query rather than an object, so
+`memhouse sessions-query` prints it:
 
 ```bash
 curl -s -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" "$MEMHOUSE_URL/?database=$MEMHOUSE_DB" \
-  --data-binary "SELECT source, count() FROM sessions_v GROUP BY source SETTINGS final=1 FORMAT PrettyCompact"
+  --data-binary "SELECT source, count() FROM $(memhouse sessions-query) AS c GROUP BY source SETTINGS final=1, join_use_nulls=1 FORMAT PrettyCompact"
 ```
 
 ## 5. Start the dashboard and the shipper loop

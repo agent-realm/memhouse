@@ -79,5 +79,5 @@ Pick one; do not mix on the same role.
 memhouse stats                              # per-source counts as the owner
 # as a member (own-only): counts reflect only that member's rows
 curl -s -u "alice:<pw>" "$MEMHOUSE_URL/?database=mem" \
-  --data-binary "SELECT count() FROM sessions_v SETTINGS final=1"
+  --data-binary "SELECT count() FROM $(memhouse sessions-query) AS c SETTINGS final=1, join_use_nulls=1"
 ```

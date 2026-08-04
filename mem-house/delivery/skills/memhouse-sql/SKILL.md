@@ -1,6 +1,6 @@
 ---
 name: memhouse-sql
-description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls tables + the sessions_v view on ClickHouse). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
+description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls rooms on ClickHouse, one set per member). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
 user-invocable: true
 argument-hint: "<question or SQL>"
 allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
@@ -67,16 +67,16 @@ reduces to the rooms the caller can read, so it fails closed rather than denying
 
 | Object | Kind | Columns |
 |---|---|---|
-| `sessions` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, user_id, ingested_at` |
-| `messages` | table, 1 row/message | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see memhouse-search) |
-| `tool_calls` | table, 1 row/tool call | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, user_id, ingested_at` |
-| `sessions_v` | view, rollup | `session_id, source, host, name, mode, folder, project, git_branch, user_id, created_at, last_updated_at, started, ended, duration_sec, total_msgs, user_msgs, assistant_msgs, subagent_msgs, models, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, user_chars, assistant_chars, first_prompt` |
+| `sessions_<you>` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, user_id, ingested_at` |
+| `messages_<you>` | table, 1 row/message | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see memhouse-search) |
+| `tool_calls_<you>` | table, 1 row/tool call | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, user_id, ingested_at` |
+| the rollup | **saved query**, not an object — `memhouse sessions-query` prints it | `session_id, source, host, name, mode, folder, project, git_branch, user_id, created_at, last_updated_at, started, ended, duration_sec, total_msgs, user_msgs, assistant_msgs, subagent_msgs, models, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, user_chars, assistant_chars, first_prompt` |
 
 Notes: `source` = editor id (`claude-code`, `codex`, `cursor`, `cursor-agent`,
 `vscode`, `zed`, `opencode`, `gemini-cli`, `windsurf`, `antigravity`, …);
 `seq` = message index within its session (0-based); `tool_calls.idx` = call
 index within the session; `user_id` is server-stamped (`currentUser()`);
-`models` in `sessions_v` is an `Array(String)`. Exclude `''` and
+`models` in the rollup is an `Array(String)`. Exclude `''` and
 `'<synthetic>'` from model aggregates.
 
 ## Examples

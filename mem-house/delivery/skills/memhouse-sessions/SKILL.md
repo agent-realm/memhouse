@@ -8,7 +8,8 @@ allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 
 # memhouse-sessions — browse session history
 
-List/filter sessions from the `sessions_v` rollup view (session metadata +
+List/filter sessions from the session rollup — a saved query over your own rooms, not an
+object; `memhouse sessions-query` prints it (session metadata +
 message aggregates) in the memhouse house.
 
 ## When to use

@@ -409,6 +409,15 @@ function memberSql(db, member, password) {
 --
 -- Every name is qualified and there is no USE, so this runs anywhere: clickhouse-client,
 -- the play UI, curl, a GUI. Order matters only in that the database comes first.
+--
+-- The messages room carries two text indexes. ClickHouse 25.x gates them behind
+-- allow_experimental_full_text_index and refuses the CREATE without it (Code: 344);
+-- 26.x accepts the setting as a no-op. The SET below covers any client that keeps a
+-- session — clickhouse-client, a GUI. Over HTTP, where each statement is its own
+-- request and SET does not persist, put it in the URL instead:
+--     curl "\$URL/?allow_experimental_full_text_index=1" --data-binary @-
+
+SET allow_experimental_full_text_index = 1;
 
 CREATE DATABASE IF NOT EXISTS ${db};
 CREATE USER ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
