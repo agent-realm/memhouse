@@ -135,6 +135,40 @@ indistinguishable from a takeover without the password, so the password is the p
 - **offboarding** — `DROP USER <member>`. The rooms are deliberately left: they hold that
   person's transcripts, and deleting someone's memory is a decision, not a cleanup step
 
+## Upgrading from 0.3.x — read this before you do
+
+**0.4.0 cannot read a 0.3.x house.** An earlier version of this document said an existing
+house "keeps working untouched". That was wrong, and it was wrong in the release notes and
+the `v0.4.0` tag message too.
+
+What is true: the DATABASE NAME survives. `MEMHOUSE_DB` sits in `~/.memhouse/env` and
+explicit config outranks the new `mem` default, so nothing repoints you at a different
+house. What does not survive is the TABLES. 0.3.x kept `sessions`, `messages`,
+`tool_calls` and a stored `sessions_v`; 0.4.0 looks for `sessions_<you>` and finds nothing.
+Measured against a real 0.3.2 house:
+
+```
+memhouse status  ->  not connected: Code: 60 ... Unknown table expression
+                     identifier 'sessions_memhouse_root'
+memhouse doctor  ->  schema: 0/3 rooms in 'memhouse'
+memhouse ship    ->  pass failed: UNKNOWN_TABLE
+```
+
+`install` and `doctor` now detect this and name it, rather than telling you to run an
+install you already ran.
+
+**Your transcripts are not lost.** memhouse ships FROM your local session stores, so the
+new rooms rebuild from disk and the old tables are left untouched:
+
+```
+memhouse install --admin-user <user> --admin-password <pw> --member <you>
+memhouse ship --full
+```
+
+The one thing that does not come back that way is a session whose transcript you have
+since deleted locally — it exists only in the old tables. Read those before dropping
+anything: `SELECT * FROM <db>.sessions`.
+
 ## Where the credential lives
 
 `~/.memhouse/env`, mode 0600, `MEMHOUSE_*` keys. **Not** a `.env` in a working directory:

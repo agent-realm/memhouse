@@ -214,7 +214,16 @@ function install({ shipJs, envFile, logDir, interval = 300, home = null }) {
     node, script: shipJs, args: ['--loop', String(interval)], env, logDir,
     logName: 'shipper.log', label: 'com.memhouse.shipper',
   }), { mode: 0o600 });
+  // bootout is asynchronous: it returns before launchd has finished tearing the job down,
+  // and a bootstrap issued in that window fails with `Service is being removed` (EBUSY,
+  // 36). Reinstalling over a RUNNING service is exactly when that happens, which is the
+  // common case — `service install` after a redeploy. Wait for the label to actually go.
   spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/com.memhouse.shipper`]); // ignore if absent
+  for (let i = 0; i < 50; i++) {
+    const q = spawnSync('launchctl', ['print', `gui/${process.getuid()}/com.memhouse.shipper`], { encoding: 'utf-8' });
+    if (q.status !== 0) break; // gone
+    spawnSync('sleep', ['0.1']);
+  }
   const r = spawnSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, p], { encoding: 'utf-8' });
   if (r.status !== 0) return { ok: false, msg: (r.stderr || '').trim() || 'launchctl bootstrap failed', path: p };
   return { ok: true, kind, path: p, warn: null };

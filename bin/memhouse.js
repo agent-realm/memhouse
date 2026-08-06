@@ -155,6 +155,47 @@ async function chRows(cfg, sql, opts) {
   return text ? text.split('\n').map((l) => JSON.parse(l)) : [];
 }
 
+/**
+ * Is this house a pre-0.4 one?
+ *
+ * 0.3.x kept three rooms named `sessions`/`messages`/`tool_calls` plus a stored
+ * `sessions_v` view, shared by everyone and separated by row policies. 0.4.0 deleted that
+ * layout. The database NAME survives an upgrade — explicit MEMHOUSE_DB outranks the new
+ * `mem` default — but the TABLES do not, so every read and write fails with UNKNOWN_TABLE
+ * naming a room the user has never heard of.
+ *
+ * Saying "run memhouse install" to someone in that state is useless: they did install, and
+ * their memory is sitting right there in the house. Detect it and say so.
+ */
+async function looksLikePre040(cfg) {
+  try {
+    const rows = await chRows(cfg,
+      `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN ('sessions','messages','tool_calls','sessions_v')`,
+      { database: '' });
+    return rows.map((r) => r.name);
+  } catch { return []; }
+}
+
+function reportPre040(cfg, member, found) {
+  console.log(bad(`'${cfg.db}' holds a pre-0.4 house — ${found.join(', ')} — and 0.4.0 cannot read it.`));
+  console.log('  0.4.0 replaced the shared rooms with one set per member. The database name');
+  console.log('  survived your upgrade; the table names did not.');
+  console.log('');
+  console.log('  Your transcripts are NOT lost. memhouse ships FROM your local session stores,');
+  console.log('  so the new rooms rebuild from disk. Build them in a NEW house and leave this');
+  console.log('  one untouched:');
+  console.log(`     memhouse install --force --db mem --admin-user <user> --admin-password <pw> --member ${member}`);
+  console.log('     memhouse ship --full');
+  console.log('');
+  console.log(`  A NEW house, not this one, and --force because the config still points here.`);
+  console.log(`  Rebuilding into '${cfg.db}' would put the member rooms beside the old`);
+  console.log("  `sessions_v`, which the `^sessions_` team-room selector matches — every");
+  console.log('  session would then be counted twice.');
+  console.log('');
+  console.log('  Sessions whose transcripts you have since deleted locally live only in the old');
+  console.log(`  tables. Read them there before dropping anything: SELECT * FROM ${cfg.db}.sessions`);
+}
+
 /** Is anything listening on this loopback port? */
 function portInUse(port) {
   return new Promise((resolve) => {
@@ -415,7 +456,9 @@ function memberSql(db, member, password) {
 -- 26.x accepts the setting as a no-op. The SET below covers any client that keeps a
 -- session — clickhouse-client, a GUI. Over HTTP, where each statement is its own
 -- request and SET does not persist, put it in the URL instead:
---     curl "\$URL/?allow_experimental_full_text_index=1" --data-binary @-
+--     curl "\$URL/?allow_experimental_full_text_index=1&multiquery=1" --data-binary @-
+-- multiquery=1 matters because this is one POST carrying many statements; without it
+-- ClickHouse parses only the first and reports a syntax error on the rest.
 
 SET allow_experimental_full_text_index = 1;
 
@@ -612,6 +655,11 @@ async function cmdInstall({ interactive }) {
   let have = [];
   try { have = await present(); } catch (e) { console.log(bad(`could not list rooms: ${e.message}`)); return 1; }
   if (have.length !== want.length) {
+    // Check for a pre-0.4 house BEFORE trying to mint anything. `--ensure-schema` on one
+    // of those dies with an UNKNOWN_TABLE stack trace, and a stack trace printed above a
+    // clean explanation is how a clear message gets missed.
+    const legacy = await looksLikePre040(cfg);
+    if (legacy.length) { reportPre040(cfg, r.member, legacy); return 1; }
     // Try to mint them as ourselves before asking anyone for anything.
     run(SHIP_JS, ['--ensure-schema'], cfg);
     try { have = await present(); } catch { /* reported below */ }
@@ -758,8 +806,11 @@ async function cmdDoctor() {
     const objects = ROOM_TYPES.map((t) => rooms[t]);
     const want = objects.map((n) => `'${n}'`).join(',');
     const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
+    const legacy = t === objects.length ? [] : await looksLikePre040(cfg);
     add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
-      `run: memhouse install, or as the owner: node mem-house/per-member/provision.js --member ${rooms.member}`);
+      legacy.length
+        ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
+        : `run: memhouse install, or as the owner: node mem-house/per-member/provision.js --member ${rooms.member}`);
   } catch (e) { add(false, 'schema check', e.message); }
   try {
     const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
@@ -825,6 +876,28 @@ async function cmdDoctor() {
         : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
           : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
+  // Which models in this house have no price. An unpriced model is not an error — a new
+  // release always lands before pricing.json catches up — but it IS silent: calculateCost
+  // returns null and the callers drop it from the total, so the dashboard reports a
+  // smaller number that looks entirely plausible. The Claude 5 family sat unpriced for
+  // five months that way, understating a real house by 136%.
+  try {
+    const { calculateCost } = require(path.join(REPO_ROOT, 'pricing'));
+    const rows = await chRows(cfg,
+      `SELECT model, count() AS n FROM ${rooms.messages} WHERE model NOT IN ('', '<synthetic>') GROUP BY model`);
+    const total = rows.reduce((a, r) => a + Number(r.n), 0);
+    const unpriced = rows.filter((r) => calculateCost(r.model, 1e6, 0, 0, 0) === null);
+    const missed = unpriced.reduce((a, r) => a + Number(r.n), 0);
+    // Report the COUNT, and the share only when it rounds to something. "0% of messages"
+    // beside a real number reads as "nothing is wrong", which is the opposite of the point.
+    const pct = total ? (missed / total) * 100 : 0;
+    const share = pct >= 0.5 ? `${Math.round(pct)}% of messages` : `${missed} message${missed === 1 ? '' : 's'}`;
+    add(unpriced.length === 0,
+      unpriced.length === 0
+        ? `pricing: every model in this house has a price (${rows.length} models)`
+        : `pricing: ${unpriced.length} model${unpriced.length > 1 ? 's' : ''} unpriced — ${share} cost nothing in the dashboard (${unpriced.map((r) => r.model).join(', ')})`,
+      'node sync-pricing.js --write   (then re-run doctor)');
+  } catch { /* a house that cannot be read is already reported above */ }
   const sh = shipperHealth();
   add(sh.running, `shipper${sh.via ? ` — ${sh.via}` : ''}`, 'memhouse start (or: memhouse service install)');
   add(!!pidOf('dashboard'), 'dashboard daemon', 'memhouse start');
