@@ -53,12 +53,30 @@ function normalizeModelName(name) {
     if (withoutQual !== c && MODEL_PRICING[withoutQual]) return withoutQual;
   }
 
-  // Pass 2: fuzzy startsWith (longest key match wins)
+  // Pass 2: prefix match, longest key wins — but only on a SEGMENT boundary.
+  //
+  // A bare startsWith matches across a version boundary and returns a confident wrong
+  // price rather than null. `gpt-4-mini`.startsWith('gpt-4') is true, so an unpriced
+  // model billed at gpt-4's $30/$60 instead of failing loudly; `gpt-5-6-sol` did exactly
+  // this against `gpt-5` and reported a quarter of its true cost for months. A missing
+  // model at least yields a zero someone might question.
+  //
+  // The rule: the remainder after a matched key must be a DATE OR VERSION STAMP —
+  // digit-only segments. `claude-opus-4-8-20260115` is claude-opus-4-8 on a given day and
+  // costs the same. `gpt-4-mini` is not gpt-4 with a stamp, it is a different model, and
+  // guessing its price from gpt-4 overstates it 40x.
+  //
+  // A word suffix therefore returns null rather than a neighbour's price. That is
+  // deliberate even though null means the model is dropped from cost totals: an absent
+  // number invites the question, a wrong one does not. `doctor` reports what is unpriced
+  // so the gap is visible rather than silent.
+  const stamped = (rest) => rest === '' || /^(-[0-9]+)+$/.test(rest);
   const keys = Object.keys(MODEL_PRICING);
   for (const c of candidates) {
     let best = null;
     for (const key of keys) {
-      if (c.startsWith(key) && (!best || key.length > best.length)) best = key;
+      if (c.startsWith(key) && stamped(c.slice(key.length))
+          && (!best || key.length > best.length)) best = key;
     }
     if (best) return best;
   }

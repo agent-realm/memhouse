@@ -15,8 +15,9 @@ They must agree or rooms get provisioned somewhere the product never reads. Over
 connection it resolved so a mismatch is visible rather than silent.
 
 An install predating this default carries `MEMHOUSE_DB` in `~/.memhouse/env`, and explicit
-config outranks the default — so an existing `memhouse` house keeps working untouched.
-Nothing migrates on upgrade.
+config outranks the default, so nothing repoints you at a different house. **That does not
+mean a 0.3.x house keeps working** — the database name survives the upgrade, the tables do
+not. See [INSTALL.md](INSTALL.md#upgrading-from-03x--read-this-before-you-do).
 
 ## The grant set
 
