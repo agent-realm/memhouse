@@ -148,3 +148,5 @@ public/assets/
 public/index.html
 
 .DS_Store
+# gauntlet run transcripts (sandbox/vm-e2e/run.sh writes here by default)
+sandbox/vm-e2e/artifacts/

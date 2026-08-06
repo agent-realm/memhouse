@@ -20,7 +20,7 @@ memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
 
 | Path | What |
 |---|---|
-| `mem-house/` | the product: `DESIGN.md`, `schema.sql`, `rls.sql`, `shipper/`, `server/`, `delivery/` |
+| `mem-house/` | the product: `DESIGN.md`, `per-member/`, `shipper/`, `server/`, `delivery/` |
 | `editors/` | the 17 editor adapters (inherited from agentlytics; the crown jewels) |
 | `pricing.js` + `pricing.json` | the cost engine |
 | `ui/` | the dashboard SPA (built to `public/`, served unchanged by the memhouse server) |
@@ -69,13 +69,62 @@ npx --allow-scripts=better-sqlite3 -y memhouse discover
 ```
 
 Working from a checkout instead: `npm install` (the repo's `allowScripts` field
-covers the binding), then `node bin/memhouse.js …`.
+covers the binding), then `node bin/memhouse.js …`. `npm test` is a syntax gate plus
+unit checks; `misc/tier-matrix-test.sh` walks the tier/ownership matrix against a real
+container engine on Linux and takes a few minutes, so it is not part of `npm test`.
 
 ```text
 memhouse onboard | install | setup | discover | uninstall | reset
 memhouse ship [--full|--loop N] | stats | search <terms> | start | stop | status | doctor
 memhouse plugins install claude | prompt
+memhouse deploy --local | --down                # stand up a house to point at
+memhouse service install | uninstall | status   # survive a reboot
 ```
+
+### Where the memory lives
+
+`memhouse onboard` assumes you already have a ClickHouse. If you do not, `deploy`
+is the missing first mile:
+
+| | What it runs | Who it is for |
+|---|---|---|
+| `deploy --local` | stock ClickHouse in docker or podman, loopback-bound | one machine, or several members later |
+| kernel install | an agency house on an ultimagent kernel | a team, provisioned centrally |
+| point at your own | any reachable ClickHouse — a server, ClickHouse Cloud | you already have one |
+
+`deploy --local` needs docker or podman. If you have neither and no ClickHouse, install
+one of them — memhouse does not embed a database. An earlier `--solo` tier ran chdb
+behind a hand-written ClickHouse-HTTP shim and was removed: emulating the HTTP protocol
+meant every setting or request shape the shim did not implement became a silently wrong
+answer, and half the defects found reviewing this branch came from it.
+
+`deploy` labels what it creates and refuses to replace or remove a container or
+volume it did not create, so a name collision costs you an error rather than
+somebody else's data.
+
+### Surviving a reboot
+
+`memhouse start` detaches with pidfiles: the daemons outlive the shell, and nothing
+brings them back after a restart. `memhouse service install` writes a real user
+service instead — systemd `--user` on Linux, a launchd LaunchAgent on macOS — and
+takes over from the pidfile daemons. On Linux a `--user` unit stops at logout
+unless lingering is on, so install detects that and prints the `loginctl` command.
+
+### One set of rooms per member
+
+Every member owns their rooms — `messages_alice`, `sessions_alice`,
+`tool_calls_alice`. This is the only layout. Isolation is a grant that is simply
+absent, not a row policy that has to be right on every table and every read path, so it
+fails closed. A shared read is a Merge room (`all_sessions`) plus a GRANT, which reduces
+to whatever rooms the caller can already read — strictly less machinery than the policy
+it replaced.
+
+The session rollup is a saved query over those rooms rather than a stored view, so there
+is no fourth object to provision, grant, or collide with the team rooms;
+`memhouse sessions-query` prints it. On a house you own, `memhouse install` mints your
+three rooms and you are done. On someone else's, the owner mints them
+(`mem-house/per-member/provision.js`) and sharing a whole room is then self-serve, with
+no operator. Design and measurements: `mem-house/per-member/`.
 
 Every command is dual-mode: interactive for humans, `--yes`/flags/`--json` for
 agents — so an agent can self-install its own memory (`memhouse install --yes …`,

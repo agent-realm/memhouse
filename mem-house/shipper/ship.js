@@ -17,11 +17,11 @@
 // CLI:  node ship.js                one incremental pass
 //       node ship.js --loop [sec]   repeat every sec seconds (default 300)
 //       node ship.js --full         ignore the incremental skip (re-ship everything)
-//       node ship.js --ensure-schema  apply ../schema.sql and exit
+//       node ship.js --ensure-schema  create the caller's own rooms and exit
 //       node ship.js --stats        per-source counts from sessions_v and exit
 //
 // Env (DESIGN.md contract): MEMHOUSE_URL / MEMHOUSE_USER / MEMHOUSE_PASSWORD /
-// MEMHOUSE_DB — defaults http://localhost:8123 / memhouse_root / '' / memhouse.
+// MEMHOUSE_DB — defaults http://localhost:8123 / memhouse_root / '' / mem.
 
 const os = require('os');
 const fs = require('fs');
@@ -30,6 +30,7 @@ const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
+const { resolveRooms, READ_SETTINGS } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -79,7 +80,7 @@ function makeClient() {
     url: process.env.MEMHOUSE_URL || 'http://localhost:8123',
     username: process.env.MEMHOUSE_USER || 'memhouse_root',
     password: process.env.MEMHOUSE_PASSWORD || '',
-    database: process.env.MEMHOUSE_DB || 'memhouse',
+    database: process.env.MEMHOUSE_DB || 'mem',
     request_timeout: 300000, // full re-ships move tens of MB; don't cut inserts short
     clickhouse_settings: {
       // Int64/UInt64 back as JSON numbers — our values (counts, tokens) are < 2^53.
@@ -97,10 +98,21 @@ function makeClient() {
   });
 }
 
-// Apply ../schema.sql statement by statement. Comments are stripped BEFORE the ';'
-// split — schema comments legitimately contain semicolons.
+// Create the CALLER'S OWN rooms, from ../per-member/schema-member.sql.tpl. Comments are
+// stripped BEFORE the ';' split — schema comments legitimately contain semicolons.
+//
+// This is the solo path: on a house you own, `memhouse install` mints your three rooms and
+// you are done. It creates nobody else's — the template is rendered for currentUser(), the
+// same identity the rooms' user_id is stamped with, so a client cannot name its way into
+// someone else's rooms.
+//
+// It does NOT issue grants or create the Merge rooms. A solo owner needs neither. Adding a
+// SECOND member — grants, Merge rooms, sharing — is owner work and lives in
+// ../per-member/provision.js.
 async function ensureSchema(client) {
-  const sql = fs.readFileSync(path.join(__dirname, '..', 'schema.sql'), 'utf-8');
+  const { member } = await resolveRooms(client);
+  const tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+  const sql = tpl.replaceAll('{{MEMBER}}', member);
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
   for (const q of stmts) {
@@ -121,9 +133,9 @@ async function ensureSchema(client) {
 // NOT message_count — because parsed-message count and bubbleCount are different
 // units in several adapters (claude folds subagents, codex reports 0), and skipping
 // must be decidable WITHOUT calling getMessages on every chat.
-async function loadExisting(client) {
+async function loadExisting(client, rooms) {
   const rs = await client.query({
-    query: 'SELECT session_id, last_updated_at, message_count, extra FROM sessions FINAL WHERE user_id = currentUser()',
+    query: `SELECT session_id, last_updated_at, message_count, extra FROM ${rooms.sessions} FINAL WHERE user_id = currentUser()`,
     format: 'JSONEachRow',
   });
   // Actual message rows per session: an interrupted re-ship (crash between the
@@ -132,7 +144,7 @@ async function loadExisting(client) {
   // must compare the real row count against the recorded message_count, not
   // merely check that some row exists.
   const mr = await client.query({
-    query: 'SELECT session_id, count() AS n FROM messages FINAL WHERE user_id = currentUser() GROUP BY session_id',
+    query: `SELECT session_id, count() AS n FROM ${rooms.messages} FINAL WHERE user_id = currentUser() GROUP BY session_id`,
     format: 'JSONEachRow',
   });
   const msgCounts = new Map();
@@ -269,7 +281,8 @@ async function runShip(client, opts = {}) {
   // only in incremental mode, but re-shipping a KNOWN session must clear its old
   // message/tool rows first (a shrunken re-parse leaves stale higher-seq rows
   // otherwise: ReplacingMergeTree collapses same-key rows only).
-  const existing = await loadExisting(client);
+  const rooms = await resolveRooms(client);
+  const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
 
   // An adapter that cannot load contributes zero sessions, which is indistinguishable
@@ -285,7 +298,7 @@ async function runShip(client, opts = {}) {
   const flush = async (table) => {
     if (!batches[table].length) return;
     await client.insert({
-      table,
+      table: rooms[table],
       values: batches[table],
       format: 'JSONEachRow',
       clickhouse_settings: { async_insert: 0 }, // binding: user_id stamping breaks otherwise
@@ -350,10 +363,17 @@ async function runShip(client, opts = {}) {
       // shorter re-parse can't leave stale seq/idx tails. A crash between the
       // delete and the inserts is repaired by the next pass: the skip predicate
       // refuses to skip a non-empty session whose message rows are missing.
+      // user_id is BOUND, not `= currentUser()`. A DELETE is a mutation, and a mutation
+      // does not necessarily evaluate currentUser() in the caller's context — it matches
+      // nothing at all, so the delete silently removes zero rows and the stale tail this
+      // code exists to clear survives forever. Measured on ClickHouse 25.11 —
+      // the identical predicate with the literal value deleted 2000 rows where
+      // currentUser() deleted 0. The value is the same identity either way: it is read
+      // from the server over this very connection.
       for (const t of ['messages', 'tool_calls']) {
         await client.command({
-          query: `DELETE FROM ${t} WHERE session_id = {id:String} AND user_id = currentUser()`,
-          query_params: { id },
+          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = {uid:String}`,
+          query_params: { id, uid: rooms.user },
           clickhouse_settings: { async_insert: 0 },
         });
       }
@@ -387,18 +407,20 @@ function reportAdapterErrors(warned) {
 }
 
 // Per-source rollup straight from sessions_v (final=1 so ReplacingMergeTree collapses).
+// The rollup resolves like the rooms do — it is a subquery over the caller's own rooms.
 async function printStats(client) {
+  const rooms = await resolveRooms(client);
   const rs = await client.query({
     query: `
       SELECT source,
              count() AS sessions,
              sum(total_msgs) AS messages,
              sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS tokens
-      FROM sessions_v
+      FROM ${rooms.sessions_v}
       GROUP BY source
       ORDER BY sessions DESC`,
     format: 'JSONEachRow',
-    clickhouse_settings: { final: 1 },
+    clickhouse_settings: READ_SETTINGS,
   });
   const rows = await rs.json();
   if (!rows.length) { console.log('[mem-house] house is empty'); return; }
@@ -433,19 +455,37 @@ async function main() {
       if (Number.isFinite(n) && n > 0) intervalSec = n;
     }
     let full = argv.includes('--full');
+    // A failed pass does NOT wait the full interval. The common failure at startup is
+    // that the house is not up yet — the container is still booting — and sleeping 300s
+    // there means the first ship is
+    // five minutes late for a condition that clears in under a second. systemd's
+    // After= orders process start, not readiness, and launchd has no ordering at all, so
+    // this is the only place the race can be closed for every path at once.
+    // Backs off to the normal interval so a genuinely unreachable house is not hammered.
+    const RETRY_START_MS = 2000;
+    let retryMs = RETRY_START_MS;
     do {
       const t0 = Date.now();
+      let failed = false;
       try {
         const r = await runShip(client, { full });
         console.log(`[mem-house] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}) → ` +
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
+        failed = true;
         console.error(`[mem-house] pass failed: ${e.message}`);
         if (!loop) process.exitCode = 1;
       }
       full = false; // --full applies to the first pass only; loop passes stay incremental
       if (loop) {
-        await new Promise((r) => setTimeout(r, intervalSec * 1000));
+        const waitMs = failed ? Math.min(retryMs, intervalSec * 1000) : intervalSec * 1000;
+        if (failed) {
+          console.error(`[mem-house] retrying in ${Math.round(waitMs / 1000)}s`);
+          retryMs = Math.min(retryMs * 2, intervalSec * 1000);
+        } else {
+          retryMs = RETRY_START_MS;
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
         resetCaches(); // adapters cache chat lists; drop them so new sessions surface
       }
     } while (loop);

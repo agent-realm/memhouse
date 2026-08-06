@@ -3,19 +3,19 @@
 #
 # Checks node >= 20 and a reachable ClickHouse, writes ~/.memhouse/env
 # (MEMHOUSE_* vars), applies the house schema via the shipper
-# (`ship.js --ensure-schema`), runs a first ship, and prints how to start the
+# (`ship.js --ensure-schema` mints the caller's own rooms), runs a first ship, and prints how to start the
 # dashboard and set up continuous shipping (`--loop`).
 #
 # Usage:
 #   ./install.sh                                  # interactive (prompts for missing values)
-#   ./install.sh --url http://localhost:8123 --user memhouse_root --password 'pw' --db memhouse
+#   ./install.sh --url http://localhost:8123 --user memhouse_root --password 'pw' --db mem
 #   ./install.sh --yes                            # non-interactive, defaults / env / existing env file
 #
 # Flags:
 #   --url URL         ClickHouse HTTP(S) endpoint   (default http://localhost:8123)
 #   --user USER       ClickHouse user               (default memhouse_root; 'default' works for a local CH)
 #   --password PW     credential                    (default empty)
-#   --db DB           the house (database)          (default memhouse)
+#   --db DB           the house (database)          (default mem)
 #   --port PORT       dashboard/API port            (default 4640)
 #   --yes             never prompt; take flags > current env > ~/.memhouse/env > defaults
 #   --no-ship         stop after writing env + ensure-schema (skip the first ship)
@@ -43,7 +43,7 @@ fi
 CH_URL="${MEMHOUSE_URL:-http://localhost:8123}"
 CH_USER="${MEMHOUSE_USER:-memhouse_root}"
 CH_PASSWORD="${MEMHOUSE_PASSWORD:-}"
-CH_DB="${MEMHOUSE_DB:-memhouse}"
+CH_DB="${MEMHOUSE_DB:-mem}"
 DASH_PORT="${MEMHOUSE_PORT:-4640}"
 
 ASSUME_YES=0
@@ -103,7 +103,7 @@ ONE="$(curl -sS --connect-timeout 5 --fail-with-body \
 [ "$ONE" = "1" ] || die "unexpected reply from $CH_URL: $ONE"
 info "ClickHouse ok"
 
-# Ensure the house exists before ensure-schema (schema.sql is unqualified and the
+# Ensure the house exists before ensure-schema (the room DDL is unqualified and the
 # shipper binds to MEMHOUSE_DB — on a virgin standalone server the database must
 # be created first). On a kernel realm the house is already provisioned; if the
 # user lacks CREATE DATABASE but the house is reachable, that's fine too.
@@ -174,8 +174,10 @@ Next steps:
   # -> installs memhouse-search / memhouse-sessions / memhouse-sql into
   #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills (loads next session)
 
-Verify anytime:
+Verify anytime (rooms are named for your ClickHouse user):
   set -a; . "$ENV_FILE"; set +a
+  ME=\$(curl -sS --user "\$MEMHOUSE_USER:\$MEMHOUSE_PASSWORD" \\
+    --data-binary "SELECT currentUser() FORMAT TabSeparated" "\$MEMHOUSE_URL/")
   curl -sS --user "\$MEMHOUSE_USER:\$MEMHOUSE_PASSWORD" --data-binary \\
-    "SELECT count() FROM sessions" "\$MEMHOUSE_URL/?database=\$MEMHOUSE_DB&final=1"
+    "SELECT count() FROM sessions_\$ME" "\$MEMHOUSE_URL/?database=\$MEMHOUSE_DB&final=1"
 EOF
