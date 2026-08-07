@@ -29,8 +29,20 @@
 /style-4.css
   Cache-Control: public, max-age=0, must-revalidate
 
-/logo-3.svg
-  Cache-Control: public, max-age=0, must-revalidate
+/icon-512.png
+  Cache-Control: public, max-age=86400
+
+/mark.png
+  Cache-Control: public, max-age=86400
+
+/mark-dark.png
+  Cache-Control: public, max-age=86400
+
+/lockup.png
+  Cache-Control: public, max-age=86400
+
+/lockup-dark.png
+  Cache-Control: public, max-age=86400
 
 /dashboard.png
   Cache-Control: public, max-age=86400

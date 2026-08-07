@@ -7,7 +7,9 @@ Google Fonts stylesheet. Edit the files and redeploy — that is the whole workf
 |---|---|
 | `index.html` | the whole landing page (chips + copy buttons are ~40 lines of inline JS) |
 |  `style-4.css` | all styling; the palette lives in `:root` at the top |
-|  `logo-3.svg` | the mark — a house with three rooms stacked inside it; also the favicon |
+| `mark.png` / `mark-dark.png` | the nav mark, extracted from the artwork; the `-dark` copy lifts only the grey ink |
+| `lockup.png` / `lockup-dark.png` | mark + wordmark, used in the footer |
+| `icon-512.png` | favicon and apple-touch-icon |
 | `dashboard.png` | product screenshot (the dashboard, downscaled from `docs/screenshot.png`) |
 | `404.html` | Pages serves this for unknown paths |
 | `_headers` | Cloudflare Pages response headers (security + cache) |
@@ -41,6 +43,25 @@ browsers that fetch them again.
 matching `_headers` rule). Do not reach for `?v=3`: `_headers` rules match on **path
 only**, so a query-string URL misses its rule and silently falls back to the hour-long
 default — the exact failure the version was meant to prevent.
+
+## The brand
+
+`memhouse.png` in the repo root is the source artwork: a grey **M** and an orange **H**
+forming a roofline, over the *MemHouse* wordmark. The site assets are derived from it, not
+redrawn — `_brand.js`-free, generated once by matteing the white background off (the art is
+two flat colours composited over white, so coverage solves exactly:
+`a = (255 - pixel) / (255 - ink)`), then cropping the mark and the full lockup.
+
+Brand colours, sampled from the file: **`#fe7601`** orange, **`#585858`** grey.
+
+Orange leads. It sits close to the scarlet in the accent set, so rather than letting two
+reds compete for the same job they are ranked: orange takes the primary role (buttons,
+section numbers, links, list marks) and scarlet is its pressed/hover step. Yellow, sage and
+tan carry the quieter structure.
+
+A dark-theme copy of each asset lifts **only the grey ink** to `#d8d4c8` — at `#585858` the
+M and the wordmark all but vanish on the dark ground. The orange is left exactly as the
+brand specifies it, since it reads on both.
 
 ## Copy rules
 

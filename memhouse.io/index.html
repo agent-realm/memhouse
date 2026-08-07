@@ -14,9 +14,9 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="memhouse — agent conversation memory, in one house">
 <meta name="twitter:description" content="17 editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents stop starting from zero.">
-<meta name="theme-color" content="#f7f5f0">
-<link rel="icon" type="image/svg+xml" href="/logo-3.svg">
-<link rel="apple-touch-icon" href="/logo-3.svg">
+<meta name="theme-color" content="#fe7601">
+<link rel="icon" type="image/png" href="/icon-512.png">
+<link rel="apple-touch-icon" href="/icon-512.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -37,12 +37,8 @@
 <header class="nav">
   <div class="wrap nav-inner">
     <a class="brand" href="/">
-      <svg width="22" height="22" viewBox="0 0 512 512" fill="none" aria-hidden="true">
-        <path d="M96 234 L256 104 L416 234 L416 408 A14 14 0 0 1 402 422 L110 422 A14 14 0 0 1 96 408 Z" stroke="currentColor" stroke-width="34" stroke-linejoin="round" fill="none"/>
-        <rect x="166" y="266" width="180" height="32" fill="#ffea25"/>
-        <rect x="166" y="314" width="180" height="32" fill="#98bead"/>
-        <rect x="166" y="362" width="180" height="32" fill="#c8a48c"/>
-      </svg>
+      <img class="on-light" src="/mark.png" alt="MemHouse" width="128" height="96">
+      <img class="on-dark" src="/mark-dark.png" alt="MemHouse" width="128" height="96">
       memhouse
       <span class="ver">v0.4.1</span>
     </a>
@@ -681,12 +677,9 @@
 <footer>
   <div class="wrap foot">
     <div class="foot-note">
-      <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
-        <svg width="20" height="20" viewBox="0 0 512 512" fill="none" aria-hidden="true">
-          <path d="M96 234 L256 104 L416 234 L416 408 A14 14 0 0 1 402 422 L110 422 A14 14 0 0 1 96 408 Z" stroke="currentColor" stroke-width="34" stroke-linejoin="round" fill="none"/>
-          <rect x="166" y="266" width="180" height="32" fill="#ffea25"/><rect x="166" y="314" width="180" height="32" fill="#98bead"/><rect x="166" y="362" width="180" height="32" fill="#c8a48c"/>
-        </svg>
-        <b style="color:var(--text)">memhouse</b>
+      <div class="foot-brand">
+        <img class="on-light" src="/lockup.png" alt="MemHouse" width="560" height="443">
+        <img class="on-dark" src="/lockup-dark.png" alt="MemHouse" width="560" height="443">
       </div>
       MIT licensed. Built on <a href="https://github.com/f/agentlytics">agentlytics</a> by Fatih Kadir Akın.
       Part of the <a href="https://github.com/agent-realm">Ultimagent constellation</a>.
@@ -710,14 +703,14 @@
     var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     root.setAttribute('data-theme', next);
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', next === 'dark' ? '#100f0d' : '#f7f5f0');
+    if (meta) meta.setAttribute('content', '#fe7601');
     try { localStorage.setItem('memhouse-theme', next); } catch (e) {}
   });
 })();
 
 // editor chips — colours echo the dashboard's categorical series
 (function () {
-  var C = ['#ffea25', '#98bead', '#c8a48c', '#e02200'];
+  var C = ['#fe7601', '#ffea25', '#98bead', '#c8a48c'];
   var editors = [
     'Claude Code', 'Codex', 'Cursor', 'Cursor Agent', 'VS Code', 'VS Code Insiders',
     'GitHub Copilot', 'Copilot JetBrains', 'Gemini CLI', 'Devin', 'Devin Next',
