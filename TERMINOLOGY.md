@@ -256,22 +256,27 @@ Everything else in the tree reads:
 | Object | Trigger | Writes? | Verdict |
 |---|---|---|---|
 | the shipper | its own loop | **yes** | **resident** |
-| `sessions_v` (`CREATE OR REPLACE VIEW`) | your query | no | routine |
-| `messages_v` / `sessions_v` in `agency/house-schema.sql` | your query | no | routine |
-| `sessions`, `messages`, `tool_calls` | nothing | — | neither; they *are* the house |
+| the session rollup (`sessions_v`, SQL text — not an object) | your query | no | routine |
+| `messages_v` / `sessions_v` in `agency/house-schema.sql` (prior art) | your query | no | routine |
+| `sessions_<m>`, `messages_<m>`, `tool_calls_<m>` | nothing | — | neither; they *are* the house |
+| `all_sessions` / `all_messages` / `all_tool_calls` (`Merge`) | your query | no | neither; a read path over those rooms |
 | `user_id MATERIALIZED currentUser()` | your own insert | it *is* your insert | neither; part of the table |
 
-**The margin is the point: memhouse has no materialized views at all.** Every derived object is a
-plain `CREATE OR REPLACE VIEW` — verified across `mem-house/per-member/` and
-`agency/house-schema.sql`. So there is no borderline case to argue about, no scheduled refresh, no
-insert trigger. The shipper is not merely *a* resident; it is provably the *only* candidate in the
-repo. Strip it and every remaining moving part is a routine over rows nobody is writing any more.
+**The margin is the point: memhouse has no materialized views at all** — and since 0.4.0,
+`mem-house/` has no stored views of any kind. The session rollup is a **saved query**, substituted
+with the caller's own room names and run under their credential (`per-member/rooms.js`), so the
+derived layer owns no object at all; the only `CREATE OR REPLACE VIEW` left in the repo is in
+`agency/house-schema.sql`, kept as prior art. So there is no borderline case to argue about, no
+scheduled refresh, no insert trigger. The shipper is not merely *a* resident; it is provably the
+*only* candidate in the repo. Strip it and every remaining moving part is a routine over rows
+nobody is writing any more.
 
 **A correction against my own earlier reading.** The `user_id MATERIALIZED currentUser()` stamp is
 a materialized **column**, which the canon now explicitly rules is *neither* resident nor routine —
 it computes during your insert, stored by your statement, part of the table's definition like a
-`DEFAULT`. It is still the mechanism that makes own-only RLS work, and it still records who wrote
-each row — but it is a **security property**, on the identity axis, not evidence of residency.
+`DEFAULT`. It is not what isolates members — an absent grant on someone else's room does that — but
+it records who wrote each row, which is what keeps provenance across a share and keeps the `Merge`
+rooms meaningful. It is a **security property**, on the identity axis, not evidence of residency.
 Residency asks *does it act*; identity asks *under whose name*. memhouse is an agency because of
 the loop, not because of the stamp.
 
@@ -301,11 +306,11 @@ but deliberately **not** in `README.md`'s top half, which holds to the public re
 | Term | Here it is |
 |---|---|
 | **agency** | `memhouse` — the memory agency: the `mem` house plus its shipper resident. Also the public word for what you install here |
-| **house** | the `memhouse` ClickHouse database (`MEMHOUSE_DB`, default `memhouse`) |
-| **room** | `sessions`, `messages`, `tool_calls` |
+| **house** | the `mem` ClickHouse database (`MEMHOUSE_DB`, default `mem`; `memhouse` was the pre-0.4 default) |
+| **room** | one set per member — `sessions_<m>`, `messages_<m>`, `tool_calls_<m>` — plus the owner-managed `Merge` rooms `all_sessions` / `all_messages` / `all_tool_calls` for team-wide reads. There are no unsuffixed rooms; the shared `sessions`/`messages`/`tool_calls` layout was removed in 0.4.0 |
 | **resident** | the shipper — `mem-house/shipper/ship.js`; earlier `agency/ingest.js`. `kind = "worker"`, `on = "loop"`. **The only resident here** |
-| **routine** | `sessions_v`; and `messages_v` / `sessions_v` in `agency/house-schema.sql`. Plain views — called, return, write nothing |
-| **member** | a person with their own credential; rows stamped `user_id MATERIALIZED currentUser()` (a materialized column — identity, not residency) |
+| **routine** | the session rollup — SQL text, not an object (`per-member/rooms.js`), run under the caller over their own rooms; and `messages_v` / `sessions_v` in `agency/house-schema.sql`, the prior-art wrap. Called, return, write nothing |
+| **member** | a person with their own credential and their own three rooms, granted those and nothing else; rows stamped `user_id MATERIALIZED currentUser()` (a materialized column — identity, not residency) |
 
 ## Terms this repo consumes from the kernel
 
@@ -384,9 +389,11 @@ Recorded so a later pass does not redo them:
 - **`memorecall`** (retired 2026-07-29 → `/mem:recall`) — no occurrences. memhouse ships its own
   skills under the `memhouse-*` / `/memhouse:*` names (`memhouse-search`, `memhouse-sessions`,
   `memhouse-sql`), which are unaffected by that retirement.
-- **Manifest keys** — this repo has **no `realm.toml`** (no `.toml` files at all), so the
-  `[[hall]]` → `[[house]]` / `[[house.room]]` / `entry_house` rename does not reach it. The
+- **Manifest keys** — this repo has **no `realm.toml`**, so the `[[hall]]` → `[[house]]` /
+  `[[house.room]]` / `entry_house` rename does not reach it. (The one `.toml` in the tree is an
+  agent-gauntlet scenario config, `sandbox/vm-e2e/configs/`, which is not a manifest.) The
   `[[resident]]` block above is how memhouse *would* declare itself when a manifest lands.
-- **Materialized views** — none, anywhere. Verified across `mem-house/per-member/` and
-  `agency/house-schema.sql`; every derived object is `CREATE OR REPLACE VIEW`. This is what makes
-  the resident test unambiguous here rather than a close call.
+- **Materialized views** — none, anywhere. Stronger since 0.4.0: `mem-house/` has no stored views
+  at all, because the session rollup became a saved query. The only `CREATE OR REPLACE VIEW` left
+  is in `agency/house-schema.sql`, the prior-art wrap. This is what makes the resident test
+  unambiguous here rather than a close call.

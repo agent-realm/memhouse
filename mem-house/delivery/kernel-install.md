@@ -2,14 +2,23 @@
 
 How to run mem-house as an **agency** on an ultimagent kernel — a ClickHouse server
 (a **town**) promoted into a realm — instead of a plain ClickHouse. Same flow proven
-for the agentlytics agency (`agency/AGENCY.md`); the agency/house name here is
-**`memhouse`** (CH identifiers can't carry a dash). What lands is a **house** (the
-`memhouse` database) with a **resident** (the shipper — `kind = "worker"`,
-`on = "loop"`) — that pairing is the agency. Residents write; routines read, and the
-`sessions_v` view is a routine. Terms: `../../TERMINOLOGY.md`.
+for the agentlytics agency (`agency/AGENCY.md`); the agency is named **`memhouse`** and
+its house is the **`mem`** database (CH identifiers can't carry a dash, and the owning
+role kept the longer name — `memhouse_root`). What lands is a **house** (the `mem`
+database) with a **resident** (the shipper — `kind = "worker"`, `on = "loop"`) — that
+pairing is the agency. Residents write; routines read, and the session rollup is a
+routine. Terms: `../../TERMINOLOGY.md`.
+
+**One set of rooms per member.** Each member owns `sessions_<them>`, `messages_<them>`,
+`tool_calls_<them>` and holds grants on those and nothing else, so isolation is an
+absent grant rather than a row policy — it fails closed. There is no shared
+`sessions`/`messages`/`tool_calls` layout and no row policy in the default path; 0.4.0
+removed both. Team-wide reads are the `Merge` rooms plus a `GRANT`. The session rollup
+is a **saved query**, not a stored view — `memhouse sessions-query` prints it.
+Design and measurements: `../per-member/`.
 
 This is an operator runbook, so it speaks machine vocabulary throughout — ClickHouse,
-`GRANT`, row policies. That is correct for this audience.
+`GRANT`, `currentUser()`. That is correct for this audience.
 
 ## 1. Provision (operator, one-time — from the kernel checkout)
 
@@ -54,30 +63,52 @@ For each person joining, split across the two authorities:
 python3 executor/executor.py submit register-member '{"handle":"alice"}'
 python3 executor/executor.py approve <call_id> && python3 executor/executor.py drain
 
-# OWNER grants house access (memhouse_root has grant-option on mem.*):
-#   GRANT INSERT, SELECT ON mem.* TO alice
+# OWNER mints that member's three rooms and their grants (memhouse_root has
+# grant-option on mem.*). One idempotent step — see ../per-member/PROVISIONING.md:
+MEM_URL=https://<kernel-host>:8443 MEM_USER=memhouse_root \
+MEM_PASSWORD=<credential> MEM_DB=mem \
+  node mem-house/per-member/provision.js --member alice --merge
 ```
 
+**Never `GRANT … ON mem.*` to a member.** A member who can read `mem.*` can read every
+other member's rooms, and then this is a shared house with longer table names.
+`provision.js` grants per room: `ALL` on each of alice's three, plus a re-grantable
+`SELECT` on each (that split is what makes a share read-only by construction), plus
+`SELECT` on the `Merge` rooms.
+
 Each member then runs the shipper with **their own** credential
-(`MEMHOUSE_USER=alice`) — the house stamps `user_id='alice'` on their rows,
-un-spoofably (`MATERIALIZED currentUser()`, `async_insert=0`).
+(`MEMHOUSE_USER=alice`) — it writes to `sessions_alice` / `messages_alice` /
+`tool_calls_alice`, resolved from `SELECT currentUser()` rather than from config, and
+the house stamps `user_id='alice'` on their rows, un-spoofably
+(`MATERIALIZED currentUser()`, `async_insert=0`).
 
-## 4. Visibility: own-only vs team pool
+## 4. Visibility
 
-- **Own-only** (memory-house's model — each member sees only their own rows): the
-  **the realm's privileged user, or the owner** mints each member's rooms (three
-  policies bound to the `member` role). The owner cannot — `CREATE ROW POLICY` needs
-  ACCESS MANAGEMENT, which the kernel withholds from agency owners by design.
-- **Team pool** (everyone sees everything): apply no policy; the owner GRANTs from
-  step 3 are the whole model.
+**Own-only is the default and needs no policy.** Alice is granted her own three rooms
+and nobody else's, so bob's rooms are not hidden from her — they are simply not hers to
+read, and the failure mode of a missing grant is a denial rather than a leak.
 
-Pick one; do not mix on the same role.
+**Team-wide reads are the `Merge` rooms** (`all_sessions`, `all_messages`,
+`all_tool_calls`) plus a `GRANT SELECT` on them, which `provision.js --merge` issues. A
+`Merge` room narrows to whatever underlying rooms the caller already holds grants for —
+measured on 26.7.1: no leak, no error — so it can be granted broadly. It also
+auto-discovers rooms created after it, so onboarding a member needs no DDL there.
+
+A member widens what a colleague sees by granting their own rooms directly
+(`GRANT SELECT ON mem.messages_alice TO bob`) — self-serve, no operator, because the
+member holds grant-option on their own `SELECT`. See `../per-member/SHARING.md`.
+
+Row policies are still the only way to share a *subset* of rows, which is owner-mediated
+and documented in `SHARING.md` — they are not how isolation works.
 
 ## 5. Verify
 
 ```bash
 memhouse stats                              # per-source counts as the owner
-# as a member (own-only): counts reflect only that member's rows
+# as a member: the rollup resolves to alice's own rooms, so counts are hers alone
 curl -s -u "alice:<pw>" "$MEMHOUSE_URL/?database=mem" \
   --data-binary "SELECT count() FROM $(memhouse sessions-query) AS c SETTINGS final=1, join_use_nulls=1"
+# and the team room narrows rather than denying — alice sees herself plus whoever granted her
+curl -s -u "alice:<pw>" "$MEMHOUSE_URL/?database=mem" \
+  --data-binary "SELECT user_id, count() FROM all_messages GROUP BY user_id SETTINGS final=1"
 ```

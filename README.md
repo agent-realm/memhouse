@@ -141,8 +141,8 @@ agents — so an agent can self-install its own memory (`memhouse install --yes 
 `~/.memhouse/env` > defaults.
 
 Deeper docs: `mem-house/delivery/AGENT-INSTALL.md`, kernel install (agency
-`memhouse`, members, own-only RLS): `mem-house/delivery/kernel-install.md`,
-skills/plugin payloads: `mem-house/delivery/`.
+`memhouse`, members, per-member rooms and their grants):
+`mem-house/delivery/kernel-install.md`, skills/plugin payloads: `mem-house/delivery/`.
 
 ## Heritage & license
 

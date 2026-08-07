@@ -23,14 +23,14 @@ None of that buys anything the query does not already do. Reverted.
 
 ### What it is now
 
-`rooms.js` exposes `sessions_v` as **SQL text**: the stored view's name in the shared
-layout, and a parenthesised `SELECT` over the caller's own rooms in the per-member layout.
-Both drop into the same `FROM … AS c` position, so the read layer is identical either way
-and the substitution point is one function.
+`rooms.js` exposes `sessions_v` as **SQL text** — a parenthesised `SELECT` over the
+caller's own rooms. It drops into the same `FROM … AS c` position a view name would have
+occupied, so the read layer treats it as just another resolved room name and the
+substitution point is one function. (The shared layout, where this key resolved to a
+stored view's *name*, is gone; the text form is the only one now.)
 
 ```sql
-FROM {{sessions_v}} AS c        -- shared:      FROM sessions_v AS c
-                                -- per-member:  FROM ( SELECT … FROM sessions_alice … ) AS c
+FROM {{sessions_v}} AS c        -- resolves to:  FROM ( SELECT … FROM sessions_alice … ) AS c
 ```
 
 It runs **under the caller's credential**, substituted with the caller's own room names,

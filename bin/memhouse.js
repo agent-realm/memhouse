@@ -963,16 +963,18 @@ async function cmdReset() {
     const a = (await ask(`This truncates ${targets.join(', ')} in '${cfg.db}' and re-ships. Continue? (yes/no)`, 'no')).toLowerCase();
     if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
   }
-  // DELETE, not TRUNCATE. Two reasons, and the second is the one that bites:
-  //   * TRUNCATE is its own privilege, and a provisioned member holds SELECT, INSERT and
-  //     the two ALTER grants — so `reset` failed with an authorization error for every
-  //     normally provisioned member;
-  //   * on the SHARED layout TRUNCATE is worse than unauthorized, it is wrong: the rooms
-  //     hold every member's rows, and a row policy scopes reads, not TRUNCATE. One member
-  //     resetting would empty the house.
-  // Scoping on the caller's own user_id is correct in both layouts. The value is bound
-  // rather than `currentUser()`, which a mutation does not evaluate in the caller's
-  // context and which therefore matches nothing at all.
+  // DELETE, not TRUNCATE. Historically for two reasons:
+  //   * TRUNCATE is its own privilege, and a member provisioned under the pre-0.4 grant
+  //     set (SELECT, INSERT and the two ALTER grants) did not hold it — so `reset` failed
+  //     with an authorization error for every normally provisioned member. Today's grant
+  //     set is `ALL` on the member's own rooms, which does include TRUNCATE;
+  //   * on the removed SHARED layout TRUNCATE was worse than unauthorized, it was wrong:
+  //     the rooms held every member's rows, and a row policy scopes reads, not TRUNCATE.
+  //     One member resetting would have emptied the house.
+  // Neither reason is load-bearing now that a member's room holds only their own rows,
+  // but DELETE stays: it is correct in both cases and costs nothing here. The user_id
+  // value is BOUND rather than `currentUser()`, which a mutation does not evaluate in the
+  // caller's context and which therefore matches nothing at all.
   const uid = (await chRows(cfg, 'SELECT currentUser() AS u'))[0]?.u;
   if (!uid) return console.log(bad('could not determine currentUser() — refusing to reset')), 1;
   const esc = uid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");

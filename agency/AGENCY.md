@@ -1,5 +1,13 @@
 # agentlytics as an ultimagent kernel agency
 
+> **PRIOR ART — this is not how memhouse works.** This directory is the earlier
+> agentlytics-agency wrap, kept for its history: a different house (`agentlytics`), a
+> `raw` table with derived views, and memory-house's shared-table-plus-row-policy
+> visibility model. **memhouse replaced all of that in 0.4.0** with one set of rooms per
+> member (`sessions_<m>` / `messages_<m>` / `tool_calls_<m>` in the `mem` house), where
+> isolation is an absent grant rather than a row policy. Nothing below describes the
+> current product — read `../mem-house/DESIGN.md` and `../mem-house/per-member/` for that.
+
 This wraps agentlytics as an **agency** on the ultimagent kernel: instead of a
 standalone local dashboard over a private SQLite/ClickHouse cache, agentlytics'
 17-editor session ingestion becomes a capability *inside a realm*, writing into a

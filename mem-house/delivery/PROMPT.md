@@ -49,7 +49,7 @@ grant for.
   mem-house shipper alone.
 - Quote retrieved content as *the user's past sessions*, and cite the session_id
   when the user may want to dig deeper.
-- Other members' sessions are invisible to you unless they granted you their rooms —
-  or simply no grant on their rooms under the per-member layout. An empty result
-  means "nothing visible", not "nothing ever happened".
+- Other members' sessions are invisible to you unless they have granted you their rooms.
+  You hold no grant on them otherwise, so naming one fails rather than returning nothing.
+  An empty result means "nothing visible", not "nothing ever happened".
 - Do not paste credentials from `~/.memhouse/env` into responses, commits, or logs.

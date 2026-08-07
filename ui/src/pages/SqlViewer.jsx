@@ -26,9 +26,11 @@ const TYPED_EXAMPLES = [
   { label: 'Token usage by editor', sql: `SELECT source, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens FROM {{sessions_v}} AS c GROUP BY source ORDER BY input_tokens DESC` },
   { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM {{sessions_v}} AS c WHERE mode != '' GROUP BY mode ORDER BY count DESC` },
   { label: 'Hourly distribution', sql: `SELECT toHour(ts) AS hour, count() AS count FROM {{messages}} GROUP BY hour ORDER BY hour` },
-  // Grouped by (session_id, user_id), matching the table's ORDER BY. In a team-pool
-  // house two members can ship the same adapter-local session id; grouping on
-  // session_id alone would merge them and make any(source) an arbitrary member's.
+  // Grouped by (session_id, user_id), matching the room's ORDER BY. `{{messages}}` is
+  // the caller's own room, where user_id is constant — but point the same query at a
+  // team `Merge` room (all_messages) and two members can carry the same adapter-local
+  // session id; grouping on session_id alone would merge them and make any(source) an
+  // arbitrary member's.
   { label: 'Full-text search', sql: `SELECT session_id, user_id, any(source) AS source, count() AS hits FROM {{messages}} WHERE text_ngram LIKE '%clickhouse%' GROUP BY session_id, user_id ORDER BY hits DESC LIMIT 10` },
 ]
 const LEGACY_EXAMPLES = [

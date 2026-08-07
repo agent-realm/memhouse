@@ -23,24 +23,27 @@ kind = "worker"    # deterministic code, no LLM
 on   = "loop"      # a daemon — not an insert trigger, not a schedule
 ```
 
-`sessions_v` is a plain view: computed during your query, for your query, writing
-nothing. It is a **routine** — house machinery, not a second resident. mem-house has
-**no materialized views at all**, so the shipper is not merely a resident, it is the
-only candidate in the tree. Strip it and every remaining moving part is a routine
-over rows nobody is writing any more.
+The session rollup is a **routine** — house machinery, not a second resident. Since
+0.4.0 it is not even an object: it is SQL text (`per-member/rooms.js`), substituted with
+the caller's own room names and computed during your query, for your query, writing
+nothing. mem-house has **no materialized views at all** — in fact no stored views at all
+— so the shipper is not merely a resident, it is the only candidate in the tree. Strip
+it and every remaining moving part is a routine over rows nobody is writing any more.
 
 Note that `user_id MATERIALIZED currentUser()` is a materialized *column*: it computes
-during your own insert and is part of the table's definition. It makes own-only RLS
-work and it records who wrote each row, but it is an identity property, not what makes
-this an agency.
+during your own insert and is part of the table's definition. It is not what isolates
+members — the room they hold no grant on does that — but it records who wrote each row,
+which keeps provenance across a share and keeps the `Merge` rooms meaningful. An identity
+property, not what makes this an agency.
 
 **Positioning:** an alternative agency **competing with memory-house**. It borrows
-memory-house's proven ideas (server-stamped identity, own-only RLS, idempotent
-shipping, skills/plugin delivery) and agentlytics' proven assets (adapters, UI,
-cost engine). If it wins, it can become memory-house v4; until then the two run
-side by side as separate agencies, each in its own house. Naming: the product is
-**mem-house**; ClickHouse identifiers use **`memhouse`** (agency/house name, owner
-`memhouse_root`) since identifiers can't carry a dash.
+memory-house's proven ideas (server-stamped identity, idempotent shipping,
+skills/plugin delivery) and agentlytics' proven assets (adapters, UI, cost engine) —
+but **not** its shared-table-plus-row-policy layout, which 0.4.0 removed in favour of
+one set of rooms per member. If it wins, it can become memory-house v4; until then the
+two run side by side as separate agencies, each in its own house. Naming: the product is
+**mem-house**; the agency is **`memhouse`** and its house is the **`mem`** database
+(identifiers can't carry a dash; the owner kept the longer name, `memhouse_root`).
 
 ## The four bets
 
@@ -53,12 +56,13 @@ side by side as separate agencies, each in its own house. Naming: the product is
    write axis this bet is precisely *moving work from routine to resident*:
    memory-house parses when you query, mem-house parses before anyone asks and
    writes the result down.
-2. **Typed common schema** (`schema.sql`). Physical typed columns (what
-   memory-house derives in views) + `tool_calls` (memory-house has none) + one
-   `extra JSON` escape hatch per table so unnormalized adapter fields are never
-   lost. `ReplacingMergeTree(ingested_at)`; `messages` keyed `(session_id, seq)` so
-   a re-ship of a grown/changed session replaces stale rows (latest-wins). FTS text
-   indexes built in (CH ≥ 26.2).
+2. **Typed common schema** (`per-member/schema-member.sql.tpl`, applied once per
+   member; `schema-merge.sql.tpl` for the team rooms). Physical typed columns (what
+   memory-house derives in views) + `tool_calls_<m>` (memory-house has no tool table)
+   + one `extra JSON` escape hatch per room so unnormalized adapter fields are never
+   lost. `ReplacingMergeTree(ingested_at)`; `messages_<m>` keyed
+   `(session_id, user_id, seq)` so a re-ship of a grown/changed session replaces stale
+   rows (latest-wins). FTS text indexes built in (CH ≥ 26.2).
 3. **Kernel-installable agency.** Same install path proven for agentlytics-agency:
    `install-agency{memhouse}` → house + `memhouse_root` + credential; members via
    `register-member` + owner `GRANT` on that member's own rooms. Own-only visibility
@@ -129,8 +133,9 @@ to use mem-house as memory), `kernel-install.md` (provision as agency `memhouse`
 
 ## Non-goals (v0)
 
-Relay/team-server (the kernel + RLS already covers sharing), migration tooling from
-memory-house's `memory` db, and per-adapter true message timestamps.
+Relay/team-server (per-room grants plus the `Merge` rooms already cover sharing),
+migration tooling from memory-house's `memory` db, and per-adapter true message
+timestamps.
 
 OS-level daemonization **was** a non-goal — "ship `--loop` instead" — and is no longer:
 `memhouse service install` writes a systemd `--user` unit or a launchd LaunchAgent. The

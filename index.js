@@ -121,10 +121,10 @@ if (isJoin) {
   // Fail fast: the relay join client still targets the removed synchronous SQLite
   // cache (relay-client.js pickProjects → cache.getDb), which the ClickHouse
   // cutover eliminated — it would crash after connecting. In memhouse, team
-  // sharing is the kernel path (members + owner grants + RLS), not relay.
+  // sharing is grants on per-member rooms, not relay.
   console.error(chalk.red('\n  ✗ Relay join is not supported in memhouse.'));
   console.error(chalk.dim('    Team sharing here is kernel-based: see mem-house/delivery/kernel-install.md'));
-  console.error(chalk.dim('    (register-member + owner GRANT + own-only RLS).\n'));
+  console.error(chalk.dim('    (register-member + per-member rooms + a GRANT on your own rooms).\n'));
   process.exit(1);
 }
 

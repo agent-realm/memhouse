@@ -11,10 +11,11 @@ allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 If the user gives SQL, run it (append `FORMAT PrettyCompact` if no FORMAT
 given). If they give a question, write the SQL yourself from the schema below.
 
-**Read-only rule:** the shipper (`ship.js`) is the only writer. Never INSERT/
-ALTER/DROP from here — member credentials typically hold only
-`INSERT, SELECT` on your own rooms only — there is no policy to work around, and
-scope reads to your rows.
+**Read-only rule:** the shipper (`ship.js`) is the only writer. Never INSERT/ALTER/DROP
+from here. A member credential normally holds `ALL` on its **own three rooms** — enough
+to destroy that memory — and nothing at all on anyone else's. Reads need no scoping
+clause: the rooms you can name are already only yours, and there is no policy to work
+around.
 
 ## Connection
 

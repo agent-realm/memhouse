@@ -62,7 +62,7 @@ reduces to the rooms the caller can read, so it fails closed rather than denying
 
 ## How to search (the FTS columns)
 
-`messages` carries two MATERIALIZED lowercase copies of `text`, each with a
+`messages_<you>` carries two MATERIALIZED lowercase copies of `text`, each with a
 text index — search those, display `text`:
 
 - `text_ngram` (ngram index) → substring match: `text_ngram LIKE '%term%'`
@@ -121,9 +121,9 @@ FORMAT PrettyCompact
   `cursor`, `cursor-agent`, `vscode`, `zed`, `opencode`, `gemini-cli`,
   `windsurf`, `antigravity`, `copilot-cli`, `goose`, `kiro`, …)
 - Skip subagent noise → `AND NOT m.is_subagent`
-- Only user/assistant text lives in `messages`; tool invocations are in
-  `tool_calls` (`tool_name`, `args`) — search `args ILIKE '%term%'` there only
-  if the user explicitly wants tool calls searched.
+- Only user/assistant text lives in `messages_<you>`; tool invocations are in
+  `tool_calls_<you>` (`tool_name`, `args`) — search `args ILIKE '%term%'` there
+  only if the user explicitly wants tool calls searched.
 
 ## Output
 
