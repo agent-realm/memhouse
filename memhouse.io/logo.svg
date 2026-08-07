@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="g" x1="96" y1="80" x2="416" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a5b4fc"/>
+      <stop offset="0.55" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#0d0d13"/>
+
+  <!-- the house: roof + walls -->
+  <path d="M96 232 L256 104 L416 232 L416 408 A16 16 0 0 1 400 424 L112 424 A16 16 0 0 1 96 408 Z"
+        stroke="url(#g)" stroke-width="26" stroke-linejoin="round" fill="none"/>
+
+  <!-- the rooms: stacked tables inside the house -->
+  <rect x="164" y="262" width="184" height="34" rx="12" fill="#818cf8" opacity="0.95"/>
+  <rect x="164" y="312" width="184" height="34" rx="12" fill="#818cf8" opacity="0.62"/>
+  <rect x="164" y="362" width="184" height="34" rx="12" fill="#818cf8" opacity="0.32"/>
+</svg>

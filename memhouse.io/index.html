@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memhouse — agent conversation memory, in one house</title>
+<meta name="description" content="Every coding-agent session on your machines — across 17 editors — parsed locally, shipped to one typed ClickHouse store, searchable by you and by your agents. Install with one command.">
+<link rel="canonical" href="https://memhouse.io/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://memhouse.io/">
+<meta property="og:title" content="memhouse — agent conversation memory, in one house">
+<meta property="og:description" content="17 editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents remember every session you have ever had.">
+<meta property="og:image" content="https://memhouse.io/dashboard.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="memhouse — agent conversation memory, in one house">
+<meta name="twitter:description" content="17 editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents remember every session you have ever had.">
+<meta name="twitter:image" content="https://memhouse.io/dashboard.png">
+<meta name="theme-color" content="#0a0a0f">
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="apple-touch-icon" href="/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="/">
+      <img src="/logo.svg" alt="">
+      memhouse
+      <span class="ver">v0.4.1</span>
+    </a>
+    <nav class="nav-links">
+      <a class="hide-sm" href="#how">How it works</a>
+      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="#house">Where it lives</a>
+      <a class="hide-sm" href="#agents">For agents</a>
+      <a href="https://github.com/agent-realm/memhouse">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<!-- ============ HERO ============ -->
+<section class="hero">
+  <div class="wrap">
+    <div class="pill"><span class="dot"></span> <b>17 editors</b> &middot; one typed store &middot; parsed on your machine</div>
+
+    <h1 class="hero-title">Your agents forget.<br><span class="grad">The house remembers.</span></h1>
+
+    <p class="hero-sub">
+      Every coding-agent session on every machine you use — Claude Code, Codex, Cursor, Gemini CLI,
+      Devin, Zed and a dozen more — <b>parsed locally</b>, shipped to <b>one typed ClickHouse store</b>,
+      and readable by you <em>and</em> by your agents. Not a log dump: typed rows, tool calls,
+      costs, full-text search.
+    </p>
+
+    <div class="cta-row">
+      <a class="btn btn-primary" href="#install">Install memhouse</a>
+      <a class="btn btn-ghost" href="https://github.com/agent-realm/memhouse">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        Source
+      </a>
+    </div>
+
+    <div class="cmd" style="max-width:640px">
+      <span class="prompt">$</span>
+      <code id="hero-cmd">npm install -g memhouse --allow-scripts=better-sqlite3</code>
+      <button class="copy" data-copy="#hero-cmd">Copy</button>
+    </div>
+    <p class="hero-note">
+      Then <code>memhouse onboard</code> — discover &rarr; configure &rarr; ship &rarr; start.
+      Keep <code>--allow-scripts</code>: five adapters read SQLite and need the native binding.
+    </p>
+
+    <div class="shot">
+      <div class="shot-bar"><i></i><i></i><i></i><span>localhost:4640 — memhouse dashboard</span></div>
+      <img src="/dashboard.png" alt="The memhouse dashboard: sessions, models, token costs and tool calls across every editor" width="1760" height="1275" loading="lazy">
+    </div>
+    <p class="shot-cap">The dashboard is agentlytics' UI, unforked — memhouse serves the same bundle over its own typed store.</p>
+  </div>
+</section>
+
+<!-- ============ EDITORS ============ -->
+<section style="padding:56px 0">
+  <div class="wrap">
+    <p class="section-sub" style="text-align:center;margin:0 auto 26px;max-width:620px">
+      One shipper. Seventeen adapters. Whatever you switched to last month is already covered.
+    </p>
+  </div>
+  <div class="marquee">
+    <div class="track" id="editor-track"></div>
+  </div>
+</section>
+
+<!-- ============ HOW ============ -->
+<section id="how">
+  <div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2 class="section-title">Three moving parts, one of them yours</h2>
+    <p class="section-sub">
+      memhouse is a <b>house</b> — a ClickHouse database — plus one <b>resident</b>: the shipper.
+      Everything else only reads.
+    </p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div>
+        <h3>Parse on the client</h3>
+        <p>
+          The shipper runs the 17 adapters on your machine — JSONL transcripts <em>and</em> the
+          SQLite databases Cursor, Zed, Goose, OpenCode and Antigravity keep — and emits typed rows.
+          Nothing raw leaves your disk.
+        </p>
+      </div>
+      <div class="step">
+        <div class="n">2</div>
+        <h3>Ship to typed rooms</h3>
+        <p>
+          <code>messages</code>, <code>sessions</code>, <code>tool_calls</code> — real columns,
+          not JSON parsed at query time. <code>ReplacingMergeTree</code> keyed so a re-ship of a
+          grown session replaces stale rows. Incremental by default, safe to run in a loop.
+        </p>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <h3>Ask — as a human or an agent</h3>
+        <p>
+          The dashboard for eyes, full-text search for terms, and a skills/plugin payload so an
+          agent queries its own past sessions before claiming it doesn't know.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow">What you get</p>
+    <h2 class="section-title">Memory that behaves like a database</h2>
+    <p class="section-sub">Because it is one.</p>
+
+    <div class="cards">
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg>
+        <h3>Typed common schema</h3>
+        <p>Physical columns for what other tools derive in views, plus a <code>tool_calls</code> table most don't have at all, plus one <code>extra JSON</code> escape hatch per table so no adapter field is ever lost.</p>
+      </div>
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <h3>One set of rooms per member</h3>
+        <p>Every member owns <code>messages_you</code>, <code>sessions_you</code>, <code>tool_calls_you</code>. Isolation is a grant that is simply <em>absent</em> — not a row policy that has to be right on every table and every read path. It fails closed.</p>
+      </div>
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+        <h3>Full-text search, built in</h3>
+        <p><code>memhouse search &lt;terms&gt;</code> across every session you have ever had, on every machine, in any editor. ClickHouse text indexes, not a grep over files that may already be rotated away.</p>
+      </div>
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M2 12h2M20 12h2M9 11v2M15 11v2"/></svg>
+        <h3>Agent-native, not agent-adjacent</h3>
+        <p>Every command is dual-mode: interactive for humans, <code>--yes</code> / flags / <code>--json</code> for agents. An agent can install its own memory — <code>memhouse install --yes</code>, then <code>memhouse plugins install claude</code>.</p>
+      </div>
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m7 15 4-5 3 3 5-6"/></svg>
+        <h3>Costs, models, tools</h3>
+        <p>A cost engine over per-model token sums, and a dashboard that shows sessions, spend, model mix and tool usage across all your agents at once — the same UI, unforked.</p>
+      </div>
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10 12 3l9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 21v-8h6v8"/></svg>
+        <h3>Survives a reboot</h3>
+        <p><code>memhouse service install</code> writes a real user service — systemd <code>--user</code> on Linux, a launchd agent on macOS — and takes over from the pidfile daemons.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HOUSE ============ -->
+<section id="house">
+  <div class="wrap">
+    <p class="eyebrow">Where the memory lives</p>
+    <h2 class="section-title">Your ClickHouse, your rules</h2>
+    <p class="section-sub">
+      memhouse does not embed a database and does not run a cloud you have to trust.
+      Point it at a ClickHouse — or let it stand one up for you in one command.
+    </p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Path</th><th>What it runs</th><th>Who it's for</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>memhouse deploy --local</td>
+            <td>Stock ClickHouse in docker or podman, bound to loopback. Labels what it creates and refuses to touch a container or volume it did not create.</td>
+            <td>One machine — or several members later.</td>
+          </tr>
+          <tr>
+            <td>kernel install</td>
+            <td>An agency house on an ultimagent kernel: house, owner, credential, members via grants on their own rooms.</td>
+            <td>A team, provisioned centrally.</td>
+          </tr>
+          <tr>
+            <td>point at your own</td>
+            <td>Any reachable ClickHouse — a server you run, ClickHouse Cloud, whatever you already pay for.</td>
+            <td>You already have one.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout" style="margin-top:24px">
+      <b>Sharing is one GRANT.</b> A shared read is a Merge room (<code>all_sessions</code>) plus a grant,
+      which reduces to whatever rooms the caller can already read. On a house you own, <code>memhouse install</code>
+      mints your three rooms and you're done. On someone else's, the owner mints them — and sharing after that
+      is self-serve, with no operator in the loop.
+    </div>
+  </div>
+</section>
+
+<!-- ============ COMMANDS ============ -->
+<section id="install">
+  <div class="wrap">
+    <p class="eyebrow">The CLI</p>
+    <h2 class="section-title">One binary, no dashboard tour required</h2>
+    <p class="section-sub">Config resolves flags &gt; <code>MEMHOUSE_*</code> env &gt; <code>~/.memhouse/env</code> &gt; defaults.</p>
+
+    <div class="split" style="align-items:start">
+      <div class="term">
+<pre><span class="c"># install (keep the flag — five adapters read SQLite)</span>
+<span class="p">$</span> <span class="k">npm install -g memhouse --allow-scripts=better-sqlite3</span>
+
+<span class="c"># no ClickHouse yet? one command stands one up</span>
+<span class="p">$</span> <span class="k">memhouse deploy --local</span>
+
+<span class="c"># the wizard: discover → configure → ship → start</span>
+<span class="p">$</span> <span class="k">memhouse onboard</span>
+<span class="g">  ✓</span> 17 adapters, 9 with sessions on this machine
+<span class="g">  ✓</span> 4,812 sessions · 213,400 messages shipped
+<span class="g">  ✓</span> dashboard on <span class="a">http://localhost:4640</span>
+
+<span class="c"># then, any time</span>
+<span class="p">$</span> <span class="k">memhouse search</span> clickhouse ttl
+<span class="p">$</span> <span class="k">memhouse stats</span>
+<span class="p">$</span> <span class="k">memhouse status --json</span>
+<span class="p">$</span> <span class="k">memhouse doctor</span>
+</pre>
+      </div>
+
+      <div>
+        <h3 style="font-size:20px;margin-bottom:6px">Just want to look first?</h3>
+        <p style="color:var(--text-2);font-size:15.5px;margin-top:0">
+          <code style="color:var(--accent-2)">discover</code> is a read-only preflight — it tells you which
+          editors it found, how many sessions are sitting on this disk, and which ClickHouses it can reach.
+          It writes nothing.
+        </p>
+        <div class="cmd" style="margin:16px 0 26px">
+          <span class="prompt">$</span>
+          <code id="npx-cmd">npx --allow-scripts=better-sqlite3 -y memhouse discover</code>
+          <button class="copy" data-copy="#npx-cmd">Copy</button>
+        </div>
+
+        <ul class="list">
+          <li><b>Incremental.</b> A pass skips every session that hasn't grown or changed; a full re-ship stays safe.</li>
+          <li><b>Idempotent.</b> Re-shipping a known session clears its old message and tool rows first, so a shrunken re-parse can't leave a stale tail behind.</li>
+          <li><b>Honest about failure.</b> <code>doctor</code> diagnoses the whole pipeline, and <code>discover</code> says out loud when the SQLite binding is missing rather than silently shipping a partial history.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ AGENTS ============ -->
+<section id="agents">
+  <div class="wrap">
+    <p class="eyebrow">For agents</p>
+    <h2 class="section-title">"Did we ever solve this before?"</h2>
+    <p class="section-sub">
+      The point of a house full of past sessions is that the next session can read it.
+      memhouse ships the delivery kit that makes that true.
+    </p>
+
+    <div class="split" style="align-items:start">
+      <div>
+        <ul class="list" style="margin-top:0">
+          <li><b>Skills.</b> <code>/memhouse:search</code>, <code>/memhouse:sessions</code>, <code>/memhouse:sql</code> — full-text, session listing, and free-form read-only SQL.</li>
+          <li><b>A plugin.</b> <code>memhouse plugins install claude</code> drops them into Claude Code.</li>
+          <li><b>A prompt snippet.</b> <code>memhouse prompt</code> prints the system-prompt block that tells any agent to search memory <em>before</em> claiming ignorance.</li>
+          <li><b>Read-only, by construction.</b> Agents query; only the shipper writes. Other members' sessions are invisible unless they granted you their rooms.</li>
+        </ul>
+      </div>
+      <div class="term">
+<pre><span class="c"># give an agent its own memory, unattended</span>
+<span class="p">$</span> <span class="k">memhouse install --yes \
+    --url https://ch.example.com:8443 \
+    --user alice --password ***** --db mem</span>
+<span class="g">  ✓</span> rooms minted: messages_alice, sessions_alice, tool_calls_alice
+<span class="g">  ✓</span> verified as alice
+
+<span class="p">$</span> <span class="k">memhouse plugins install claude</span>
+<span class="g">  ✓</span> skills installed: search, sessions, sql
+
+<span class="p">$</span> <span class="k">memhouse prompt</span> &gt;&gt; CLAUDE.md
+</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section>
+  <div class="wrap">
+    <div class="band">
+      <h2>Start remembering</h2>
+      <p>One command to see what every agent on your machines has actually been doing — and to let the next one read it.</p>
+      <div class="cmd">
+        <span class="prompt">$</span>
+        <code id="cta-cmd">npm install -g memhouse --allow-scripts=better-sqlite3</code>
+        <button class="copy" data-copy="#cta-cmd">Copy</button>
+      </div>
+      <div class="cta-row" style="justify-content:center;margin-top:22px">
+        <a class="btn btn-ghost" href="https://github.com/agent-realm/memhouse">Read the docs on GitHub</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="faq">
+  <div class="wrap narrow">
+    <h2 class="section-title" style="margin-bottom:26px">Questions</h2>
+
+    <details>
+      <summary>Does anything leave my machine?</summary>
+      <p>Only what you point it at. Parsing happens locally; the shipper writes typed rows to the ClickHouse
+      <em>you</em> configure — which can be a container on the same laptop (<code>memhouse deploy --local</code>,
+      bound to loopback). There is no memhouse cloud and no phone-home.</p>
+    </details>
+
+    <details>
+      <summary>Why do I need <code>--allow-scripts=better-sqlite3</code>?</summary>
+      <p>Five adapters — Cursor, Goose, OpenCode, Zed and Antigravity — read sessions out of SQLite files,
+      and <code>better-sqlite3</code> builds its native binding from an install script. npm 12 blocks install
+      scripts by default, so without the flag those five read nothing and you'd silently ship a partial
+      history. <code>discover</code> and <code>doctor</code> both say so when the binding is missing.</p>
+    </details>
+
+    <details>
+      <summary>What if the install fails with <code>EACCES</code>?</summary>
+      <p>Check <code>ls -ld "$(npm prefix -g)"</code> — the prefix <em>root</em> is what decides.
+      Owned by <code>root</code>: a system-managed Node, so re-run with <code>sudo</code>.
+      Owned by you (Homebrew, fnm, nvm, volta): the prefix is yours and the root-owned file npm tripped on
+      is a stray from an earlier <code>sudo npm</code> — another <code>sudo</code> just adds more.
+      Fix that one path with <code>chown</code> instead.</p>
+    </details>
+
+    <details>
+      <summary>Can a team share memory?</summary>
+      <p>Yes, and sharing is the exception rather than the default. Every member owns their own three rooms;
+      a shared read is a Merge room plus a GRANT, issued by the member themselves or the house owner.
+      Nothing is visible by accident, because visibility is a grant that has to be given, not a policy that
+      has to be enforced everywhere.</p>
+    </details>
+
+    <details>
+      <summary>Which editors, exactly?</summary>
+      <p>Seventeen adapters, covering these sources: Claude Code, Codex, Cursor, Cursor Agent, VS Code,
+      VS Code Insiders, GitHub Copilot (CLI and JetBrains), Gemini CLI, Devin, Devin Next, Zed, Goose,
+      OpenCode, Kiro, Antigravity, Codebuff, Command Code and GSD Workflow.</p>
+    </details>
+
+    <details>
+      <summary>Where does this come from?</summary>
+      <p>The adapters, dashboard and cost engine are built on
+      <a href="https://github.com/f/agentlytics">agentlytics</a> by Fatih Kadir Akın (MIT); this repo's
+      history carries the full lineage. memhouse adds the typed store, per-member rooms, the shipper and
+      the agent delivery kit. It is part of the
+      <a href="https://github.com/agent-realm">Ultimagent constellation</a>, where it installs as an
+      <em>agency</em>.</p>
+    </details>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <div class="foot-note">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <img src="/logo.svg" alt="" width="24" height="24" style="border-radius:7px">
+        <b style="color:var(--text)">memhouse</b>
+      </div>
+      MIT licensed. Built on <a href="https://github.com/f/agentlytics">agentlytics</a> by Fatih Kadir Akın.
+      Part of the <a href="https://github.com/agent-realm">Ultimagent constellation</a>.
+    </div>
+    <div class="foot-links">
+      <a href="https://github.com/agent-realm/memhouse">GitHub</a>
+      <a href="https://www.npmjs.com/package/memhouse">npm</a>
+      <a href="https://github.com/agent-realm/memhouse/blob/master/mem-house/DESIGN.md">Design</a>
+      <a href="https://github.com/agent-realm/memhouse/issues">Issues</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// editor chips — duplicated once so the marquee loops seamlessly
+(function () {
+  var editors = [
+    'Claude Code', 'Codex', 'Cursor', 'Cursor Agent', 'VS Code', 'VS Code Insiders',
+    'GitHub Copilot', 'Copilot — JetBrains', 'Gemini CLI', 'Devin', 'Devin Next',
+    'Zed', 'Goose', 'OpenCode', 'Kiro', 'Antigravity', 'Codebuff', 'Command Code', 'GSD Workflow'
+  ];
+  var track = document.getElementById('editor-track');
+  if (!track) return;
+  var html = editors.map(function (n) { return '<span class="chip">' + n + '</span>'; }).join('');
+  track.innerHTML = html + html;
+})();
+
+// copy buttons
+document.querySelectorAll('.copy').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var el = document.querySelector(btn.dataset.copy);
+    if (!el) return;
+    var text = el.textContent.trim();
+    var done = function () {
+      var old = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(function () { btn.textContent = old; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fallback(text, done); });
+    } else {
+      fallback(text, done);
+    }
+  });
+});
+function fallback(text, cb) {
+  var a = document.createElement('textarea');
+  a.value = text; a.style.position = 'fixed'; a.style.opacity = '0';
+  document.body.appendChild(a); a.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(a); cb();
+}
+</script>
+
+</body>
+</html>
