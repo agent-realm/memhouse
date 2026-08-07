@@ -9,12 +9,12 @@
 # for assets is an hour. Two defences, because either alone has a hole:
 #
 #   1. must-revalidate below, so an edit to an existing file is picked up at once.
-#   2. a version suffix in the filename (style-2.css), so a copy already sitting
+#   2. a version suffix in the filename (style-3.css), so a copy already sitting
 #      in someone's browser is never requested again. Bump the suffix on any
 #      change a visitor must see immediately.
 #
-# Note these rules match on PATH ONLY — `/style-2.css?v=3` does NOT match
-# `/style-2.css` and silently falls back to the default cache. Query-string
+# Note these rules match on PATH ONLY — `/style-3.css?v=4` does NOT match
+# `/style-3.css` and silently falls back to the default cache. Query-string
 # cache-busting does not work here; renaming the file does.
 
 /
@@ -26,7 +26,7 @@
 /404.html
   Cache-Control: public, max-age=0, must-revalidate
 
-/style-2.css
+/style-3.css
   Cache-Control: public, max-age=0, must-revalidate
 
 /logo-2.svg
