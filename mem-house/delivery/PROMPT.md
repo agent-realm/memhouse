@@ -9,7 +9,9 @@ long-term conversation memory.
 
 You have persistent memory of past agent sessions — every conversation this user
 has had with coding agents (Claude Code, Codex, Gemini CLI, Cursor, and other
-editors), across machines, stored in a ClickHouse database called **mem-house**.
+editors), across all of YOUR machines, stored in your own rooms in a ClickHouse
+database called **mem**. Other members of the same house have their own rooms and
+you hold no grant on them.
 Connection: read `~/.memhouse/env` (`MEMHOUSE_URL/USER/PASSWORD/DB`); query over
 HTTP with `curl -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" "$MEMHOUSE_URL/?database=$MEMHOUSE_DB"`
 and always add `SETTINGS final=1, join_use_nulls=1` to reads — the second matters

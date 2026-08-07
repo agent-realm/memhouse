@@ -2,11 +2,16 @@
 
 **mem-house** is agent conversation memory as a product: every coding-agent session
 on your machines — across **all 17 editors** agentlytics supports — parsed locally,
-shipped to one typed ClickHouse store, shareable with a team, installable on the
+shipped to a typed ClickHouse store, shareable with a team, installable on the
 ultimagent kernel as an **agency**, and visible through the agentlytics dashboard.
 
+**One house, a set of rooms per member** — `sessions_<m>`, `messages_<m>`,
+`tool_calls_<m>`. All of one member's machines ship into that member's rooms, told
+apart by the `host` column; no member writes into another's. The shared-table layout
+this once had was removed in 0.4.0; see `per-member/`.
+
 **Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) mem-house is a
-**house** — the `memhouse` database — **plus a resident**: the shipper. That pairing
+**house** — the `mem` database — **plus a resident**: the shipper. That pairing
 is what the word *agency* means; a house on its own only holds.
 
 The test is mechanical — **residents write, routines read**. The shipper fires on a
