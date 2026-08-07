@@ -95,7 +95,10 @@
 
 *, *::before, *::after { box-sizing: border-box; border-radius: 0; }
 
-html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+/* The clip goes on BOTH html and body. `overflow-x: hidden` on body alone is
+   unreliable on iOS Safari — the page still pans — which is exactly how a wide
+   child shows up as "it scrolls sideways on mobile". */
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; overflow-x: hidden; }
 
 body {
   margin: 0;
@@ -154,12 +157,18 @@ header.nav {
 .nav-inner { display: flex; align-items: center; gap: 16px; height: 58px; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 16px; border: 0; }
 .brand:hover { border: 0; }
-.brand img { display: block; height: 28px; width: auto; }
-.brand .on-dark, :root[data-theme="dark"] .brand .on-light { display: none; }
-:root[data-theme="dark"] .brand .on-dark { display: block; }
-.foot-brand img { display: block; height: 52px; width: auto; margin-bottom: 14px; }
-.foot-brand .on-dark, :root[data-theme="dark"] .foot-brand .on-light { display: none; }
-:root[data-theme="dark"] .foot-brand .on-dark { display: block; }
+/* The dark copies carry the `hidden` attribute, so with no stylesheet at all the
+   page shows one mark, not two. CSS un-hides the right one per theme; `[hidden]`
+   would otherwise win, so the dark rules restate display explicitly. */
+.brand img { display: block; height: 28px; width: auto; max-width: 44px; }
+.brand .on-dark[hidden] { display: none; }
+:root[data-theme="dark"] .brand .on-light { display: none; }
+:root[data-theme="dark"] .brand .on-dark[hidden] { display: block; }
+
+.foot-brand img { display: block; height: 52px; width: auto; max-width: 80px; margin-bottom: 14px; }
+.foot-brand .on-dark[hidden] { display: none; }
+:root[data-theme="dark"] .foot-brand .on-light { display: none; }
+:root[data-theme="dark"] .foot-brand .on-dark[hidden] { display: block; }
 .brand .ver {
   font-family: var(--mono); font-size: 10.5px; color: #14130f;
   background: var(--yellow); padding: 2px 7px; font-weight: 600;
@@ -361,7 +370,14 @@ td b { color: var(--text); font-weight: 600; }
 
 /* ---------- lists / callout ---------- */
 
+/* Grid and flex children default to `min-width: auto`, meaning they refuse to
+   shrink below their longest unbreakable line. A column holding a terminal block
+   then forces the whole page wider than the viewport, and the scrollbar the <pre>
+   already has never gets used. `min-width: 0` lets the column shrink so the
+   overflow is handled where it belongs — inside the code block. */
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; align-items: start; }
+.split > *, .aud > *, .cards > *, .steps > *, .tiles > * { min-width: 0; }
+.term, .tbl-wrap, .panel { min-width: 0; max-width: 100%; }
 @media (max-width: 900px) { .split { grid-template-columns: 1fr; gap: 26px; } }
 
 .list { list-style: none; padding: 0; margin: 18px 0 0; }
