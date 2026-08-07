@@ -14,13 +14,13 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="memhouse — agent conversation memory, in one house">
 <meta name="twitter:description" content="17 editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents stop starting from zero.">
-<meta name="theme-color" content="#f5f5f5">
-<link rel="icon" type="image/svg+xml" href="/logo-2.svg">
-<link rel="apple-touch-icon" href="/logo-2.svg">
+<meta name="theme-color" content="#f7f5f0">
+<link rel="icon" type="image/svg+xml" href="/logo-3.svg">
+<link rel="apple-touch-icon" href="/logo-3.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/style-3.css">
+<link rel="stylesheet" href="/style-4.css">
 <script>
   // Applied before first paint: a stored choice must not arrive as a flash of the
   // other theme. Light is the default, as in the dashboard's own preference.
@@ -39,9 +39,9 @@
     <a class="brand" href="/">
       <svg width="22" height="22" viewBox="0 0 512 512" fill="none" aria-hidden="true">
         <path d="M96 234 L256 104 L416 234 L416 408 A14 14 0 0 1 402 422 L110 422 A14 14 0 0 1 96 408 Z" stroke="currentColor" stroke-width="34" stroke-linejoin="round" fill="none"/>
-        <rect x="166" y="266" width="180" height="32" fill="#9a6b06"/>
-        <rect x="166" y="314" width="180" height="32" fill="#4f46e5"/>
-        <rect x="166" y="362" width="180" height="32" fill="#0f766e"/>
+        <rect x="166" y="266" width="180" height="32" fill="#ffea25"/>
+        <rect x="166" y="314" width="180" height="32" fill="#98bead"/>
+        <rect x="166" y="362" width="180" height="32" fill="#c8a48c"/>
       </svg>
       memhouse
       <span class="ver">v0.4.1</span>
@@ -66,7 +66,7 @@
   <div class="wrap">
     <div class="status"><span class="dot"></span> <b>v0.4.1</b> &middot; 17 editor adapters &middot; MIT</div>
 
-    <h1 class="hero-title"><span class="dim">Your agents forget.</span><br>The house remembers.</h1>
+    <h1 class="hero-title"><span class="dim">Your agents forget.</span><br><span class="mark">The house remembers.</span></h1>
 
     <p class="hero-sub">
       Every coding-agent session on every machine you install it on — Claude Code, Codex, Cursor, Gemini CLI,
@@ -100,8 +100,8 @@
       </div>
       <div class="tile t">
         <div class="v">3</div>
-        <div class="n">rooms per member</div>
-        <div class="s">messages · sessions · tool_calls</div>
+        <div class="n">rooms per credential</div>
+        <div class="s">one set per member, or per agent</div>
       </div>
       <div class="tile i">
         <div class="v">1</div>
@@ -380,6 +380,53 @@
         </div>
       </div>
     </div>
+
+    <div class="split" style="margin-top:34px">
+      <div>
+        <h3 style="font-size:19px;margin-bottom:10px">Agents that see only their slice</h3>
+        <p style="color:var(--text-2);font-size:15px;margin-top:0">
+          A crew is not one memory. Each agent gets a credential, and a credential is three rooms —
+          so a scout, a builder and a reviewer each hold their own history and none of them can read
+          the others by default. What one agent may see another agent's work is a decision you make,
+          not a filter you hope holds.
+        </p>
+        <ul class="list" style="margin-top:16px">
+          <li><b>Share a whole memory, self-serve.</b> Three <code>GRANT</code>s, issued by the owner of
+            the rooms — no operator, no ticket. Measured end to end: a grant took what the recipient
+            could see from 0 rows to 22,413, and the revoke put it back to 0.</li>
+          <li><b>Share a slice, owner-mediated.</b> A subset is a grant <em>plus</em> a row policy, and
+            policies are house-scoped, so this one goes through the house owner deliberately. Both
+            halves are required: privilege without a policy shares everything, a policy without
+            privilege shares nothing.</li>
+          <li><b>Read-only by construction.</b> The grant option a member holds is attached to
+            <code>SELECT</code>, so sharing hands over reading — never writing or dropping.</li>
+        </ul>
+      </div>
+      <div>
+        <div class="callout" style="margin-bottom:14px">
+          <b>The line that actually matters.</b> Separation is between <em>credentials</em>, not between
+          agents. A crew running under one shared credential reads and writes the same rooms, and any
+          per-agent tag in that setup is client-supplied — which means it is a label, not a boundary.
+          Enforced separation means a credential each.
+        </div>
+        <div class="term">
+<pre><span class="c"># one credential per agent — one isolated memory each</span>
+<span class="p">$</span> <span class="k">memhouse install --yes --user scout    …</span>
+<span class="p">$</span> <span class="k">memhouse install --yes --user builder  …</span>
+<span class="g">  ✓</span> <span class="t">messages_scout, sessions_scout, tool_calls_scout</span>
+<span class="g">  ✓</span> <span class="t">messages_builder, …</span>  <span class="c"># invisible to scout</span>
+
+<span class="c"># let the builder read what the scout found</span>
+<span class="p">$</span> <span class="k">GRANT SELECT ON mem.messages_scout   TO builder;</span>
+<span class="p">$</span> <span class="k">GRANT SELECT ON mem.sessions_scout   TO builder;</span>
+<span class="p">$</span> <span class="k">GRANT SELECT ON mem.tool_calls_scout TO builder;</span>
+
+<span class="c"># and take it back</span>
+<span class="p">$</span> <span class="k">REVOKE SELECT ON mem.messages_scout FROM builder;</span>
+</pre>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -403,8 +450,8 @@
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-        <h3>Per-member rooms</h3>
-        <p>The only layout. A member is granted their own rooms and nobody else's, so visibility is something you must be given rather than something a policy has to enforce everywhere.</p>
+        <h3>An isolated room per agent</h3>
+        <p>Give an agent its own credential and it gets its own three rooms — it can see its memory and nobody else's. Isolation is a grant that is simply <em>absent</em>, so it fails closed rather than depending on a filter being right everywhere.</p>
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M2 12h2M20 12h2M9 11v2M15 11v2"/></svg>
@@ -637,7 +684,7 @@
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
         <svg width="20" height="20" viewBox="0 0 512 512" fill="none" aria-hidden="true">
           <path d="M96 234 L256 104 L416 234 L416 408 A14 14 0 0 1 402 422 L110 422 A14 14 0 0 1 96 408 Z" stroke="currentColor" stroke-width="34" stroke-linejoin="round" fill="none"/>
-          <rect x="166" y="266" width="180" height="32" fill="#9a6b06"/><rect x="166" y="314" width="180" height="32" fill="#4f46e5"/><rect x="166" y="362" width="180" height="32" fill="#0f766e"/>
+          <rect x="166" y="266" width="180" height="32" fill="#ffea25"/><rect x="166" y="314" width="180" height="32" fill="#98bead"/><rect x="166" y="362" width="180" height="32" fill="#c8a48c"/>
         </svg>
         <b style="color:var(--text)">memhouse</b>
       </div>
@@ -663,14 +710,14 @@
     var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     root.setAttribute('data-theme', next);
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', next === 'dark' ? '#0e0e0e' : '#f5f5f5');
+    if (meta) meta.setAttribute('content', next === 'dark' ? '#100f0d' : '#f7f5f0');
     try { localStorage.setItem('memhouse-theme', next); } catch (e) {}
   });
 })();
 
 // editor chips — colours echo the dashboard's categorical series
 (function () {
-  var C = ['#d9a441', '#6366f1', '#45b3ac', '#4ade80', '#a855f7', '#e05f7a', '#818cf8', '#5fa8d3'];
+  var C = ['#ffea25', '#98bead', '#c8a48c', '#e02200'];
   var editors = [
     'Claude Code', 'Codex', 'Cursor', 'Cursor Agent', 'VS Code', 'VS Code Insiders',
     'GitHub Copilot', 'Copilot JetBrains', 'Gemini CLI', 'Devin', 'Devin Next',
