@@ -11,8 +11,8 @@
 # "Config schema". sql-count runs in-clone via ssh against an explicit endpoint, so it
 # needs no CLI subcommand on the subject.
 #
-# NOTE: this scenario targets the per-member data model in house `mem`. It is expected to
-# FAIL against master, which still ships the removed shared-room layout.
+# The endpoint is `__HOUSE__`, rendered by ../run.sh from MEMHOUSE_E2E_HOUSE. It must be
+# reachable FROM THE CLONE — a lab is http://<LAB_IP>:<PORT_BASE>, not your tunnel.
 #
 # PRECONDITION — the house is NOT reset by the clone. The gauntlet's "hypervisor is the
 # reset" tenet covers the VM, not the external ClickHouse. Before running, the house must
@@ -44,25 +44,25 @@ assertions = [
   "file-exists:~/.memhouse/env",
 
   # --- 1. memory landed in the MEMBER'S OWN room, not a shared one ---
-  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.messages_alice WHERE host LIKE '__HOST__%'|>0",
+  "sql-count:__HOUSE__|alice|apw|SELECT count() FROM mem.messages_alice WHERE host LIKE '__HOST__%'|>0",
 
   # --- 2. user_id is stamped with the member, server-side ---
-  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.messages_alice WHERE user_id != 'alice'|=0",
+  "sql-count:__HOUSE__|alice|apw|SELECT count() FROM mem.messages_alice WHERE user_id != 'alice'|=0",
 
   # --- 3. the second member's room did NOT receive this member's rows ---
   #     structural: nothing can write into bob's room but bob, so this holds
   #     regardless of any sharing.
-  "sql-count:http://10.10.10.30:18310|bob|bpw|SELECT count() FROM mem.messages_bob WHERE host LIKE '__HOST__%'|=0",
+  "sql-count:__HOUSE__|bob|bpw|SELECT count() FROM mem.messages_bob WHERE host LIKE '__HOST__%'|=0",
 
   # --- 4. the Merge room fails closed: bob sees only bob through it ---
   #     PRECONDITION-SENSITIVE: a live share from alice to bob flips this to >0,
   #     correctly. See the PRECONDITION note in the header.
-  "sql-count:http://10.10.10.30:18310|bob|bpw|SELECT count() FROM mem.all_messages WHERE user_id = 'alice'|=0",
+  "sql-count:__HOUSE__|bob|bpw|SELECT count() FROM mem.all_messages WHERE user_id = 'alice'|=0",
   #     and alice sees her own through it
-  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.all_messages WHERE user_id = 'alice'|>0",
+  "sql-count:__HOUSE__|alice|apw|SELECT count() FROM mem.all_messages WHERE user_id = 'alice'|>0",
 
   # --- 5. the shipper wrote sessions too, and the incremental state is readable ---
-  "sql-count:http://10.10.10.30:18310|alice|apw|SELECT count() FROM mem.sessions_alice|>0",
+  "sql-count:__HOUSE__|alice|apw|SELECT count() FROM mem.sessions_alice|>0",
 
   # --- the transcript should show a successful ship, and no crash ---
   "text-in-transcript:shipped",
