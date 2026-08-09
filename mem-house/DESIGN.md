@@ -47,6 +47,10 @@ two run side by side as separate agencies, each in its own house. Naming: the pr
 
 ## The four bets
 
+`COMPETITION.md` grades each of these against the field as surveyed 2026-08-07.
+Short version: bets 1, 2 and 4 are occupied by shipping competitors, several of
+them free and further along; **bet 3 is the one nobody else attempts.**
+
 1. **Parse on the client.** memory-house ships raw transcript lines and parses in
    views — workable only because its 4 agents store sessions as JSON/JSONL files.
    agentlytics' breadth includes sqlite-backed editors (Cursor, VS Code, Zed,
@@ -85,6 +89,7 @@ two run side by side as separate agencies, each in its own house. Naming: the pr
 | `shipper/ship.js` | parse-on-client shipper CLI — the resident (`worker`) | reuses `../../editors`; incremental; idempotent |
 | `server/server.js` | REST API + dashboard | same API contract as agentlytics; serves `../../public` |
 | `delivery/` | delivery kit | installer, skills, plugin, AGENT-INSTALL.md, prompt |
+| `COMPETITION.md` | the competitive landscape, graded against the four bets | surveyed 2026-08-07; figures decay, re-run before citing |
 
 ## Environment contract
 
