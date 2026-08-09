@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // mem-house SHIPPER — parse-on-client (bet #1 in ../DESIGN.md). Runs the 17 editor
-// adapters locally and ships TYPED rows into the house (sessions / messages /
-// tool_calls, ../schema.sql). The typed evolution of agency/ingest.js: same host id,
+// adapters locally and ships TYPED rows into THE CALLER'S OWN rooms — sessions_<m> /
+// messages_<m> / tool_calls_<m>, where <m> is `SELECT currentUser()` and never config
+// (../per-member/schema-member.sql.tpl, ../per-member/rooms.js). All of one member's
+// machines land in that member's rooms, told apart by the `host` column; no member
+// writes into another's. The typed evolution of agency/ingest.js: same host id,
 // same ts interpolation, same batching discipline — but rows land in physical
 // columns instead of a raw JSON blob.
 //

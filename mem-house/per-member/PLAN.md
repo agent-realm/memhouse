@@ -62,18 +62,22 @@ operations rather than mutations across a shared table.
 
 ## Grants
 
-Three per member, explicit, one per room — plus SELECT on the Merge rooms:
+Two statements per room, six per member, explicit — plus SELECT on the Merge rooms.
+`PROVISIONING.md` is the authority; this is the shape:
 
 ```sql
-GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.sessions_<m>   TO <m> WITH GRANT OPTION;
-GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.messages_<m>   TO <m> WITH GRANT OPTION;
-GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE ON mem.tool_calls_<m> TO <m> WITH GRANT OPTION;
+GRANT ALL    ON mem.sessions_<m>   TO <m>;
+GRANT SELECT ON mem.sessions_<m>   TO <m> WITH GRANT OPTION;
+-- and the same pair for messages_<m> and tool_calls_<m>
 ```
 
-The two `ALTER` grants are load-bearing, not defensive: the shipper's re-ship is
-clear-then-insert, so a growing transcript cannot leave a stale `seq` tail when a re-parse
-yields fewer rows. `WITH GRANT OPTION` is what makes whole-room sharing self-serve. Three
-statements is not a burden — the kernel runs multi-statement SQL.
+**The split is the point.** `ALL` covers the mutation privileges the shipper's re-ship
+needs without naming them — clear-then-insert, so a growing transcript cannot leave a
+stale `seq` tail when a re-parse yields fewer rows, and which of `ALTER UPDATE` /
+`ALTER DELETE` a server demands varies by version. Grant-option is attached to the
+`SELECT` statement and **not** to the `ALL` one, so a share is read-only by construction:
+a member cannot hand a colleague `DROP TABLE` while meaning "let them read my sessions".
+Never `ON mem.*` — see PROVISIONING.
 
 ## What stays
 
@@ -83,7 +87,7 @@ statements is not a burden — the kernel runs multi-statement SQL.
 - Parse-on-client; the shipper runs the 17 adapters and writes typed rows.
 - `sessions_v` as a **saved query** run under the caller, not a stored view — the v1–v4
   decision, restored. The read layer resolves it as text in the same place it resolves a
-  room name, so both layouts share one code path.
+  room name, so the rollup and the rooms travel through one substitution point.
 - The REST contract and the borrowed dashboard.
 
 ## Measured facts (ClickHouse 26.7.1)

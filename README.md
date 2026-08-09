@@ -2,12 +2,21 @@
 
 **memhouse** — agent conversation memory as a product. Every coding-agent session
 on your machines — across the **17 editors** the agentlytics adapters support —
-parsed locally, shipped to one typed ClickHouse store, shareable with a team,
+parsed locally, shipped to a typed ClickHouse store, shareable with a team,
 installable on the ultimagent kernel as an **agency**, and visible through the
 agentlytics dashboard unchanged.
 
+**One house, a set of rooms per member.** Each member owns
+`sessions_<them>`, `messages_<them>`, `tool_calls_<them>`, and holds grants on
+those and nothing else — isolation is a grant that is simply absent, so it fails
+closed. All of *your* machines ship into *your* rooms (the `host` column tells them
+apart); another member's machines never do. A team-wide read is a `Merge` room plus
+a `GRANT`, which narrows to whatever the caller can already see.
+
+There is no shared-table layout. That was memory-house's model and 0.4.0 removed it.
+
 An **agency** in the constellation sense (`TERMINOLOGY.md`): a **house** — the
-`memhouse` database — plus a **resident** working in it, the shipper. The test is
+`mem` database — plus a **resident** working in it, the shipper. The test is
 what writes. The shipper fires on its own loop and puts rows in the house that
 outlive any query; everything else here is only ever read. The house alone would
 hold; the shipper is what makes it act.
@@ -132,8 +141,8 @@ agents — so an agent can self-install its own memory (`memhouse install --yes 
 `~/.memhouse/env` > defaults.
 
 Deeper docs: `mem-house/delivery/AGENT-INSTALL.md`, kernel install (agency
-`memhouse`, members, own-only RLS): `mem-house/delivery/kernel-install.md`,
-skills/plugin payloads: `mem-house/delivery/`.
+`memhouse`, members, per-member rooms and their grants):
+`mem-house/delivery/kernel-install.md`, skills/plugin payloads: `mem-house/delivery/`.
 
 ## Heritage & license
 

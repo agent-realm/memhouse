@@ -5,20 +5,23 @@
 //
 // Run as the OWNER. Steps, all IF NOT EXISTS / re-runnable:
 //   1. create the member's three rooms from schema-member.sql.tpl
-//   2. grant the member SELECT, INSERT, ALTER UPDATE, ALTER DELETE on those three rooms,
-//      WITH GRANT OPTION (grant-option is what makes whole-room sharing self-serve; the
-//      two ALTER grants are required by the shipper's clear-then-insert, not a
-//      convenience — see the note at the grant itself)
+//   2. grant the member their own three rooms, TWO statements each: `ALL` (not
+//      re-grantable), then `SELECT WITH GRANT OPTION`. The split is the point —
+//      `ALL` covers the mutation privileges the shipper's clear-then-insert needs
+//      without naming them, and attaching grant-option to `SELECT` alone makes a share
+//      read-only by construction. See the notes at the grants themselves.
 //
-//      THREE grants, not four: the session rollup is a saved query over these same rooms,
-//      not a stored view, so it needs no object and no grant of its own.
+//      THREE ROOMS, not four objects: the session rollup is a saved query over these
+//      same rooms, not a stored view, so it needs no object and no grant of its own.
 //   3. --merge: create/refresh the three Merge rooms, borrowing this member's columns
 //   4. grant the member SELECT on whichever Merge rooms exist — a Merge reduces to the
 //      rooms the caller can already read, so this is what makes the team room fail
 //      CLOSED rather than deny outright
 //
-// Grants are explicit, one statement per room. No wildcards are used anywhere; the only
-// pattern in the design is the Merge regex, anchored on a fixed room type.
+// Grants are explicit, per room, and NEVER `ON mem.*` — a member who can read the whole
+// house can read every other member's rooms, which would make this a shared house with
+// longer table names. No wildcards are used anywhere; the only pattern in the design is
+// the Merge regex, anchored on a fixed room type.
 //
 // Env: MEM_URL / MEM_USER / MEM_PASSWORD / MEM_DB, falling back to MEMHOUSE_* and then
 // to the shipper's own defaults — http://localhost:8123, memhouse_root, mem.

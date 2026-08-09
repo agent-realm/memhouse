@@ -1,16 +1,17 @@
 // queries.js — mem-house read/query layer.
 //
 // Serves the SAME response shapes as the root cache.js (the agentlytics API
-// contract) but computed over the mem-house typed schema (sessions, messages,
-// tool_calls + sessions_v view; see ../schema.sql). The dashboard SPA consumes
-// these shapes unchanged.
+// contract) but computed over the mem-house typed schema — one set of rooms per member,
+// `sessions_<m>` / `messages_<m>` / `tool_calls_<m>` (../per-member/schema-member.sql.tpl),
+// plus the session rollup, which is a SAVED QUERY and not an object
+// (../per-member/rooms.js). The dashboard SPA consumes these shapes unchanged.
 //
 // Schema mapping notes (root cache schema → mem-house):
-//   chats            → sessions / sessions_v   (id → session_id, bubble_count → total_msgs)
-//   chat_stats       → sessions_v aggregates   (token/char sums, models array)
-//   messages.content → messages.text           (cache_read → cache_read_tokens, …)
-//   tool_calls       → tool_calls              (args_json → args, chat_id → session_id)
-//   epoch-ms columns → DateTime64(3,'UTC')     (converted with toUnixTimestamp64Milli)
+//   chats            → sessions_<m> / the rollup  (id → session_id, bubble_count → total_msgs)
+//   chat_stats       → rollup aggregates          (token/char sums, models array)
+//   messages.content → messages_<m>.text          (cache_read → cache_read_tokens, …)
+//   tool_calls       → tool_calls_<m>             (args_json → args, chat_id → session_id)
+//   epoch-ms columns → DateTime64(3,'UTC')        (converted with toUnixTimestamp64Milli)
 //
 // All reads run with the `final: 1` setting so ReplacingMergeTree collapses
 // duplicate versions at read time (see DESIGN.md data-plane rules).

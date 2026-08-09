@@ -14,6 +14,11 @@
 # The endpoint is `__HOUSE__`, rendered by ../run.sh from MEMHOUSE_E2E_HOUSE. It must be
 # reachable FROM THE CLONE — a lab is http://<LAB_IP>:<PORT_BASE>, not your tunnel.
 #
+# This scenario targets the per-member data model in house `mem`, which has been the only
+# layout since 0.4.0 — so it is expected to PASS on master. It fails against a 0.3.x
+# install, whose shared `sessions`/`messages`/`tool_calls` rooms these assertions do not
+# name.
+#
 # PRECONDITION — the house is NOT reset by the clone. The gauntlet's "hypervisor is the
 # reset" tenet covers the VM, not the external ClickHouse. Before running, the house must
 # be provisioned and free of prior shares:

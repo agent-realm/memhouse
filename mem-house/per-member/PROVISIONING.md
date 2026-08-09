@@ -118,7 +118,8 @@ concrete reason the query beat the view.
 `WITH GRANT OPTION` is what makes whole-room sharing self-serve. Without it every share
 becomes an operator ticket, which is most of the reason this fork exists.
 
-The owner (`mem_root`) holds `ALL ON mem.* WITH GRANT OPTION`, so a second member joining
+The owner (`memhouse_root` — the house was shortened to `mem`, the owning role was not)
+holds `ALL ON mem.* WITH GRANT OPTION`, so a second member joining
 an existing house needs no new owner setup — house, owner, and Merge rooms are already
 there.
 
