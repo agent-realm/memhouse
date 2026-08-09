@@ -1320,6 +1320,26 @@ function cmdUninstall() {
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));
+      // A ROOTLESS container lives in the user's systemd slice, and that slice is torn
+      // down at logout unless lingering is enabled — the container takes a SIGTERM and
+      // the house goes down with it. Measured on a testbed VM: `deploy --local` over ssh
+      // shipped 211 sessions, the ssh session ended, and the container was
+      // `Exited (143)` twenty seconds later with `Linger=no`. The volume survives, so
+      // nothing is lost, but the house is gone with no explanation anywhere.
+      //
+      // `service install` already detects exactly this for its own unit. The container
+      // needs the same check, and podman is the case that matters: it is rootless by
+      // default, where docker is conventionally a system daemon that outlives logout
+      // (rootless docker has the same exposure, but is the deliberate minority).
+      if (process.platform === 'linux' && r.engine === 'podman') {
+        let lingering = true;
+        try { lingering = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).lingerEnabled(); } catch { /* assume fine */ }
+        if (!lingering) {
+          console.log(warn('rootless podman: this container stops when you log out (lingering is off).'));
+          console.log(`     loginctl enable-linger ${os.userInfo().username}`);
+          console.log('  Until then, after a logout: memhouse deploy --local   (the data volume persists)');
+        }
+      }
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
       flags.db = targetDb;
       flags.yes = true;
