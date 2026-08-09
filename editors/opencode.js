@@ -1,7 +1,16 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const Database = require('better-sqlite3');
+// Required lazily. A top-level require makes this native module a load-time dependency
+// of the whole adapter set: editors/index.js imports every adapter, so one missing
+// binding threw before any adapter ran and `discover` reported ZERO editors — losing the
+// eleven that need no native code at all. The adapterErrors path exists to degrade one
+// adapter at a time, and a top-level throw walks straight past it.
+let Database = null;
+function openDb(...a) {
+  if (!Database) Database = require('better-sqlite3');
+  return new Database(...a);
+}
 const adapterErrors = require('./adapter-errors');
 
 // OpenCode stores data in XDG-style paths across all platforms
@@ -28,7 +37,7 @@ const DB_PATH = getOpenCodeDbPath();
 function queryDb(sql) {
   if (!fs.existsSync(DB_PATH)) return [];
   try {
-    const db = new Database(DB_PATH, { readonly: true });
+    const db = openDb(DB_PATH, { readonly: true });
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
@@ -85,7 +94,7 @@ function getSqliteSessions() {
 function getSqliteMessages(sessionId) {
   if (!fs.existsSync(DB_PATH)) return [];
   try {
-    const db = new Database(DB_PATH, { readonly: true });
+    const db = openDb(DB_PATH, { readonly: true });
     const messages = db.prepare(
       `SELECT m.id as msg_id, m.data as msg_data, m.time_created
        FROM message m WHERE m.session_id = ? ORDER BY m.time_created ASC`

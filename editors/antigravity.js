@@ -2,7 +2,16 @@ const { execSync, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const Database = require('better-sqlite3');
+// Required lazily. A top-level require makes this native module a load-time dependency
+// of the whole adapter set: editors/index.js imports every adapter, so one missing
+// binding threw before any adapter ran and `discover` reported ZERO editors — losing the
+// eleven that need no native code at all. The adapterErrors path exists to degrade one
+// adapter at a time, and a top-level throw walks straight past it.
+let Database = null;
+function openDb(...a) {
+  if (!Database) Database = require('better-sqlite3');
+  return new Database(...a);
+}
 const { getAppDataPath } = require('./base');
 const adapterErrors = require('./adapter-errors');
 
@@ -235,7 +244,7 @@ function readGlobalStateValue(key) {
 
   let db = null;
   try {
-    db = new Database(ANTIGRAVITY_GLOBAL_STORAGE_DB, { readonly: true, fileMustExist: true });
+    db = openDb(ANTIGRAVITY_GLOBAL_STORAGE_DB, { readonly: true, fileMustExist: true });
     const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key);
     if (!row) return null;
     const v = row.value;
