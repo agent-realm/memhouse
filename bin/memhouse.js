@@ -320,6 +320,8 @@ Data         ship                 one incremental pass (--full | --loop [sec])
 
 Agents       plugins              list | install claude [--target DIR] | remove claude
              prompt               print the memory system-prompt snippet
+             prompt --install     print an install prompt for an agent, with this
+                                  machine's state and the one route that applies
 
 House        deploy --local       run ClickHouse in docker/podman, then install
              deploy --down        remove the local house (container + volume)
@@ -392,6 +394,129 @@ async function cmdDiscover() {
   console.log(out.config ? ok(`config: ${out.config}`) : warn('no config yet — run: memhouse install (or onboard)'));
   if (out.memoryHouse) console.log(warn('memory-house detected on this machine (they coexist fine)'));
   return out;
+}
+
+/**
+ * Render the agent install prompt with this machine's facts.
+ *
+ * The value is in what it removes: the CLI has already probed for a house, an engine and
+ * an existing config, so the prompt can state the ONE route that applies. A static
+ * runbook makes the agent derive that from a decision tree, which is where it picks the
+ * wrong branch — most expensively by asking a user with no ClickHouse for a ClickHouse
+ * URL, which is exactly what onboard itself used to do.
+ */
+async function renderInstallPrompt() {
+  const tplPath = path.join(DELIVERY, 'AGENT-INSTALL-PROMPT.md');
+  const tpl = fs.readFileSync(tplPath, 'utf-8');
+  const body = tpl.split('<!-- PROMPT BODY BELOW -->')[1] || tpl;
+
+  const cfg = resolveConfig();
+  const configured = fs.existsSync(ENV_FILE);
+  const engines = deployableEngines();
+
+  // Probe rather than assume. JSON_OUT is forced off so cmdDiscover returns its object
+  // instead of printing JSON and returning undefined.
+  const saved = JSON_OUT;
+  let found = null;
+  try {
+    found = await withSuppressedOutput(() => cmdDiscover());
+  } catch { /* fall through to the unknown-state wording */ } finally { void saved; }
+
+  const editors = (found && found.editors || []).filter((e) => e.sessions > 0);
+  const reachable = (found && found.clickhouse || []).filter((p) => p.reachable);
+  const houseUp = reachable.length > 0;
+
+  // Is an existing install actually working, or configured-but-broken? A broken one is
+  // the case a plain "install it" prompt handles worst.
+  let state = 'not installed';
+  if (configured) {
+    let ok0 = false;
+    try { ok0 = !!(await ch(cfg, 'SELECT 1')); } catch { ok0 = false; }
+    state = ok0 ? 'installed and connected' : 'configured, but the house does not answer';
+  }
+
+  let plan;
+  if (state === 'installed and connected') {
+    plan = `memhouse is already installed and connected to \`${cfg.url}\` (database \`${cfg.db}\`).
+**Do not reinstall.** Verify and hand back:
+
+1. \`memhouse doctor\` — every line should be a check mark.
+2. \`memhouse status\` — note the session and message counts.
+3. If the shipper is not running: \`memhouse start\`.
+4. If \`doctor\` reports rooms missing, the house may predate 0.4.0; it will say so by
+   name and print the recovery. Follow what it prints rather than reinstalling.`;
+  } else if (state.startsWith('configured')) {
+    plan = `memhouse is configured to use \`${cfg.url}\` (database \`${cfg.db}\`) but that
+endpoint does not answer. Do NOT reconfigure before finding out why.
+
+1. Is the house simply stopped? If it was a local container, \`memhouse deploy --local\`
+   brings the same volume back — it does not lose data.
+2. Is it a remote house the user's network cannot reach right now? Ask them; do not
+   repoint their config at something else on your own initiative.
+3. Only once the user says the old house is gone for good should you set up a new one,
+   and then say plainly that past sessions re-ship from local transcripts but anything
+   whose transcript was deleted lives only in the old house.`;
+  } else if (houseUp) {
+    plan = `A ClickHouse is already reachable at \`${reachable[0].url}\`. Use it.
+
+1. \`npm install -g memhouse --allow-scripts=better-sqlite3\`
+   The flag is not optional — six adapters (cursor, zed, opencode, goose, windsurf,
+   antigravity) read SQLite stores and silently drop out without the native build.
+2. Ask the user for the ClickHouse username and password for that endpoint.
+3. \`memhouse install --url ${reachable[0].url} --user <user> --password <pw>\`
+   If they hold admin on it and want memhouse to create the user, database, rooms and
+   grants for them, use \`--admin-user\`/\`--admin-password\` instead; memhouse then
+   reconnects as the new member and never stores the admin credential.
+   If they would rather run the SQL themselves, \`memhouse install --print-sql\` prints
+   it and touches nothing.
+4. \`memhouse start\`.`;
+  } else if (engines.length) {
+    plan = `There is no ClickHouse to point at, but **${engines.join(' and ')}** is available,
+so memhouse can run one:
+
+1. \`npm install -g memhouse --allow-scripts=better-sqlite3\`
+   The flag is not optional — six adapters read SQLite stores and silently drop out
+   without the native build.
+2. \`memhouse deploy --local\`
+   This starts a loopback-only ClickHouse, generates a credential, installs, creates the
+   user's rooms and runs the first ship. One command, no questions.
+3. \`memhouse start\`.
+
+${process.platform === 'linux' && engines.includes('podman')
+    ? 'On Linux with rootless podman the container stops at logout unless lingering is on.\nIf memhouse warns about this, run what it prints (`loginctl enable-linger <user>`)\nand tell the user why it matters.' : ''}`;
+  } else {
+    plan = `There is no ClickHouse reachable and no container engine to run one with. You
+cannot finish this install alone — say so rather than improvising.
+
+Tell the user they need one of:
+- a ClickHouse they already run (Cloud, a server, a kernel house) plus its credentials;
+- docker or podman installed, after which \`memhouse deploy --local\` does everything.
+
+You can still do the harmless half now: \`npm install -g memhouse --allow-scripts=better-sqlite3\`,
+then \`memhouse discover\` to show them what would be shipped once a house exists.`;
+  }
+
+  const out = body
+    .replaceAll('{{VERSION}}', PKG.version)
+    .replaceAll('{{PLATFORM}}', `${process.platform}/${process.arch}`)
+    .replaceAll('{{NODE}}', process.versions.node)
+    .replaceAll('{{STATE}}', state)
+    .replaceAll('{{EDITORS}}', editors.length
+      ? editors.map((e) => `${e.source} (${e.sessions})`).join(', ')
+      : 'none found — memhouse would ship nothing until an editor is used')
+    .replaceAll('{{HOUSE}}', houseUp ? reachable.map((p) => p.url).join(', ') : 'none reachable')
+    .replaceAll('{{ENGINES}}', engines.length ? engines.join(', ') : 'none (no docker, no podman)')
+    .replaceAll('{{PLAN}}', plan.trim())
+    .replaceAll('{{PORT}}', String(cfg.port));
+  process.stdout.write(out.trimStart());
+  return 0;
+}
+
+/** Run a printing function with stdout swallowed, and give back its return value. */
+async function withSuppressedOutput(fn) {
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = () => true;
+  try { return await fn(); } finally { process.stdout.write = write; }
 }
 
 /**
@@ -1123,7 +1248,13 @@ function cmdUninstall() {
       break;
     }
     case 'plugins': process.exitCode = cmdPlugins(); break;
-    case 'prompt': process.stdout.write(fs.readFileSync(path.join(DELIVERY, 'PROMPT.md'), 'utf-8')); break;
+    case 'prompt':
+      // Two audiences, two prompts. Bare `prompt` is the memory-USAGE snippet that goes
+      // into a running agent's system prompt; `--install` is the one you hand an agent
+      // that has not installed memhouse yet.
+      if (flags.install === true) process.exitCode = await renderInstallPrompt();
+      else process.stdout.write(fs.readFileSync(path.join(DELIVERY, 'PROMPT.md'), 'utf-8'));
+      break;
     case 'reset': process.exitCode = await cmdReset(); break;
     case 'deploy': {
       const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));

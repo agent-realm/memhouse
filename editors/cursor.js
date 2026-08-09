@@ -1,4 +1,13 @@
-const Database = require('better-sqlite3');
+// Required lazily. A top-level require makes this native module a load-time dependency
+// of the whole adapter set: editors/index.js imports every adapter, so one missing
+// binding threw before any adapter ran and `discover` reported ZERO editors — losing the
+// eleven that need no native code at all. The adapterErrors path exists to degrade one
+// adapter at a time, and a top-level throw walks straight past it.
+let Database = null;
+function openDb(...a) {
+  if (!Database) Database = require('better-sqlite3');
+  return new Database(...a);
+}
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -147,7 +156,7 @@ function getWorkspaceMap() {
 
 function getComposerHeaders(stateDbPath) {
   try {
-    const db = new Database(stateDbPath, { readonly: true });
+    const db = openDb(stateDbPath, { readonly: true });
     const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'").get();
     db.close();
     if (!row) return [];
@@ -277,7 +286,7 @@ function getChats() {
   // Source 1: ~/.cursor/chats store.db
   for (const { workspace, chatId, dbPath } of getAgentStoreChats()) {
     try {
-      const db = new Database(dbPath, { readonly: true });
+      const db = openDb(dbPath, { readonly: true });
       const meta = readStoreMeta(db);
       db.close();
       if (meta) {
@@ -316,7 +325,7 @@ function getChats() {
 
   // Source 2: workspaceStorage composers
   let globalDb = null;
-  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); }
+  try { globalDb = openDb(GLOBAL_STORAGE_DB, { readonly: true }); }
   catch (e) {
     // Absent is normal — Cursor may simply not be installed. Unreadable is not.
     if (fs.existsSync(GLOBAL_STORAGE_DB)) adapterErrors.record('cursor', e, GLOBAL_STORAGE_DB);
@@ -369,7 +378,7 @@ function getChats() {
 
 function getMessages(chat) {
   if (chat._type === 'agent-store') {
-    const db = new Database(chat._dbPath, { readonly: true });
+    const db = openDb(chat._dbPath, { readonly: true });
     const msgs = collectStoreMessages(db, chat._rootBlobId);
     db.close();
     // Use lastUsedModel as fallback for assistant messages without model info
@@ -382,7 +391,7 @@ function getMessages(chat) {
   }
 
   let globalDb;
-  try { globalDb = new Database(GLOBAL_STORAGE_DB, { readonly: true }); }
+  try { globalDb = openDb(GLOBAL_STORAGE_DB, { readonly: true }); }
   catch (e) {
     // Returning [] unreported would let a re-ship overwrite this session's stored
     // transcript with nothing.
@@ -407,7 +416,7 @@ function getMessages(chat) {
 
 function getCursorAccessToken() {
   try {
-    const db = new Database(GLOBAL_STORAGE_DB, { readonly: true });
+    const db = openDb(GLOBAL_STORAGE_DB, { readonly: true });
     const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'").get();
     db.close();
     return row ? row.value : null;

@@ -1,7 +1,13 @@
 # mem-house — agent install
 
 Imperative steps for an AI coding agent installing mem-house on a machine. Execute
-in order; every command is copy-pasteable. Prereqs: Node >= 20.19 and a reachable
+in order; every command is copy-pasteable.
+
+**Prefer `memhouse prompt --install`.** It renders `AGENT-INSTALL-PROMPT.md` against the
+machine it runs on — which editors have sessions, whether a ClickHouse answers, whether
+docker or podman exists — and states the one route that applies. This file is the static
+long-form version and assumes a reachable ClickHouse already exists, which is the case
+`deploy --local` was added to remove. Prereqs: Node >= 20.19 and a reachable
 ClickHouse >= 26.2 (local server, Cloud, or a kernel house — see
 `kernel-install.md` for the kernel path). No checkout required — memhouse is on npm.
 
