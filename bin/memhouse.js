@@ -391,6 +391,33 @@ async function cmdDiscover() {
   console.log('');
   console.log(out.config ? ok(`config: ${out.config}`) : warn('no config yet — run: memhouse install (or onboard)'));
   if (out.memoryHouse) console.log(warn('memory-house detected on this machine (they coexist fine)'));
+  return out;
+}
+
+/**
+ * Can this machine stand up a house of its own?
+ *
+ * Returns the container engines on PATH, or [] — which is also what a platform with no
+ * deploy support returns, so callers need no second check. `deploy --local` exists and has
+ * since 0.4.0, but nothing ever mentioned it: a first-timer with no ClickHouse was told
+ * "fix the connection" by the one command whose whole job is to get them connected.
+ */
+function deployableEngines() {
+  try { return require(path.join(REPO_ROOT, 'mem-house', 'deploy.js')).availableEngines() || []; }
+  catch { return []; }
+}
+
+/** The offer itself, so install and onboard cannot drift into wording it differently. */
+function printLocalHouseOffer(engines) {
+  if (!engines.length) {
+    console.log('  No ClickHouse to point at? memhouse can run one for you, but that needs');
+    console.log('  docker or podman — neither is on PATH.');
+    return false;
+  }
+  console.log(`  No ClickHouse to point at? memhouse can run one (${engines.join(' or ')}):`);
+  console.log('     memhouse deploy --local');
+  console.log('  That starts the container, generates a credential, installs and ships.');
+  return true;
 }
 
 // ── the member handle ───────────────────────────────────────────────────────────
@@ -630,7 +657,12 @@ async function cmdInstall({ interactive }) {
   // Preflight WITHOUT selecting the house — on a fresh standalone ClickHouse the
   // database doesn't exist yet, and selecting it would fail before we can create it.
   try { await ch(cfg, 'SELECT 1', { database: '' }); }
-  catch (e) { console.log(bad(`connection failed: ${e.message}`)); console.log('  fix the connection, then re-run: memhouse install'); return 1; }
+  catch (e) {
+    console.log(bad(`connection failed: ${e.message}`));
+    printLocalHouseOffer(deployableEngines());
+    console.log('  Already have one? Fix the connection, then re-run: memhouse install');
+    return 1;
+  }
   console.log(ok('connection verified'));
   // Ensure the house exists (standalone path). On a kernel realm the house is
   // provisioned by install-agency and this is a no-op; if the user lacks CREATE
@@ -686,8 +718,32 @@ async function cmdInstall({ interactive }) {
 
 async function cmdOnboard() {
   console.log(`memhouse ${PKG.version} — onboarding\n`);
-  await cmdDiscover();
+  const found = await cmdDiscover();
   console.log('');
+  // discover has just probed every candidate endpoint and printed the result. Walking
+  // straight into "ClickHouse URL:" after finding none asks the user for something they
+  // have already been shown they do not have.
+  const reachable = (found && found.clickhouse || []).filter((p) => p.reachable);
+  if (!reachable.length) {
+    const engines = deployableEngines();
+    if (engines.length) {
+      console.log(warn('No reachable ClickHouse found.'));
+      const yn = (await ask(`Run one locally with ${engines[0]}? (Y/n)`, 'Y')).toLowerCase();
+      if (yn !== 'n' && yn !== 'no') {
+        // Re-enter the CLI as a child rather than calling the deploy path directly. That
+        // path is the most heavily guarded code here — ownership, port probes, credential
+        // reuse, service drift — and every one of those guards is written against a fresh
+        // process reading its own flags. Reaching into it with a synthesised flag object
+        // is how one of them silently stops applying.
+        const rc = spawnSync(process.execPath, [__filename, 'deploy', '--local'], { stdio: 'inherit' });
+        return rc.status === 0 ? 0 : (rc.status || 1);
+      }
+    } else {
+      console.log(warn('No reachable ClickHouse found, and neither docker nor podman is on PATH.'));
+      console.log('  Point at one you already run, or install a container engine and use: memhouse deploy --local');
+    }
+    console.log('');
+  }
   const code = await cmdInstall({ interactive: true });
   if (code !== 0) return code;
   const yn = (await ask('Start the daemons now? (Y/n)', 'Y')).toLowerCase();
@@ -1266,6 +1322,26 @@ function cmdUninstall() {
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));
+      // A ROOTLESS container lives in the user's systemd slice, and that slice is torn
+      // down at logout unless lingering is enabled — the container takes a SIGTERM and
+      // the house goes down with it. Measured on a testbed VM: `deploy --local` over ssh
+      // shipped 211 sessions, the ssh session ended, and the container was
+      // `Exited (143)` twenty seconds later with `Linger=no`. The volume survives, so
+      // nothing is lost, but the house is gone with no explanation anywhere.
+      //
+      // `service install` already detects exactly this for its own unit. The container
+      // needs the same check, and podman is the case that matters: it is rootless by
+      // default, where docker is conventionally a system daemon that outlives logout
+      // (rootless docker has the same exposure, but is the deliberate minority).
+      if (process.platform === 'linux' && r.engine === 'podman') {
+        let lingering = true;
+        try { lingering = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).lingerEnabled(); } catch { /* assume fine */ }
+        if (!lingering) {
+          console.log(warn('rootless podman: this container stops when you log out (lingering is off).'));
+          console.log(`     loginctl enable-linger ${os.userInfo().username}`);
+          console.log('  Until then, after a logout: memhouse deploy --local   (the data volume persists)');
+        }
+      }
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
       flags.db = targetDb;
       flags.yes = true;

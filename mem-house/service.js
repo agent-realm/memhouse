@@ -395,6 +395,6 @@ function status() {
 // installing anything. A malformed plist or unit is only visible at load time otherwise,
 // and "load it and see" is not available on a machine you must not touch.
 module.exports = {
-  install, uninstall, status, platform, preflight, installedConfig,
+  install, uninstall, status, platform, preflight, installedConfig, lingerEnabled,
   _render: { systemdUnit, launchdPlist, unitPaths },
 };
