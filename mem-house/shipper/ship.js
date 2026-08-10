@@ -112,6 +112,36 @@ function makeClient() {
 // It does NOT issue grants or create the Merge rooms. A solo owner needs neither. Adding a
 // SECOND member — grants, Merge rooms, sharing — is owner work and lives in
 // ../per-member/provision.js.
+/**
+ * Refuse to write into rooms whose sorting key predates `origin`.
+ *
+ * Called at the top of EVERY ship pass, not just --ensure-schema: a plain `memhouse ship`
+ * never touches ensureSchema, so a guard living only there is a guard that never runs on
+ * the path that does the damage. Found exactly that way — the refusal was in place and
+ * 137 sessions shipped straight past it into a stale-key house.
+ */
+async function assertOriginKeyed(client, rooms) {
+  const stale = [];
+  for (const t of ROOM_TYPES) {
+    const rs = await client.query({
+      query: `SELECT sorting_key FROM system.tables WHERE database = currentDatabase() AND name = {n:String}`,
+      query_params: { n: rooms[t] }, format: 'JSONEachRow',
+    });
+    const key = ((await rs.json())[0] || {}).sorting_key || '';
+    if (key && !/\borigin\b/.test(key)) stale.push(`${rooms[t]} (${key})`);
+  }
+  if (stale.length) {
+    throw new Error(
+      'these rooms predate the origin sorting key, so imported rows would still be lost:\n'
+      + stale.map((s) => `    ${s}`).join('\n')
+      + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
+      + '\n    RENAME TABLE <room> TO <room>_old;'
+      + '\n    -- recreate from mem-house/per-member/schema-member.sql.tpl'
+      + '\n    INSERT INTO <room> SELECT *, \'ship\' AS origin FROM <room>_old;'
+      + '\n  A house with no imported rows can also just be re-shipped from scratch.');
+  }
+}
+
 async function ensureSchema(client) {
   const rooms = await resolveRooms(client);
   const { member } = rooms;
@@ -141,9 +171,17 @@ async function ensureSchema(client) {
     try {
       await client.command({
         query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
+        // 25.11 refuses ANY alter on a table carrying the messages text indexes unless
+        // this is set — including an ADD COLUMN that has nothing to do with them
+        // (Code: 344, SUPPORT_IS_DISABLED). Without it the backfill fails silently and
+        // the guard ends up missing on precisely the houses that need upgrading. A no-op
+        // on 26.x, and query-scoped, so it needs no server config.
+        clickhouse_settings: { allow_experimental_full_text_index: 1 },
       });
     } catch { /* no rights to alter is not fatal: a member on someone else's house */ }
   }
+
+  await assertOriginKeyed(client, rooms);
   return stmts.length;
 }
 
@@ -301,6 +339,7 @@ async function runShip(client, opts = {}) {
   // message/tool rows first (a shrunken re-parse leaves stale higher-seq rows
   // otherwise: ReplacingMergeTree collapses same-key rows only).
   const rooms = await resolveRooms(client);
+  await assertOriginKeyed(client, rooms);
   const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
 

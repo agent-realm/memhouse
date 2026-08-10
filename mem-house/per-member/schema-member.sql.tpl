@@ -30,12 +30,18 @@ CREATE TABLE IF NOT EXISTS sessions_{{MEMBER}}
     -- every row for the session regardless of origin -- destroying imported history the
     -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
     -- survives a re-ship of the same session.
+    -- IN THE SORTING KEY, and that is the load-bearing half. Guarding the DELETE alone
+    -- is not enough: ReplacingMergeTree collapses on the sorting key, so an imported row
+    -- and a shipped row sharing (session_id, user_id, seq) are the SAME row and the newer
+    -- ingested_at wins. Measured: 3 imported + 2 shipped rows became 3, and the two
+    -- imported ones the shipper happened to overlap were gone. Same loss as the
+    -- unguarded delete, reached through the merge instead.
     origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, user_id);
+ORDER BY (session_id, user_id, origin);
 
 CREATE TABLE IF NOT EXISTS messages_{{MEMBER}}
 (
@@ -61,6 +67,12 @@ CREATE TABLE IF NOT EXISTS messages_{{MEMBER}}
     -- every row for the session regardless of origin -- destroying imported history the
     -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
     -- survives a re-ship of the same session.
+    -- IN THE SORTING KEY, and that is the load-bearing half. Guarding the DELETE alone
+    -- is not enough: ReplacingMergeTree collapses on the sorting key, so an imported row
+    -- and a shipped row sharing (session_id, user_id, seq) are the SAME row and the newer
+    -- ingested_at wins. Measured: 3 imported + 2 shipped rows became 3, and the two
+    -- imported ones the shipper happened to overlap were gone. Same loss as the
+    -- unguarded delete, reached through the merge instead.
     origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3),
@@ -70,7 +82,7 @@ CREATE TABLE IF NOT EXISTS messages_{{MEMBER}}
     INDEX idx_text_word  text_word  TYPE text(tokenizer = splitByNonAlpha) GRANULARITY 1
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, user_id, seq);
+ORDER BY (session_id, user_id, origin, seq);
 
 CREATE TABLE IF NOT EXISTS tool_calls_{{MEMBER}}
 (
@@ -89,12 +101,18 @@ CREATE TABLE IF NOT EXISTS tool_calls_{{MEMBER}}
     -- every row for the session regardless of origin -- destroying imported history the
     -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
     -- survives a re-ship of the same session.
+    -- IN THE SORTING KEY, and that is the load-bearing half. Guarding the DELETE alone
+    -- is not enough: ReplacingMergeTree collapses on the sorting key, so an imported row
+    -- and a shipped row sharing (session_id, user_id, seq) are the SAME row and the newer
+    -- ingested_at wins. Measured: 3 imported + 2 shipped rows became 3, and the two
+    -- imported ones the shipper happened to overlap were gone. Same loss as the
+    -- unguarded delete, reached through the merge instead.
     origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, user_id, idx);
+ORDER BY (session_id, user_id, origin, idx);
 
 -- NO sessions_v HERE, deliberately. The session rollup is a SAVED QUERY substituted
 -- with these room names and run under the caller's own credential (see rooms.js
