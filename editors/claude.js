@@ -188,9 +188,17 @@ function parseSessionFile(filePath, isSubagent) {
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
 
+    // Claude Code stamps every JSONL line with an ISO timestamp. Carrying it through as
+    // _ts lets the shipper store when a message was ACTUALLY sent instead of a position
+    // interpolated between the session's first and last times — see messageTs() in
+    // memhouse/shipper/ship.js. Optional by contract: adapters that have no per-message
+    // time simply omit it.
+    const _ts = obj.timestamp ? Date.parse(obj.timestamp) : undefined;
+    const at = Number.isFinite(_ts) ? _ts : undefined;
+
     if (obj.type === 'user' && obj.message) {
       const content = extractContent(obj.message.content);
-      if (content) messages.push({ role: 'user', content: tag + content });
+      if (content) messages.push({ role: 'user', content: tag + content, _ts: at });
     } else if (obj.type === 'assistant' && obj.message) {
       const { text, toolCalls } = extractAssistantContent(obj.message.content);
       const usage = obj.message.usage;
@@ -198,11 +206,11 @@ function parseSessionFile(filePath, isSubagent) {
         role: 'assistant', content: tag + text, _model: obj.message.model,
         _inputTokens: usage?.input_tokens, _outputTokens: usage?.output_tokens,
         _cacheRead: usage?.cache_read_input_tokens, _cacheWrite: usage?.cache_creation_input_tokens,
-        _toolCalls: toolCalls,
+        _toolCalls: toolCalls, _ts: at,
       });
     } else if (obj.type === 'system') {
       const text = typeof obj.message?.content === 'string' ? obj.message.content : '';
-      if (text) messages.push({ role: 'system', content: tag + text });
+      if (text) messages.push({ role: 'system', content: tag + text, _ts: at });
     }
   }
   return messages;

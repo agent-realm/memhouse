@@ -29,9 +29,11 @@ the source.
 ## Ground rules
 
 1. **Never point at `localhost:8123` or `localhost:18999`.** Those are the pilot's
-   real houses. Use only the lab endpoint you create.
+   real houses. Use only the lab endpoint you create. If a memhouse command ever
+   connects to 8123, that is a finding — as of 0.4.5 nothing should fall back there.
 2. **Always set `MEMHOUSE_HOME`** to a temp dir for every command. Without it you
-   overwrite `~/.memhouse/env`.
+   overwrite `~/.memhouse/env`. Put that dir under `/private/tmp/mh-acc-<you>/`, NOT in
+   the shared scratchpad — parallel agents have deleted each other's config there.
 3. **Read output before deciding.** `herdr pane read` after every step. A command that
    printed an error and exited 0 is still a failure.
 4. **Record what you did not test.** A gap you name is worth more than a pass you
@@ -87,11 +89,14 @@ what a person sees, including prompts, colours, and whether a refusal is legible
 
 ```bash
 herdr pane run <pane> "<command>"
-herdr wait output <pane> --match "<expected>" --timeout 60000
-herdr pane read <pane> --source recent --lines 40
+herdr pane wait-output <pane> --match "<expected>" --timeout 60000
+herdr pane read <pane> --source visible --lines 40
 ```
 
-If `herdr wait output` times out, **read the pane and report what was actually there**.
+There is no `herdr wait output` — the command is `herdr pane wait-output`. And on a
+freshly-created pane `--source recent` returns empty; use `--source visible`.
+
+If `wait-output` times out, **read the pane and report what was actually there**.
 A timeout is a finding, not a retry cue.
 
 ## Phase 3 — install, all three paths
@@ -128,9 +133,16 @@ Verify the "change nothing" half by counting rows before and after.
 - a handle starting with a digit, or `root` → refuses
 - an env file pointing at a different url/db → refuses, unless `--force`
 - a member with no `CREATE TABLE` and no rooms → refuses, prints the owner's command
-- a pre-0.4.4 house (rooms without `origin` in the sorting key) → **the shipper
-  refuses and prints the rebuild**. Build one by creating rooms from the template with
-  the `origin` line stripped and the ORDER BY reverted.
+- a pre-0.4.4 house (transcript rooms without `origin` in the sorting key) → **the
+  shipper refuses and prints the rebuild**. Build one by creating rooms from the
+  template with the `origin` line stripped and the ORDER BY reverted.
+- a 0.4.4 house (`origin` wrongly in the SESSIONS sorting key) → same refusal. Build one
+  by adding `origin` back into the sessions ORDER BY. Both directions are wrong and both
+  must be caught.
+- **no config at all** — unset every `MEMHOUSE_*` and point `MEMHOUSE_HOME` at an empty
+  dir, then run `ship`, `search`, `stats`, `status`, `start`, `reset`. Each must refuse
+  and name the fix. **None may connect to `localhost:8123`.** This is the one that
+  silently sent an acceptance agent at the pilot's real house.
 
 ## Phase 5 — the data guarantees
 
@@ -147,6 +159,16 @@ Then the same thing through the CLI, which the matrix does not cover:
 5. Ship a third time and confirm the incremental skip works: the second pass should
    report most sessions **skipped**, not re-shipped. A pass that re-ships everything
    is a regression even though no data is lost.
+6. **Skip must survive imported rows.** Add one `origin='import'` row to a session that
+   has already settled into `skipped`, then ship twice more. It must stay skipped. Before
+   0.4.5 the skip compared `count()` against `message_count`, so a single imported row
+   made that session re-ship forever.
+7. **One session row, always.** `SELECT session_id, count() FROM sessions_<m> FINAL GROUP
+   BY session_id HAVING count() > 1` must return nothing, including for sessions that
+   carry imported rows. Two rows double every metric the rollup computes.
+8. **Real timestamps.** Ship a Claude Code session whose JSONL has known per-message
+   timestamps. The stored `ts` must match them, not be spread evenly between the
+   session's first and last time.
 
 ## Phase 6 — every other command
 
@@ -183,20 +205,26 @@ it as a person would.
 ```bash
 herdr tab create --workspace <ws> --label "claude"
 herdr pane run <pane2> "cd <worktree> && claude"
-herdr wait output <pane2> --match ">" --timeout 60000
+herdr pane wait-output <pane2> --match ">" --timeout 60000
 ```
 
-The skills are **`/memhouse:search`, `/memhouse:sessions`, `/memhouse:sql`** — note
-the namespace. `/mem:ask` and `/mem:search` belong to *memory-house*, a different
-product; if you find yourself typing those, you are testing the wrong thing.
+The skills are **`/memhouse:search`, `/memhouse:sessions`, `/memhouse:sql`**. The colon
+namespace is earned by being installed as a plugin — `<config>/skills/memhouse/` holding
+`.claude-plugin/plugin.json` plus `skills/{search,sessions,sql}/`. If autocomplete offers
+`/memhouse-search` with a hyphen instead, the installer regressed to copying loose skill
+directories; that is a defect, not a naming variant. Check `plugins list` and the
+installed tree before reporting anything else about the skills.
+
+`/mem:ask` and `/mem:search` belonged to *memory-house*, which was removed from this
+machine on 2026-08-09. They should not resolve at all.
 
 Drive them by sending text, as a human would:
 
 ```bash
 herdr pane send-text <pane2> "/memhouse:search clickhouse"
 herdr pane send-keys  <pane2> Enter
-herdr wait output <pane2> --match "sessions|hits|no results" --regex --timeout 120000
-herdr pane read <pane2> --source recent --lines 60
+herdr pane wait-output <pane2> --match "sessions|hits|no results" --regex --timeout 120000
+herdr pane read <pane2> --source visible --lines 60
 ```
 
 What must hold:

@@ -1,12 +1,12 @@
 ---
-name: memhouse-sql
+name: sql
 description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls rooms on ClickHouse, one set per member). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
 user-invocable: true
 argument-hint: "<question or SQL>"
 allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 ---
 
-# memhouse-sql — ad-hoc analytics
+# /memhouse:sql — ad-hoc analytics
 
 If the user gives SQL, run it (append `FORMAT PrettyCompact` if no FORMAT
 given). If they give a question, write the SQL yourself from the schema below.
@@ -17,17 +17,39 @@ to destroy that memory — and nothing at all on anyone else's. Reads need no sc
 clause: the rooms you can name are already only yours, and there is no policy to work
 around.
 
+The recipe below pins `readonly=1` on every request, so a write that slips past the rule
+is refused by the server (`Code: 164 … Cannot execute query in readonly mode`) rather
+than by good intentions. Two honest limits: it is a **setting, not a grant** — a caller
+who writes their own URL can leave it off — and the HTTP interface refuses
+multi-statement bodies, so `SET readonly=0;` cannot be smuggled into a query. For
+enforcement that does not depend on this file, the house owner can mint a second
+`SELECT`-only credential and point the skills at that instead.
+
 ## Connection
 
-Credentials from `~/.memhouse/env` (or exported `MEMHOUSE_*`). Always read with
-`final=1` — every table is `ReplacingMergeTree(ingested_at)`, so without it you
-can double-count stale row versions — and `join_use_nulls=1`, which the session
-rollup depends on (see below):
+Credentials resolve as **flags > exported `MEMHOUSE_*` > `$MEMHOUSE_HOME/env`**
+(default `~/.memhouse/env`) — the same order the `memhouse` CLI uses. Every query
+runs over ClickHouse HTTP with `final=1` and `join_use_nulls=1` (ReplacingMergeTree
+keeps stale row versions until merges; `final=1` collapses to latest-wins — always
+include it on reads):
 
 ```bash
-set -a; [ -f ~/.memhouse/env ] && . ~/.memhouse/env; set +a
-curl -sS --fail-with-body --user "${MEMHOUSE_USER:-memhouse_root}:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "${MEMHOUSE_URL:-http://localhost:8123}/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1" <<'SQL'
+# Config lives at $MEMHOUSE_HOME/env (default ~/.memhouse/env). Exported MEMHOUSE_*
+# vars WIN over the file — snapshot them, source, then put them back. Sourcing alone
+# lets a stale file silently override the house you were pointed at.
+MH_ENV="${MEMHOUSE_HOME:-$HOME/.memhouse}/env"
+_u=${MEMHOUSE_URL-}; _s=${MEMHOUSE_USER-}; _p=${MEMHOUSE_PASSWORD-}; _d=${MEMHOUSE_DB-}
+set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
+[ -n "$_u" ] && MEMHOUSE_URL=$_u; [ -n "$_s" ] && MEMHOUSE_USER=$_s
+[ -n "$_p" ] && MEMHOUSE_PASSWORD=$_p; [ -n "$_d" ] && MEMHOUSE_DB=$_d
+# No default URL. localhost:8123 as memhouse_root is a REAL house on many machines,
+# usually the pilot's own — guessing it reads someone else's memory and looks like it
+# worked. If there is no config, say so and stop.
+: "${MEMHOUSE_URL:?no memhouse house configured — run: memhouse install}"
+: "${MEMHOUSE_USER:?no memhouse house configured — run: memhouse install}"
+
+curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
@@ -45,9 +67,9 @@ on anyone else's rooms, so isolation is not something a query can work around.
 Resolve your own name once and substitute it into every table name below:
 
 ```bash
-MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
+MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
   --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-  "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
+  "$MEMHOUSE_URL/" | tr -d '\r\n')"
 # rooms: messages_$MEM_ME, sessions_$MEM_ME, tool_calls_$MEM_ME
 ```
 
@@ -69,7 +91,7 @@ reduces to the rooms the caller can read, so it fails closed rather than denying
 | Object | Kind | Columns |
 |---|---|---|
 | `sessions_<you>` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, user_id, ingested_at` |
-| `messages_<you>` | table, 1 row/message | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see memhouse-search) |
+| `messages_<you>` | table, 1 row/message | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /memhouse:search) |
 | `tool_calls_<you>` | table, 1 row/tool call | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, user_id, ingested_at` |
 | the rollup | **saved query**, not an object — `memhouse sessions-query` prints it | `session_id, source, host, name, mode, folder, project, git_branch, user_id, created_at, last_updated_at, started, ended, duration_sec, total_msgs, user_msgs, assistant_msgs, subagent_msgs, models, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, user_chars, assistant_chars, first_prompt` |
 

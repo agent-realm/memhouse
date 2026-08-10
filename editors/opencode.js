@@ -317,6 +317,9 @@ function getMessagesForSession(sessionId) {
         _cacheRead: cacheRead,
         _cacheWrite: cacheWrite,
         _finish: msg.finish,
+        // The same time already used to sort above. Passing it on means the shipper
+        // stores when the message was sent instead of interpolating a position.
+        _ts: msg.time?.created,
       });
     }
   }

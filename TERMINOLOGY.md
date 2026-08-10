@@ -396,8 +396,11 @@ Recorded so a later pass does not redo them:
   path in the editor-discovery table; `AGENTLYTICS-README.md`'s "requires their app to be running"
   means the Devin/Antigravity desktop application. None is the installable unit; none changed.
 - **`memorecall`** (retired 2026-07-29 → `/mem:recall`) — no occurrences. memhouse ships its own
-  skills under the `memhouse-*` / `/memhouse:*` names (`memhouse-search`, `memhouse-sessions`,
-  `memhouse-sql`), which are unaffected by that retirement.
+  skills under the `/memhouse:*` names (`/memhouse:search`, `/memhouse:sessions`,
+  `/memhouse:sql`), which are unaffected by that retirement. They earn the `memhouse:`
+  namespace by being installed as a PLUGIN — a directory carrying
+  `.claude-plugin/plugin.json`. Copied in as loose skill directories they would register
+  as unrelated top-level names, which is what happened until 0.4.5.
 - **Manifest keys** — this repo has **no `realm.toml`**, so the `[[hall]]` → `[[house]]` /
   `[[house.room]]` / `entry_house` rename does not reach it. (The one `.toml` in the tree is an
   agent-gauntlet scenario config, `sandbox/vm-e2e/configs/`, which is not a manifest.) The

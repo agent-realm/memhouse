@@ -1,28 +1,41 @@
 ---
-name: memhouse-search
+name: search
 description: Full-text search across ALL shipped agent conversations — every session from all 17 supported editors (Claude Code, Codex, Cursor, VS Code, Zed, OpenCode, Gemini CLI, …), every project, every machine — stored in the memhouse ClickHouse. Use whenever the user refers to something from the past that isn't in the current context, e.g. "what did I say about X", "find that conversation about Y", "when did I work on Z", "did I ever try W", "the chat where we discussed it", "remind me how I did it". Reach for this before saying you don't know about prior work.
 user-invocable: true
 argument-hint: "<search terms> [in <project>] [last <N> days] [from <editor>]"
 allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 ---
 
-# memhouse-search — search conversation memory
+# /memhouse:search — search conversation memory
 
 Search the full message history in the memhouse house. Every room is named for your
 ClickHouse user — `messages_<you>`, `sessions_<you>` — see **Room names** below.
 
 ## Connection
 
-Credentials come from `~/.memhouse/env` (or already-exported `MEMHOUSE_*` vars).
-Every query runs over ClickHouse HTTP with `final=1` and `join_use_nulls=1`
-(ReplacingMergeTree keeps stale row versions until merges; `final=1` collapses to
-latest-wins — always
+Credentials resolve as **flags > exported `MEMHOUSE_*` > `$MEMHOUSE_HOME/env`**
+(default `~/.memhouse/env`) — the same order the `memhouse` CLI uses. Every query
+runs over ClickHouse HTTP with `final=1` and `join_use_nulls=1` (ReplacingMergeTree
+keeps stale row versions until merges; `final=1` collapses to latest-wins — always
 include it on reads):
 
 ```bash
-set -a; [ -f ~/.memhouse/env ] && . ~/.memhouse/env; set +a
-curl -sS --fail-with-body --user "${MEMHOUSE_USER:-memhouse_root}:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "${MEMHOUSE_URL:-http://localhost:8123}/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1" <<'SQL'
+# Config lives at $MEMHOUSE_HOME/env (default ~/.memhouse/env). Exported MEMHOUSE_*
+# vars WIN over the file — snapshot them, source, then put them back. Sourcing alone
+# lets a stale file silently override the house you were pointed at.
+MH_ENV="${MEMHOUSE_HOME:-$HOME/.memhouse}/env"
+_u=${MEMHOUSE_URL-}; _s=${MEMHOUSE_USER-}; _p=${MEMHOUSE_PASSWORD-}; _d=${MEMHOUSE_DB-}
+set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
+[ -n "$_u" ] && MEMHOUSE_URL=$_u; [ -n "$_s" ] && MEMHOUSE_USER=$_s
+[ -n "$_p" ] && MEMHOUSE_PASSWORD=$_p; [ -n "$_d" ] && MEMHOUSE_DB=$_d
+# No default URL. localhost:8123 as memhouse_root is a REAL house on many machines,
+# usually the pilot's own — guessing it reads someone else's memory and looks like it
+# worked. If there is no config, say so and stop.
+: "${MEMHOUSE_URL:?no memhouse house configured — run: memhouse install}"
+: "${MEMHOUSE_USER:?no memhouse house configured — run: memhouse install}"
+
+curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
@@ -41,9 +54,9 @@ on anyone else's rooms, so isolation is not something a query can work around.
 Resolve your own name once and substitute it into every table name below:
 
 ```bash
-MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
+MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
   --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-  "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
+  "$MEMHOUSE_URL/" | tr -d '\r\n')"
 # rooms: messages_$MEM_ME, sessions_$MEM_ME, tool_calls_$MEM_ME
 ```
 

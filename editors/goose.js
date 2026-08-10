@@ -243,6 +243,10 @@ function getMessagesFromDb(chat) {
     const msg = { role: mappedRole, content };
     if (mappedRole === 'assistant' && chat._model) msg._model = chat._model;
     if (toolCalls.length) msg._toolCalls = toolCalls;
+    // created_timestamp is the column this query already sorts by (seconds). Pass it on
+    // so the shipper stores the real send time rather than interpolating one; messageTs()
+    // handles the seconds-vs-milliseconds split.
+    if (row.created_timestamp) msg._ts = Number(row.created_timestamp);
     result.push(msg);
   }
 

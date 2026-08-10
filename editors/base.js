@@ -41,6 +41,12 @@ function getAppDataPath(appName) {
  *       { source, composerId, name, createdAt, lastUpdatedAt, mode, folder, bubbleCount, encrypted }
  *   getMessages(chat) - returns array of message objects:
  *       { role: 'user'|'assistant'|'system'|'tool', content: string|Array }
+ *     Optional per message, when the underlying transcript records it:
+ *       _ts         - epoch ms the message was sent. Without it the shipper
+ *                     interpolates a position between the session's createdAt and
+ *                     lastUpdatedAt, which can be off by the whole span of a session.
+ *                     Set it wherever the format has it; leave it out otherwise.
+ *       _model, _inputTokens, _outputTokens, _cacheRead, _cacheWrite, _toolCalls
  */
 
 /**

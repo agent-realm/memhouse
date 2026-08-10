@@ -1,12 +1,12 @@
 ---
-name: memhouse-sessions
+name: sessions
 description: List recent agent sessions from memhouse conversation memory — names, projects, editors, hosts, times, message and token counts across all 17 supported editors. Use for "what was I working on", "show my recent sessions", "sessions from last week", "what did I do in project X", "list my cursor sessions", or to orient before drilling into one session.
 user-invocable: true
 argument-hint: "[N] [project <name>] [from <editor>] [today|week|month]"
 allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
 ---
 
-# memhouse-sessions — browse session history
+# /memhouse:sessions — browse session history
 
 List/filter sessions from the session rollup — a saved query over your own rooms, not an
 object; `memhouse sessions-query` prints it (session metadata +
@@ -20,14 +20,29 @@ message aggregates) in the memhouse house.
 
 ## Connection
 
-Credentials from `~/.memhouse/env` (or exported `MEMHOUSE_*`). Always read with
-`final=1` (collapses ReplacingMergeTree duplicates to latest-wins) and
-`join_use_nulls=1` (see below — the session rollup needs it):
+Credentials resolve as **flags > exported `MEMHOUSE_*` > `$MEMHOUSE_HOME/env`**
+(default `~/.memhouse/env`) — the same order the `memhouse` CLI uses. Every query
+runs over ClickHouse HTTP with `final=1` and `join_use_nulls=1` (ReplacingMergeTree
+keeps stale row versions until merges; `final=1` collapses to latest-wins — always
+include it on reads):
 
 ```bash
-set -a; [ -f ~/.memhouse/env ] && . ~/.memhouse/env; set +a
-curl -sS --fail-with-body --user "${MEMHOUSE_USER:-memhouse_root}:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "${MEMHOUSE_URL:-http://localhost:8123}/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1" <<'SQL'
+# Config lives at $MEMHOUSE_HOME/env (default ~/.memhouse/env). Exported MEMHOUSE_*
+# vars WIN over the file — snapshot them, source, then put them back. Sourcing alone
+# lets a stale file silently override the house you were pointed at.
+MH_ENV="${MEMHOUSE_HOME:-$HOME/.memhouse}/env"
+_u=${MEMHOUSE_URL-}; _s=${MEMHOUSE_USER-}; _p=${MEMHOUSE_PASSWORD-}; _d=${MEMHOUSE_DB-}
+set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
+[ -n "$_u" ] && MEMHOUSE_URL=$_u; [ -n "$_s" ] && MEMHOUSE_USER=$_s
+[ -n "$_p" ] && MEMHOUSE_PASSWORD=$_p; [ -n "$_d" ] && MEMHOUSE_DB=$_d
+# No default URL. localhost:8123 as memhouse_root is a REAL house on many machines,
+# usually the pilot's own — guessing it reads someone else's memory and looks like it
+# worked. If there is no config, say so and stop.
+: "${MEMHOUSE_URL:?no memhouse house configured — run: memhouse install}"
+: "${MEMHOUSE_USER:?no memhouse house configured — run: memhouse install}"
+
+curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
@@ -43,9 +58,9 @@ on anyone else's rooms, so isolation is not something a query can work around.
 Resolve your own name once and substitute it into every table name below:
 
 ```bash
-MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" \
+MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
   --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-  "${MEMHOUSE_URL:-http://localhost:8123}/" | tr -d '\r\n')"
+  "$MEMHOUSE_URL/" | tr -d '\r\n')"
 # rooms: messages_$MEM_ME, sessions_$MEM_ME, tool_calls_$MEM_ME
 ```
 
@@ -115,11 +130,11 @@ FORMAT PrettyCompact
 | "what was I working on yesterday?" | `WHERE ended > now() - INTERVAL 1 DAY` |
 | "show my last 10 sessions in agentlytics" | `LIMIT 10 … WHERE project ILIKE '%agentlytics%'` |
 | "list my cursor sessions this month" | `WHERE source = 'cursor' AND ended > now() - INTERVAL 30 DAY` |
-| "which machine did I do the schema work on?" | search via memhouse-search, or filter `host` here |
+| "which machine did I do the schema work on?" | search via /memhouse:search, or filter `host` here |
 
 ## Output
 
 A compact table: when, name (or first prompt), source, host, project, msgs,
 tokens. Offer to pull a full transcript next
 (`SELECT role, text FROM messages_<you> WHERE session_id = '…' ORDER BY seq`) or to
-run memhouse-search for a specific quote.
+run /memhouse:search for a specific quote.

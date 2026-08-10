@@ -99,13 +99,39 @@ function resolveConfig() {
   const file = readEnvFile();
   const pick = (flag, env, dflt) => flags[flag] !== undefined && flags[flag] !== true
     ? flags[flag] : (process.env[env] ?? file[env] ?? dflt);
+  const stated = (flag, env) => (flags[flag] !== undefined && flags[flag] !== true)
+    || process.env[env] !== undefined || file[env] !== undefined;
   return {
     url: pick('url', 'MEMHOUSE_URL', 'http://localhost:8123'),
     user: pick('user', 'MEMHOUSE_USER', 'memhouse_root'),
     password: pick('password', 'MEMHOUSE_PASSWORD', ''),
     db: pick('db', 'MEMHOUSE_DB', 'mem'),
     port: pick('port', 'MEMHOUSE_PORT', '4640'),
+    // Did anything actually SAY which house this is, or are the values above just the
+    // defaults? The defaults are not neutral — localhost:8123 as memhouse_root is a real
+    // house on a lot of machines, usually the pilot's own. An agent whose config went
+    // missing (a temp HOME, a deleted env file, a service running as another user) would
+    // otherwise connect there and read or write someone else's memory, silently and with
+    // a plausible-looking result. Commands that expect YOUR house call requireConfig().
+    stated: stated('url', 'MEMHOUSE_URL') || stated('user', 'MEMHOUSE_USER'),
   };
+}
+
+// Refuse to fall back to the built-in defaults. `install`, `deploy`, `discover`,
+// `doctor` and `prompt` are exempt by design — they exist precisely for the state where
+// there is no config yet, and doctor probes localhost on purpose.
+function requireConfig(cfg, what) {
+  if (cfg.stated) return cfg;
+  console.error(`memhouse: no house configured, so ${what} has nothing to talk to.`);
+  console.error(`  Nothing was read from ${ENV_FILE.replace(os.homedir(), '~')} and no MEMHOUSE_URL/MEMHOUSE_USER is set.`);
+  console.error('  Rather than guess http://localhost:8123 as memhouse_root — which on many');
+  console.error('  machines is a real house belonging to someone else — this stops here.');
+  console.error('  Fix it with one of:');
+  console.error('     memhouse install --url … --user … --password …   point at a house you have');
+  console.error('     memhouse onboard                                 set one up from scratch');
+  console.error('     MEMHOUSE_URL=… MEMHOUSE_USER=… memhouse …        state it for this run');
+  console.error(`  If your config lives elsewhere, set MEMHOUSE_HOME (currently ${HOME_DIR.replace(os.homedir(), '~')}).`);
+  process.exit(2);
 }
 
 function childEnv(cfg) {
@@ -881,7 +907,7 @@ async function cmdOnboard() {
 }
 
 async function cmdStart() {
-  const cfg = resolveConfig();
+  const cfg = requireConfig(resolveConfig(), 'start');
   fs.mkdirSync(RUN_DIR, { recursive: true });
   fs.mkdirSync(LOG_DIR, { recursive: true });
   ensureUiBuilt();
@@ -962,7 +988,7 @@ async function cmdStatus() {
     out.freshest = m[0]?.freshest || null;
   } catch (e) { out.connected = false; out.error = e.message; }
 
-  if (JSON_OUT) return console.log(JSON.stringify(out, null, 2));
+  if (JSON_OUT) { console.log(JSON.stringify(out, null, 2)); return out.connected ? 0 : 1; }
   console.log(out.config ? ok(`config: ${out.config}`) : warn('no config (memhouse install)'));
   console.log(out.connected ? ok(`connected: ${cfg.url} / ${cfg.db} as ${cfg.user}`) : bad(`not connected: ${out.error || cfg.url}`));
   if (out.member) console.log(ok(`rooms for '${out.member}'`));
@@ -970,6 +996,10 @@ async function cmdStatus() {
   console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
   if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${cfg.port}`);
+  // Exit non-zero when the house is unreachable. `status` is what a health check, a
+  // cron, or an agent gates on; printing '✗ not connected' and exiting 0 tells every
+  // one of them the house is fine.
+  return out.connected ? 0 : 1;
 }
 
 async function cmdDoctor() {
@@ -983,25 +1013,53 @@ async function cmdDoctor() {
   try { await ch(cfg, 'SELECT 1', { database: '' }); add(true, `clickhouse reachable (${cfg.url})`); }
   catch (e) { add(false, `clickhouse reachable (${cfg.url})`, e.message); }
   let rooms = null;
-  try { rooms = await roomsFor(cfg); } catch (e) { add(false, 'room resolution', e.message); }
+  // Room resolution asks the server who you are (SELECT currentUser()). It fails when
+  // the house is unreachable or the credential is rejected — both already reported by
+  // the check above, so name that as the fix rather than repeating the driver's error.
+  try { rooms = await roomsFor(cfg); } catch (e) {
+    add(false, 'room resolution', `${e.message} — fix the connection above first (memhouse install --url … --user … --password …)`);
+  }
   if (rooms) add(true, `rooms for '${rooms.member}'`);
-  try {
-    // Three rooms. The session rollup every read path goes through is a saved query over
-    // exactly these, so if they are here it is too — there is no fourth object to lose.
-    const objects = ROOM_TYPES.map((t) => rooms[t]);
-    const want = objects.map((n) => `'${n}'`).join(',');
-    const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
-    const legacy = t === objects.length ? [] : await looksLikePre040(cfg);
-    add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
-      legacy.length
-        ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
-        : `run: memhouse install, or as the owner: node memhouse/per-member/provision.js --member ${rooms.member}`);
-  } catch (e) { add(false, 'schema check', e.message); }
-  try {
-    const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
-    add((u[0]?.u ?? '') !== '' || (await chRows(cfg, `SELECT count() AS c FROM ${rooms.sessions}`))[0].c === 0,
-      `identity stamping (user_id='${u[0]?.u ?? ''}')`, 'writers must use async_insert=0');
-  } catch { add(false, 'identity stamping', 'schema missing?'); }
+  // Every check below reads a room NAME, so none of them can run without `rooms`.
+  // Reaching into a null here is how doctor used to print a raw
+  // "Cannot read properties of null (reading 'sessions')" as its hint — a stack-trace
+  // fragment where the fix should be. Skip them, and say why they were skipped.
+  if (!rooms) {
+    add(false, 'schema', 'skipped — room names are unknown until the house answers');
+    add(false, 'identity stamping', 'skipped — same reason');
+  } else {
+    try {
+      // Three rooms. The session rollup every read path goes through is a saved query over
+      // exactly these, so if they are here it is too — there is no fourth object to lose.
+      const objects = ROOM_TYPES.map((t) => rooms[t]);
+      const want = objects.map((n) => `'${n}'`).join(',');
+      const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
+      const legacy = t === objects.length ? [] : await looksLikePre040(cfg);
+      add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
+        legacy.length
+          ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
+          : `run: memhouse install, or as the owner: node memhouse/per-member/provision.js --member ${rooms.member}`);
+    } catch (e) { add(false, 'schema check', `${e.message} — run: memhouse install`); }
+    // The sorting keys the shipper refuses to write into. doctor is where a house should
+    // learn it needs rebuilding, not the middle of a ship pass.
+    try {
+      const wrongKeys = [];
+      for (const t of ROOM_TYPES) {
+        const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[t]}'`, { database: '' });
+        const key = r[0]?.k;
+        if (!key) continue;
+        const want = t !== 'sessions';
+        if (/\borigin\b/.test(key) !== want) wrongKeys.push(`${rooms[t]} (${key})`);
+      }
+      add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ' carry origin correctly'}`,
+        'rebuild those rooms from memhouse/per-member/schema-member.sql.tpl, then: memhouse ship --full');
+    } catch (e) { add(false, 'sorting keys', e.message); }
+    try {
+      const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
+      add((u[0]?.u ?? '') !== '' || (await chRows(cfg, `SELECT count() AS c FROM ${rooms.sessions}`))[0].c === 0,
+        `identity stamping (user_id='${u[0]?.u ?? ''}')`, 'writers must use async_insert=0');
+    } catch { add(false, 'identity stamping', 'schema missing? run: memhouse install'); }
+  }
   let adapterErrors = [];
   try {
     const { getAllChats, getAdapterErrors, getMessages } = require(path.join(REPO_ROOT, 'editors'));
@@ -1094,7 +1152,7 @@ async function cmdDoctor() {
 
 async function cmdSearch() {
   if (!positional.length) { console.log('usage: memhouse search <terms…>'); return 2; }
-  const cfg = resolveConfig();
+  const cfg = requireConfig(resolveConfig(), 'search');
   const needle = positional.join(' ').toLowerCase().replace(/[%_\\]/g, '\\$&').replace(/'/g, "\\'");
   const r = await roomsFor(cfg);
   const rows = await chRows(cfg, `
@@ -1112,25 +1170,42 @@ async function cmdSearch() {
   }
 }
 
+// Install the skills as a PLUGIN, not as three loose skill directories.
+//
+// Claude Code gives a skill a namespace only when it arrives inside a plugin: a directory
+// under <config>/skills/ containing .claude-plugin/plugin.json loads as
+// `memhouse@skills-dir` and its skills become /memhouse:search, /memhouse:sessions,
+// /memhouse:sql. Copied in flat, the same three files register as unrelated top-level
+// skills named after their folders — which is what this used to do, while plugin.json sat
+// unread one directory away claiming the colon form. Driving a real Claude Code is what
+// caught it: `/memhouse:search` answered `Unknown command. Did you mean /memhouse-search?`
 function cmdPlugins() {
   const sub = positional[0] || 'list';
   const target = flags.target || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-  const skillsSrc = path.join(DELIVERY, 'skills');
-  const names = fs.readdirSync(skillsSrc);
-  const dstSkills = path.join(target, 'skills');
+  const pluginSrc = path.join(DELIVERY, 'plugin');
+  const names = fs.readdirSync(path.join(pluginSrc, 'skills'));
+  const dst = path.join(target, 'skills', 'memhouse');
+  const invocations = names.map((n) => `/memhouse:${n}`).join(', ');
+  // Whatever --target was given has to reappear in the advice, or pasting it installs
+  // somewhere else than the directory just inspected.
+  const self = `memhouse plugins install claude${flags.target ? ` --target ${flags.target}` : ''}`;
   if (sub === 'list') {
-    console.log(`skills available: ${names.join(', ')}`);
-    for (const n of names) {
-      console.log(fs.existsSync(path.join(dstSkills, n)) ? ok(`${n} installed in ${dstSkills}`) : warn(`${n} not installed (memhouse plugins install claude)`));
-    }
+    console.log(`skills available: ${invocations}`);
+    console.log(fs.existsSync(path.join(dst, '.claude-plugin', 'plugin.json'))
+      ? ok(`installed as a plugin in ${dst}`)
+      : warn(`not installed (${self})`));
   } else if (sub === 'install' && positional[1] === 'claude') {
-    fs.mkdirSync(dstSkills, { recursive: true });
-    for (const n of names) fs.cpSync(path.join(skillsSrc, n), path.join(dstSkills, n), { recursive: true });
-    console.log(ok(`installed ${names.length} skills into ${dstSkills} (${names.join(', ')})`));
+    fs.mkdirSync(dst, { recursive: true });
+    fs.cpSync(pluginSrc, dst, { recursive: true });
+    console.log(ok(`installed ${names.length} skills into ${dst}`));
+    console.log(`  loads as memhouse@skills-dir next session — invoke ${invocations}`);
   } else if (sub === 'remove' && positional[1] === 'claude') {
-    let removed = 0;
-    for (const n of names) { const p = path.join(dstSkills, n); if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true }); removed++; } }
-    console.log(ok(`removed ${removed} skills from ${dstSkills}`));
+    if (!fs.existsSync(dst)) { console.log(warn(`nothing installed in ${dst}`)); return 0; }
+    fs.rmSync(dst, { recursive: true });
+    // Remove the now-empty skills/ we created, but never a skills/ holding someone
+    // else's work.
+    try { fs.rmdirSync(path.join(target, 'skills')); } catch { /* not empty: leave it */ }
+    console.log(ok(`removed ${dst}`));
   } else {
     console.log('usage: memhouse plugins [list | install claude | remove claude] [--target DIR]');
     return 2;
@@ -1139,7 +1214,7 @@ function cmdPlugins() {
 }
 
 async function cmdReset() {
-  const cfg = resolveConfig();
+  const cfg = requireConfig(resolveConfig(), 'reset');
   const r = await roomsFor(cfg);
   const targets = ROOM_TYPES.map((t) => r[t]);
   if (flags.yes !== true) {
@@ -1227,23 +1302,24 @@ function cmdUninstall() {
       break;
     }
     case 'ship': {
+      requireConfig(cfg, 'ship');
       const args = [];
       if (flags.full === true) args.push('--full');
       if (flags.loop !== undefined) { args.push('--loop'); if (flags.loop !== true) args.push(String(flags.loop)); }
       process.exitCode = run(SHIP_JS, args, cfg);
       break;
     }
-    case 'stats': process.exitCode = run(SHIP_JS, ['--stats'], cfg); break;
+    case 'stats': requireConfig(cfg, 'stats'); process.exitCode = run(SHIP_JS, ['--stats'], cfg); break;
     case 'start': await cmdStart(); break;
     case 'stop': cmdStop(); break;
-    case 'status': await cmdStatus(); break;
+    case 'status': process.exitCode = await cmdStatus(); break;
     case 'doctor': process.exitCode = await cmdDoctor(); break;
     case 'search': process.exitCode = await cmdSearch(); break;
     // The session rollup is a saved query, not an object, so there is no name an agent
     // or a skill can put in a FROM clause. This prints it, resolved for whoever the
     // configured credential is — the substitute for that name.
     case 'sessions-query': {
-      const cfg = resolveConfig();
+      const cfg = requireConfig(resolveConfig(), 'sessions-query');
       const r = await roomsFor(cfg);
       console.log(r.sessions_v);
       if (!JSON_OUT) {
