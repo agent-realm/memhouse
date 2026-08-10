@@ -1,152 +1,178 @@
 # memhouse
 
-**memhouse** — agent conversation memory as a product. Every coding-agent session
-on your machines — across the **17 editors** the agentlytics adapters support —
-parsed locally, shipped to a typed ClickHouse store, shareable with a team,
-installable on the ultimagent kernel as an **agency**, and visible through the
-agentlytics dashboard unchanged.
-
-**One house, a set of rooms per member.** Each member owns
-`sessions_<them>`, `messages_<them>`, `tool_calls_<them>`, and holds grants on
-those and nothing else — isolation is a grant that is simply absent, so it fails
-closed. All of *your* machines ship into *your* rooms (the `host` column tells them
-apart); another member's machines never do. A team-wide read is a `Merge` room plus
-a `GRANT`, which narrows to whatever the caller can already see.
-
-There is no shared-table layout. That was memory-house's model and 0.4.0 removed it.
-
-An **agency** in the constellation sense (`TERMINOLOGY.md`): a **house** — the
-`mem` database — plus a **resident** working in it, the shipper. The test is
-what writes. The shipper fires on its own loop and puts rows in the house that
-outlive any query; everything else here is only ever read. The house alone would
-hold; the shipper is what makes it act.
-
-An alternative agency **competing with memory-house**; if it wins, it becomes
-memory-house v4. Start with `memhouse/DESIGN.md` for the four bets
-(parse-on-client, typed common schema, kernel-agency, borrowed UI).
-
-## Layout
-
-| Path | What |
-|---|---|
-| `memhouse/` | the product: `DESIGN.md`, `per-member/`, `shipper/`, `server/`, `delivery/` |
-| `editors/` | the 17 editor adapters (inherited from agentlytics; the crown jewels) |
-| `pricing.js` + `pricing.json` | the cost engine |
-| `ui/` | the dashboard SPA (built to `public/`, served unchanged by the memhouse server) |
-| `agency/` | the earlier agentlytics-agency wrap (raw canonical shape) — kept as prior art |
-| `TERMINOLOGY.md` | the constellation terminology canon + how it applies here |
-| everything else at root | upstream agentlytics (see `AGENTLYTICS-README.md`), still runnable |
-
-## Quickstart — the `memhouse` CLI
+Long-term memory for coding agents. memhouse reads the session transcripts your
+editors already write to disk — **17 of them**, Claude Code, Codex, Cursor, Zed,
+Copilot, Gemini CLI and the rest — parses them locally, and ships typed rows into
+ClickHouse. Nothing is proxied or intercepted. Then you can search every past
+session, see what it cost, and let an agent query its own history.
 
 ```bash
 npm install -g memhouse --allow-scripts=better-sqlite3
-memhouse onboard          # wizard: discover → configure → ship → start
+memhouse onboard
 ```
 
-**Do not drop `--allow-scripts=better-sqlite3`.** Five adapters — cursor, goose,
-opencode, zed, and antigravity — read sessions out of SQLite files, and
-`better-sqlite3` builds its native binding from an install script. npm 12 blocks
-install scripts by default, so without the flag those five read nothing and you
-silently ship a partial history. `memhouse discover` and `memhouse doctor` both
-say so when the binding is missing.
+That is the whole install. `onboard` finds your editors, sets up a house, ships,
+and starts the dashboard. **Don't drop `--allow-scripts`** — see
+[below](#the-allow-scripts-flag).
 
-If that install fails with `EACCES`, `sudo` is the right answer for only one of the
-two causes, and the thing that tells them apart is **who owns the prefix root** —
-not the path, and not the failing file. The path proves nothing: Homebrew's prefix
-is `/usr/local` on Intel and `/opt/homebrew` on Apple Silicon, and is yours in both
-cases. The failing file proves nothing either: an earlier `sudo npm` leaves
-root-owned files *inside* a prefix that is still yours.
+## No ClickHouse yet?
+
+`onboard` offers to run one for you if docker or podman is present:
 
 ```bash
-ls -ld "$(npm prefix -g)"     # the prefix ROOT — this is the deciding one
+memhouse deploy --local      # a loopback-bound ClickHouse, then install and ship
 ```
 
-- **Prefix root owned by `root`** — a genuinely system-managed Node (distro
-  packages under `/usr`). Re-run with `sudo`.
-- **Prefix root owned by you** — the prefix is yours (Homebrew, fnm, nvm, volta),
-  so whatever root-owned file npm tripped on is a stray from an earlier `sudo npm`.
-  Another `sudo` adds more of them. Repair just that path:
-  `sudo chown -R "$(id -u):$(id -g)" <the path npm named>`. The same applies to the
-  cache (`~/.npm`).
+Otherwise point at one you already run, or hand the SQL to whoever administers it:
 
-To try it without installing, npx takes the same flag — it has to come before the
-package name:
+```bash
+memhouse install --url https://… --user … --password …   # one you have
+memhouse install --admin-user … --admin-password …       # let memhouse build it
+memhouse install --print-sql                             # print the SQL, run it yourself
+```
+
+memhouse does not embed a database. If you have neither a ClickHouse nor a
+container engine, install one of the two.
+
+## Commands
+
+```text
+memhouse onboard | install | setup | discover | doctor | uninstall | reset
+memhouse ship [--full|--loop N] | search <terms> | stats | status
+memhouse start | stop                      dashboard + shipper as daemons
+memhouse service install | uninstall       survive a reboot
+memhouse deploy --local | --down           stand up (or remove) a local house
+memhouse plugins install claude            /memhouse:search, :sessions, :sql
+memhouse prompt                            memory snippet for an agent's system prompt
+memhouse prompt --install                  an install prompt, rendered for this machine
+```
+
+Every command works both ways: interactive for you, `--yes` / flags / `--json` for
+an agent — so an agent can install its own memory unattended.
+
+Config resolves: flags → `MEMHOUSE_*` env → `$MEMHOUSE_HOME/env` (default
+`~/.memhouse/env`). There is no house-shaped default: with nothing configured, the
+commands that read or write memory refuse and say so rather than guessing
+`localhost:8123`, which on a lot of machines is a real house belonging to someone else.
+
+## How your memory is stored
+
+**One house, one set of rooms per member.** You own `sessions_<you>`,
+`messages_<you>`, `tool_calls_<you>` in the `mem` database, and hold grants on
+those and nothing else. Isolation is a grant that is simply *absent*, so it fails
+closed — no row policy that has to be right on every table and every read path.
+
+All of *your* machines ship into *your* rooms; the `host` column tells them apart.
+Another member's machines never do. A team-wide read is a `Merge` room
+(`all_sessions`) plus a `GRANT`, which narrows to whatever the caller can already
+see. Sharing a whole room needs no operator.
+
+The member name comes from the server — `SELECT currentUser()` — not from your
+config. A client that could name its own member could write into someone else's
+rooms.
+
+### Imported history is protected
+
+Rows carry an `origin`. The shipper clears a session before re-inserting it, so a
+shorter re-parse can't leave a stale tail behind — but that clear only removes rows
+the shipper itself wrote (`origin='ship'`). Anything you imported from an older
+house, another product, or a machine that no longer exists survives a re-ship.
+
+`origin` is in the sorting key of `messages` and `tool_calls` too, so
+ReplacingMergeTree can't quietly collapse an imported row against a shipped one. Both
+halves matter: guarding only the delete still loses data, through the merge instead of
+the mutation.
+
+`sessions` is the deliberate exception — one row per session, no `origin` in its key.
+A session's metadata has a single current version, and keying it on origin gives the
+same session two rows, which makes every rollup count its messages twice.
+
+The shipper checks both directions before it writes and prints the rebuild if a house
+has it wrong, so an old house cannot be corrupted by a new shipper.
+
+## Troubleshooting
+
+### The `--allow-scripts` flag
+
+Six adapters — **cursor, zed, opencode, goose, windsurf, antigravity** — read
+sessions out of SQLite files, and `better-sqlite3` builds its native binding from
+an install script. npm 12 blocks install scripts by default, so without the flag
+those six read nothing and you ship a partial history.
+
+It is not silent: `memhouse discover` and `memhouse doctor` both name the skipped
+adapters. The other eleven adapters keep working.
+
+`npx` takes the same flag, before the package name:
 
 ```bash
 npx --allow-scripts=better-sqlite3 -y memhouse discover
 ```
 
-Working from a checkout instead: `npm install` (the repo's `allowScripts` field
-covers the binding), then `node bin/memhouse.js …`. `npm test` is a syntax gate plus
-unit checks; `misc/tier-matrix-test.sh` walks the tier/ownership matrix against a real
-container engine on Linux and takes a few minutes, so it is not part of `npm test`.
+### `EACCES` on install
 
-```text
-memhouse onboard | install | setup | discover | uninstall | reset
-memhouse ship [--full|--loop N] | stats | search <terms> | start | stop | status | doctor
-memhouse plugins install claude | prompt
-memhouse deploy --local | --down                # stand up a house to point at
-memhouse service install | uninstall | status   # survive a reboot
+`sudo` is right for only one of the two causes, and what tells them apart is **who
+owns the prefix root** — not the path, and not the file npm named.
+
+```bash
+ls -ld "$(npm prefix -g)"
 ```
 
-### Where the memory lives
+- **Owned by `root`** — a system-managed Node (distro packages under `/usr`).
+  Re-run with `sudo`.
+- **Owned by you** — the prefix is yours (Homebrew, fnm, nvm, volta), so the
+  root-owned file npm tripped on is a stray from an earlier `sudo npm`. Another
+  `sudo` adds more. Repair just that path:
+  `sudo chown -R "$(id -u):$(id -g)" <the path npm named>`. Same for `~/.npm`.
 
-`memhouse onboard` assumes you already have a ClickHouse. If you do not, `deploy`
-is the missing first mile:
+The path proves nothing on its own: Homebrew's prefix is `/usr/local` on Intel and
+`/opt/homebrew` on Apple Silicon, and is yours in both cases.
 
-| | What it runs | Who it is for |
-|---|---|---|
-| `deploy --local` | stock ClickHouse in docker or podman, loopback-bound | one machine, or several members later |
-| kernel install | an agency house on an ultimagent kernel | a team, provisioned centrally |
-| point at your own | any reachable ClickHouse — a server, ClickHouse Cloud | you already have one |
+### Daemons don't survive a reboot
 
-`deploy --local` needs docker or podman. If you have neither and no ClickHouse, install
-one of them — memhouse does not embed a database. An earlier `--solo` tier ran chdb
-behind a hand-written ClickHouse-HTTP shim and was removed: emulating the HTTP protocol
-meant every setting or request shape the shim did not implement became a silently wrong
-answer, and half the defects found reviewing this branch came from it.
+`memhouse start` detaches with pidfiles — they outlive the shell, not a restart.
+`memhouse service install` writes a real user service instead (systemd `--user`,
+or a launchd LaunchAgent) and takes over. On Linux a `--user` unit stops at logout
+unless lingering is on; install detects that and prints the `loginctl` command.
 
-`deploy` labels what it creates and refuses to replace or remove a container or
-volume it did not create, so a name collision costs you an error rather than
-somebody else's data.
+A rootless podman house has the same problem for the same reason, and
+`deploy --local` says so.
 
-### Surviving a reboot
+## Working from a checkout
 
-`memhouse start` detaches with pidfiles: the daemons outlive the shell, and nothing
-brings them back after a restart. `memhouse service install` writes a real user
-service instead — systemd `--user` on Linux, a launchd LaunchAgent on macOS — and
-takes over from the pidfile daemons. On Linux a `--user` unit stops at logout
-unless lingering is on, so install detects that and prints the `loginctl` command.
+```bash
+npm install            # the repo's allowScripts field covers the binding
+node bin/memhouse.js …
+npm test               # syntax gate + unit checks
+```
 
-### One set of rooms per member
+`misc/origin-matrix.sh <label> <url> <user> <pass>` checks the import-protection
+guarantees against a real ClickHouse. `misc/tier-matrix-test.sh` walks the
+tier/ownership matrix against a real container engine on Linux. Both take minutes
+and are not part of `npm test`.
 
-Every member owns their rooms — `messages_alice`, `sessions_alice`,
-`tool_calls_alice`. This is the only layout. Isolation is a grant that is simply
-absent, not a row policy that has to be right on every table and every read path, so it
-fails closed. A shared read is a Merge room (`all_sessions`) plus a GRANT, which reduces
-to whatever rooms the caller can already read — strictly less machinery than the policy
-it replaced.
+## Layout
 
-The session rollup is a saved query over those rooms rather than a stored view, so there
-is no fourth object to provision, grant, or collide with the team rooms;
-`memhouse sessions-query` prints it. On a house you own, `memhouse install` mints your
-three rooms and you are done. On someone else's, the owner mints them
-(`memhouse/per-member/provision.js`) and sharing a whole room is then self-serve, with
-no operator. Design and measurements: `memhouse/per-member/`.
+| Path | What |
+|---|---|
+| `memhouse/` | the product — `DESIGN.md`, `per-member/`, `shipper/`, `server/`, `delivery/` |
+| `editors/` | the 17 editor adapters (inherited from agentlytics; the crown jewels) |
+| `pricing.js` + `pricing.json` | the cost engine |
+| `ui/` | the dashboard SPA (built to `public/`, served by the memhouse server) |
+| `agency/` | the earlier agentlytics-agency wrap — prior art, not how memhouse works |
+| `TERMINOLOGY.md` | the constellation terminology canon |
 
-Every command is dual-mode: interactive for humans, `--yes`/flags/`--json` for
-agents — so an agent can self-install its own memory (`memhouse install --yes …`,
-`memhouse plugins install claude`). Config: flags > `MEMHOUSE_*` env >
-`~/.memhouse/env` > defaults.
+Deeper reading: `memhouse/DESIGN.md` (the four bets),
+`memhouse/per-member/INSTALL.md` (the three install paths and every refusal),
+`memhouse/per-member/SCHEMA.md`, `memhouse/delivery/kernel-install.md`,
+`memhouse/COMPETITION.md`.
 
-Deeper docs: `memhouse/delivery/AGENT-INSTALL.md`, kernel install (agency
-`memhouse`, members, per-member rooms and their grants):
-`memhouse/delivery/kernel-install.md`, skills/plugin payloads: `memhouse/delivery/`.
+In constellation terms (`TERMINOLOGY.md`) memhouse is an **agency**: a **house**
+— the `mem` database — plus a **resident** working in it, the shipper. The house
+alone would hold; the shipper is what makes it act. It competes with
+memory-house; if it wins, it becomes memory-house v4.
 
 ## Heritage & license
 
 Built on [agentlytics](https://github.com/f/agentlytics) by Fatih Kadir Akın (MIT)
-— the adapters, dashboard, and cost engine come from there (this repo's history
-carries the full lineage). The `agentlytics` remote tracks the private working
-mirror for syncing adapter improvements both ways.
+— the adapters, dashboard, and cost engine come from there, and this repo's history
+carries the full lineage. MIT.
