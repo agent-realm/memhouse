@@ -309,6 +309,11 @@ function pidOf(name) {
   } catch { return null; }
 }
 
+// Signal 0 tests for existence without delivering anything.
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 function ensureUiBuilt() {
   if (fs.existsSync(path.join(REPO_ROOT, 'public', 'index.html'))) return true;
   const uiDir = path.join(REPO_ROOT, 'ui');
@@ -334,7 +339,8 @@ Setup        onboard              interactive wizard: discover → configure →
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
              uninstall            stop daemons + remove ${HOME_DIR.replace(os.homedir(), '~')} (house data untouched)
-             reset                truncate the house tables and re-ship everything (--yes to skip confirm)
+             reset                clear the shipper's rows and re-ship everything (--yes to skip confirm)
+                                  imported rows are kept; --all-origins removes those too
 
 Data         ship                 one incremental pass (--full | --loop [sec])
              stats                per-source session/message/token counts
@@ -707,7 +713,7 @@ async function adminBootstrap(cfg, admin) {
       password = generatePassword();
       console.log('');
       console.log(`  password for '${admin.member}':  ${password}`);
-      console.log('  Shown once. It goes into ~/.memhouse/env; to change it later:');
+      console.log(`  Shown once. It goes into ${ENV_FILE}; to change it later:`);
       console.log(`     ALTER USER ${admin.member} IDENTIFIED BY '…'   then: memhouse setup --password …`);
       console.log('');
     }
@@ -745,8 +751,43 @@ function resolveMemberHandle() {
     console.log(bad(`'${member}' cannot name a room — expected [A-Za-z][A-Za-z0-9_]*`));
     return null;
   }
+  // Reserved names are refused however they arrive. The check used to live only in
+  // suggestMember(), i.e. only on the handle DERIVED from $HOME — so `HOME=/root` was
+  // refused while an explicit `--member root` sailed through and created a ClickHouse
+  // user named root with ALL on its rooms. A guard that a flag walks around is not a
+  // guard; the reason it exists does not change with how the name was typed.
+  //
+  // `default` is deliberately NOT on this list. It is ClickHouse's own catch-all user and
+  // a poor choice of member, but it is a real one that existing houses are built on —
+  // refusing it would lock those pilots out of their own install.
+  if (member.toLowerCase() === 'root') {
+    console.log(bad(`'${member}' cannot be a member — it is a container artefact, not a person.`));
+    console.log('  Pick a name that identifies a person or a machine: memhouse install --member <name>');
+    return null;
+  }
   if (!flags.member && s.changed) console.log(warn(`member handle '${s.changed}' sanitized to '${member}' — pass --member to choose another`));
   return member;
+}
+
+// Do the rooms' sorting keys match what the shipper will accept? Returns a description of
+// what is wrong, or null. `origin` belongs in the transcript rooms' keys (so an imported
+// row and a shipped one at the same seq stay two rows) and must NOT be in the sessions key
+// (so a session has exactly one metadata row).
+async function sortingKeyProblem(cfg) {
+  try {
+    const rooms = await roomsFor(cfg);
+    const wrong = [];
+    for (const t of ROOM_TYPES) {
+      const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[t]}'`, { database: '' });
+      const key = r[0]?.k;
+      if (!key) continue;
+      const want = t !== 'sessions';
+      if (/\borigin\b/.test(key) !== want) {
+        wrong.push(`${rooms[t]} (${key}) — origin ${want ? 'missing from' : 'must not be in'} the key`);
+      }
+    }
+    return wrong.length ? wrong.join('; ') : null;
+  } catch { return null; }  // unreachable house is a different check's problem
 }
 
 async function cmdInstall({ interactive }) {
@@ -762,7 +803,14 @@ async function cmdInstall({ interactive }) {
     const password = flags['member-password'] || generatePassword();
     console.log(memberSql(cfg.db, member, password));
     console.log(`-- Then, once that has run:`);
-    console.log(`--   memhouse install --url ${cfg.url} --db ${cfg.db} --user ${member} --password '${password}'`);
+    // Only echo a URL that was actually STATED. --print-sql is the path where the house is
+    // typically someone else's, run by someone else, and cfg.url falls back to
+    // http://localhost:8123 — the one address the rest of the product refuses to guess.
+    // Handing it back as a copy-paste command carrying a live credential is worse than
+    // leaving a placeholder.
+    console.log(cfg.stated
+      ? `--   memhouse install --url ${cfg.url} --db ${cfg.db} --user ${member} --password '${password}'`
+      : `--   memhouse install --url <the house this SQL was run on> --db ${cfg.db} --user ${member} --password '${password}'`);
     return 0;
   }
 
@@ -778,7 +826,18 @@ async function cmdInstall({ interactive }) {
     writeEnvFile(cfg);
     console.log(ok(`config written: ${ENV_FILE}`));
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
-    console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
+    // The same check the shipper runs before it writes. Without it, install reports
+  // "✓ rooms for 'x'" and "✓ installed" on a house whose very next command refuses with
+  // "a ship pass would corrupt them" — install already resolved the rooms, so it had
+  // everything it needed to say so first.
+  const keyProblem = await sortingKeyProblem(cfg);
+  if (keyProblem) {
+    console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
+    console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
+    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}, then: memhouse ship --full`);
+    return 1;
+  }
+  console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
     console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
     console.log('     node memhouse/per-member/provision.js --member <name> --merge');
     return 0;
@@ -867,6 +926,17 @@ async function cmdInstall({ interactive }) {
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
   }
+  // The same check the shipper runs before it writes. Without it, install reports
+  // "✓ rooms for 'x'" and "✓ installed" on a house whose very next command refuses with
+  // "a ship pass would corrupt them" — install already resolved the rooms, so it had
+  // everything it needed to say so first.
+  const keyProblem = await sortingKeyProblem(cfg);
+  if (keyProblem) {
+    console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
+    console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
+    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}, then: memhouse ship --full`);
+    return 1;
+  }
   console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
   return 0;
 }
@@ -939,6 +1009,7 @@ async function cmdStart() {
         : `  start it with: launchctl kickstart gui/$(id -u)/com.${unit.replace('memhouse-', 'memhouse.')}`);
     }
   }
+  const started = [];
   for (const d of daemons) {
     if (pidOf(d.name)) { console.log(warn(`${d.name} already running (pid ${pidOf(d.name)})`)); continue; }
     const log = fs.openSync(path.join(LOG_DIR, d.name + '.log'), 'a');
@@ -947,9 +1018,39 @@ async function cmdStart() {
     });
     fs.writeFileSync(path.join(RUN_DIR, d.name + '.pid'), String(child.pid));
     child.unref();
-    console.log(ok(`${d.name} started (pid ${child.pid})`));
+    started.push({ ...d, pid: child.pid });
   }
-  console.log(`  dashboard → http://localhost:${cfg.port}`);
+
+  // spawn() succeeding means the PROCESS started, not that it is still alive or that it
+  // got the port. `start` used to print "✓ dashboard started (pid …)" and a URL for a
+  // process that had already died of EADDRINUSE — and the URL then pointed at whatever
+  // else owned the port, which on this machine was a different house's dashboard. Give
+  // each a moment, then confirm, and dig the reason out of the log rather than making the
+  // user find it.
+  if (started.length) await new Promise((r) => setTimeout(r, 900));
+  let dashboardAlive = false;
+  for (const d of started) {
+    if (alive(d.pid)) {
+      console.log(ok(`${d.name} started (pid ${d.pid})`));
+      if (d.name === 'dashboard') dashboardAlive = true;
+      continue;
+    }
+    try { fs.unlinkSync(path.join(RUN_DIR, d.name + '.pid')); } catch { /* already gone */ }
+    const logPath = path.join(LOG_DIR, d.name + '.log');
+    let why = '';
+    try {
+      const tail = fs.readFileSync(logPath, 'utf-8').split('\n').filter(Boolean).slice(-40);
+      const err = tail.reverse().find((l) => /EADDRINUSE|Error|error:/i.test(l));
+      if (/EADDRINUSE/.test(err || '')) why = `port ${cfg.port} is already in use — free it, or set MEMHOUSE_PORT`;
+      else if (err) why = err.trim().slice(0, 200);
+    } catch { /* no log to read */ }
+    console.log(bad(`${d.name} exited immediately${why ? ` — ${why}` : ''}`));
+    if (!why) console.log(`  see ${logPath}`);
+    process.exitCode = 1;
+  }
+  if (dashboardAlive || (pidOf('dashboard') && !started.some((d) => d.name === 'dashboard'))) {
+    console.log(`  dashboard → http://localhost:${cfg.port}`);
+  }
 }
 
 // `solo` is here and NOT in the start list on purpose. The tier is gone, but a machine
@@ -969,7 +1070,11 @@ function cmdStop() {
 }
 
 async function cmdStatus() {
-  const cfg = resolveConfig();
+  // requireConfig, not resolveConfig. `status` reads a house and reports its counts as
+  // YOURS, which is exactly the answer that must not come from a guessed URL: with no
+  // config it connected to localhost:8123 as memhouse_root and, wherever that credential
+  // works, printed a stranger's session and message counts as the pilot's own.
+  const cfg = requireConfig(resolveConfig(), 'status');
   const out = {
     config: fs.existsSync(ENV_FILE) ? ENV_FILE : null,
     url: cfg.url, db: cfg.db, user: cfg.user,
@@ -992,7 +1097,8 @@ async function cmdStatus() {
   console.log(out.config ? ok(`config: ${out.config}`) : warn('no config (memhouse install)'));
   console.log(out.connected ? ok(`connected: ${cfg.url} / ${cfg.db} as ${cfg.user}`) : bad(`not connected: ${out.error || cfg.url}`));
   if (out.member) console.log(ok(`rooms for '${out.member}'`));
-  if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
+  if (out.connected && !out.messages) console.log(ok(`house: empty — ${out.sessions} sessions, 0 messages (nothing shipped yet)`));
+  else if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
   console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
   if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${cfg.port}`);
@@ -1038,21 +1144,28 @@ async function cmdDoctor() {
       add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
         legacy.length
           ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
-          : `run: memhouse install, or as the owner: node memhouse/per-member/provision.js --member ${rooms.member}`);
+          : `run: memhouse install, or as the owner: node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${rooms.member}`);
     } catch (e) { add(false, 'schema check', `${e.message} — run: memhouse install`); }
     // The sorting keys the shipper refuses to write into. doctor is where a house should
     // learn it needs rebuilding, not the middle of a ship pass.
     try {
       const wrongKeys = [];
+      let checked = 0;
       for (const t of ROOM_TYPES) {
         const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[t]}'`, { database: '' });
         const key = r[0]?.k;
         if (!key) continue;
+        checked++;
         const want = t !== 'sessions';
         if (/\borigin\b/.test(key) !== want) wrongKeys.push(`${rooms[t]} (${key})`);
       }
-      add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ' carry origin correctly'}`,
-        'rebuild those rooms from memhouse/per-member/schema-member.sql.tpl, then: memhouse ship --full');
+      // `checked` matters: every room name that resolved to nothing was skipped by the
+      // `continue` above, so on an empty house this printed a green "sorting keys carry
+      // origin correctly" having examined zero tables — a reassuring tick on the exact
+      // check that a broken house needs to fail.
+      if (!checked) add(false, 'sorting keys: no rooms to check', 'create them first: memhouse install');
+      else add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ` carry origin correctly (${checked}/3 rooms)`}`,
+        `rebuild those rooms from the schema template, then: memhouse ship --full\n     template: ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}`);
     } catch (e) { add(false, 'sorting keys', e.message); }
     try {
       const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
@@ -1217,12 +1330,35 @@ async function cmdReset() {
   const cfg = requireConfig(resolveConfig(), 'reset');
   const r = await roomsFor(cfg);
   const targets = ROOM_TYPES.map((t) => r[t]);
+
+  // Imported rows are NOT the shipper's to remove, and reset is a re-ship: whatever it
+  // deletes has to be something re-shipping puts back. An import cannot be — it came from
+  // an older house, another product, or a machine that no longer exists. Scoped to
+  // origin='ship' by default, therefore, exactly like the shipper's per-session clear.
+  //
+  // This path was missed when that clear was fixed, and it is the one place the 0.4.4 data
+  // loss survived: `reset --yes` took a house from 2 imported rows to 0 while the prompt
+  // said only "truncates … and re-ships". --all-origins still allows it, but nobody
+  // reaches it by accident, and the count is named before it happens.
+  const allOrigins = flags['all-origins'] === true;
+  let imported = 0;
+  try {
+    const counts = await Promise.all(targets.map(async (t) =>
+      Number((await chRows(cfg, `SELECT count() AS c FROM ${t} FINAL WHERE origin != 'ship'`))[0]?.c || 0)));
+    imported = counts.reduce((a, b) => a + b, 0);
+  } catch { /* pre-origin house: nothing to protect, ensureSchema will add the column */ }
+
   if (flags.yes !== true) {
     // Name the rooms. Under the per-member layout this only ever empties the caller's own,
     // and "ALL rows in 'mem'" would misdescribe that in the alarming direction.
-    const a = (await ask(`This truncates ${targets.join(', ')} in '${cfg.db}' and re-ships. Continue? (yes/no)`, 'no')).toLowerCase();
+    const scope = allOrigins
+      ? `EVERY row, including ${imported} imported one(s) that re-shipping CANNOT restore,`
+      : 'the rows the shipper wrote';
+    const a = (await ask(`This clears ${scope} from ${targets.join(', ')} in '${cfg.db}' and re-ships. Continue? (yes/no)`, 'no')).toLowerCase();
     if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
   }
+  if (allOrigins && imported) console.log(warn(`removing ${imported} imported row(s) — re-shipping will not bring them back`));
+  else if (imported) console.log(`  keeping ${imported} imported row(s) (--all-origins removes them too)`);
   // DELETE, not TRUNCATE. Historically for two reasons:
   //   * TRUNCATE is its own privilege, and a member provisioned under the pre-0.4 grant
   //     set (SELECT, INSERT and the two ALTER grants) did not hold it — so `reset` failed
@@ -1238,8 +1374,9 @@ async function cmdReset() {
   const uid = (await chRows(cfg, 'SELECT currentUser() AS u'))[0]?.u;
   if (!uid) return console.log(bad('could not determine currentUser() — refusing to reset')), 1;
   const esc = uid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  for (const t of targets) await ch(cfg, `DELETE FROM ${t} WHERE user_id = '${esc}'`);
-  console.log(ok(`cleared ${uid}'s rows from ${targets.join(', ')}`));
+  const originScope = allOrigins ? '' : " AND origin = 'ship'";
+  for (const t of targets) await ch(cfg, `DELETE FROM ${t} WHERE user_id = '${esc}'${originScope}`);
+  console.log(ok(`cleared ${uid}'s ${allOrigins ? '' : 'shipped '}rows from ${targets.join(', ')}`));
   return run(SHIP_JS, ['--full'], cfg);
 }
 
@@ -1321,10 +1458,11 @@ function cmdUninstall() {
     case 'sessions-query': {
       const cfg = requireConfig(resolveConfig(), 'sessions-query');
       const r = await roomsFor(cfg);
+      // On STDOUT and inside the SQL. This used to go to stderr, so `sessions-query >
+      // q.sql` kept the query and dropped the instruction it depended on. The rollup now
+      // carries FINAL and join_use_nulls itself, so the note is provenance, not a warning.
+      if (!JSON_OUT) console.log(`-- memhouse rollup for '${r.member}' — self-contained (FINAL + join_use_nulls).`);
       console.log(r.sessions_v);
-      if (!JSON_OUT) {
-        console.error(`-- rollup for '${r.member}'. Read with final=1 and join_use_nulls=1.`);
-      }
       break;
     }
     case 'plugins': process.exitCode = cmdPlugins(); break;
@@ -1333,7 +1471,16 @@ function cmdUninstall() {
       // into a running agent's system prompt; `--install` is the one you hand an agent
       // that has not installed memhouse yet.
       if (flags.install === true) process.exitCode = await renderInstallPrompt();
-      else process.stdout.write(fs.readFileSync(path.join(DELIVERY, 'PROMPT.md'), 'utf-8'));
+      else {
+        // Render THIS machine's state. The snippet used to be a straight file dump that
+        // told the agent the database was 'mem' and the config was at ~/.memhouse/env —
+        // wrong for anyone whose house or MEMHOUSE_HOME differs, which is the whole point
+        // of having those knobs. `--install` already renders; bare `prompt` did not.
+        const pcfg = resolveConfig();
+        process.stdout.write(fs.readFileSync(path.join(DELIVERY, 'PROMPT.md'), 'utf-8')
+          .replaceAll('{{DB}}', pcfg.db)
+          .replaceAll('{{ENV_FILE}}', ENV_FILE));
+      }
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
     case 'deploy': {
@@ -1583,6 +1730,10 @@ function cmdUninstall() {
           // Where this install lives. The env file records the connection, not the home
           // that contains it, and an adapter override may hang off the home.
           home: HOME_DIR,
+          // Replacing a service that belongs to a DIFFERENT MEMHOUSE_HOME is refused
+          // unless asked for; there is one service name per user, so the replacement is
+          // otherwise silent and the other house is left with no shipper.
+          force: flags.force === true,
         });
         if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
         console.log(ok(`service installed (${r.kind}): ${r.path}`));

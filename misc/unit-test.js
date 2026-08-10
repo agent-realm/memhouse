@@ -53,10 +53,18 @@ test('the session rollup is a QUERY, not a fourth object', () => {
   }
 });
 
-test('the rollup carries no SETTINGS of its own', () => {
-  // A subquery cannot carry a trailing SETTINGS clause, so join_use_nulls has to be a
-  // caller setting. If it drifts back into the text, every read using the rollup breaks.
-  assert.ok(!/SETTINGS/i.test(rooms.roomNames('alice').sessions_v));
+test('the rollup is self-contained — it needs nothing from the caller', () => {
+  // This test used to assert the OPPOSITE, on the belief that a subquery cannot carry a
+  // trailing SETTINGS clause. It can (verified on 26.7.2.59 and 25.11.9.34), and the
+  // belief cost real accuracy: any consumer that forgot final=1 counted every message
+  // once per undeleted ReplacingMergeTree version — 2x right after a ship, 3x a few ships
+  // later, growing until a merge happened to collapse the parts.
+  const v = rooms.roomNames('alice').sessions_v;
+  assert.match(v, /SETTINGS join_use_nulls = 1/, 'rollup must carry join_use_nulls itself');
+  // Alias BEFORE final: `FROM t FINAL AS s` is a syntax error, `FROM t AS s FINAL` is not.
+  assert.match(v, /FROM sessions_alice AS s FINAL/, 'sessions must be read FINAL');
+  assert.match(v, /LEFT JOIN messages_alice AS m FINAL/, 'messages must be read FINAL');
+  // READ_SETTINGS still applies to DIRECT room reads, which carry no FINAL of their own.
   assert.strictEqual(rooms.READ_SETTINGS.join_use_nulls, 1);
   assert.strictEqual(rooms.READ_SETTINGS.final, 1);
 });

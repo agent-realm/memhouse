@@ -28,7 +28,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { createClient } = require('@clickhouse/client');
+const { createClient, ClickHouseLogLevel } = require('@clickhouse/client');
 const { ROOM_TYPES, mergeRooms, assertUsableMember } = require('./rooms');
 
 const args = process.argv.slice(2);
@@ -74,12 +74,15 @@ async function main() {
 
   // Create the house with a client that has NOT selected it — on a fresh server the
   // database does not exist yet, and selecting it fails before it can be created.
-  const bootstrap = createClient({ ...cfg, database: '' });
+  // See the note in shipper/ship.js: the driver's ERROR-level dump buries every
+  // refusal this file prints. MEMHOUSE_DEBUG=1 restores it.
+  const quiet = { level: process.env.MEMHOUSE_DEBUG ? ClickHouseLogLevel.DEBUG : ClickHouseLogLevel.OFF };
+  const bootstrap = createClient({ ...cfg, database: '', log: quiet });
   await bootstrap.command({ query: `CREATE DATABASE IF NOT EXISTS ${cfg.database}` });
   await bootstrap.close();
 
   console.log(`[mem] provisioning in ${cfg.url} database '${cfg.database}' as '${cfg.username}'`);
-  const client = createClient({ ...cfg, clickhouse_settings: { async_insert: 0 } });
+  const client = createClient({ ...cfg, log: quiet, clickhouse_settings: { async_insert: 0 } });
 
   // 1. rooms
   const tpl = fs.readFileSync(path.join(here, 'schema-member.sql.tpl'), 'utf-8');

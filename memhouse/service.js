@@ -165,7 +165,21 @@ function preflight({ envFile }) {
 }
 
 /** Install the shipper as a user service. */
-function install({ shipJs, envFile, logDir, interval = 300, home = null }) {
+// What MEMHOUSE_* environment is baked into an already-installed unit? Both formats inline
+// it (see the note at the top), so this reads the file rather than asking the init system.
+function readInstalledEnv(unitPath) {
+  const out = {};
+  let text = '';
+  try { text = fs.readFileSync(unitPath, 'utf-8'); } catch { return out; }
+  for (const m of text.matchAll(/^Environment=([A-Z0-9_]+)=(.*)$/gm)) out[m[1]] = m[2].replace(/^"|"$/g, '');
+  // launchd: <key>NAME</key><string>VALUE</string> inside EnvironmentVariables
+  for (const m of text.matchAll(/<key>([A-Z0-9_]+)<\/key>\s*<string>([^<]*)<\/string>/g)) {
+    if (!(m[1] in out)) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+function install({ shipJs, envFile, logDir, interval = 300, home = null, force = false }) {
   const kind = platform();
   if (!kind) return { ok: false, msg: `no service integration for platform '${process.platform}'` };
   const p = unitPaths()[kind];
@@ -182,6 +196,25 @@ function install({ shipJs, envFile, logDir, interval = 300, home = null }) {
   // service installed under a custom home must keep using it, or it reads a different
   // config after a reboot than the one just written.
   if (home) env.MEMHOUSE_HOME = home;
+
+  // One label per user, so a SECOND install under a different MEMHOUSE_HOME would
+  // `bootout` the first and take the name — silently, reporting success, leaving the
+  // original house with no shipper and nothing to say so. Refuse instead, and name both
+  // sides. (Namespacing the label per home would fix it more thoroughly but orphans every
+  // service already installed under the current one; a refusal loses nothing.)
+  const existingHome = fs.existsSync(p) ? (readInstalledEnv(p).MEMHOUSE_HOME || '') : null;
+  const wantHome = env.MEMHOUSE_HOME || '';
+  if (existingHome !== null && existingHome !== wantHome && !force) {
+    return {
+      ok: false,
+      msg: `a memhouse service is already installed for a different config\n`
+        + `    installed: MEMHOUSE_HOME=${existingHome || '(default)'}\n`
+        + `    this run:  MEMHOUSE_HOME=${wantHome || '(default)'}\n`
+        + `  Both would use the same service name, so installing would silently replace the\n`
+        + `  other one. Uninstall it first (memhouse service uninstall), or pass --force.`,
+      path: p,
+    };
+  }
   // Adapter location overrides travel too. A detached shipper inherits them from the
   // invoking shell through childEnv(); a service inherits nothing, so an override that
   // was working before `service install` silently stops applying — the adapter falls back

@@ -14,8 +14,11 @@
 //   - DateTime64 values travel as 'YYYY-MM-DD HH:MM:SS.mmm' UTC strings (plain
 //     format; ISO 'T'/'Z' forms parse unreliably under JSONEachRow). Nullable → null.
 //   - Int64-bound values are integer-coerced (some adapters emit fractional ms).
-//   - Re-shipping is always safe: ReplacingMergeTree(ingested_at) keyed
-//     (session_id, user_id, seq) collapses to latest-wins at FINAL.
+//   - Re-shipping is always safe: ReplacingMergeTree(ingested_at) collapses to
+//     latest-wins at FINAL. Keyed (session_id, user_id, origin, seq) on messages and
+//     (session_id, user_id, origin, idx) on tool_calls, so an imported row and a shipped
+//     one at the same seq are two rows, not one. sessions is (session_id, user_id) with
+//     NO origin — one metadata row per session is what every read path assumes.
 //
 // CLI:  node ship.js                one incremental pass
 //       node ship.js --loop [sec]   repeat every sec seconds (default 300)
@@ -24,13 +27,15 @@
 //       node ship.js --stats        per-source counts from sessions_v and exit
 //
 // Env (DESIGN.md contract): MEMHOUSE_URL / MEMHOUSE_USER / MEMHOUSE_PASSWORD /
-// MEMHOUSE_DB — defaults http://localhost:8123 / memhouse_root / '' / mem.
+// MEMHOUSE_DB. URL and USER are REQUIRED — there is no default house, because the old
+// one (http://localhost:8123 as memhouse_root) is a real house on many machines. DB
+// defaults to 'mem'.
 
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { createClient } = require('@clickhouse/client');
+const { createClient, ClickHouseLogLevel } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
 const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../per-member/rooms');
@@ -95,9 +100,28 @@ function toInt(v) {
 }
 
 function makeClient() {
+  // No house-shaped default. `memhouse` spawns this with the resolved config in the
+  // environment, so a missing MEMHOUSE_URL here means the shipper was started some other
+  // way — a stale service unit, a hand-rolled cron, a copied command — and the old
+  // defaults sent it at http://localhost:8123 as memhouse_root, which on a lot of machines
+  // is a real house belonging to someone else. Writing memory into it is worse than
+  // reading from it.
+  if (!process.env.MEMHOUSE_URL || !process.env.MEMHOUSE_USER) {
+    console.error('[memhouse] no house configured: MEMHOUSE_URL and MEMHOUSE_USER are unset.');
+    console.error('[memhouse] run `memhouse install`, or set them for this process. Refusing to');
+    console.error('[memhouse] guess http://localhost:8123 as memhouse_root.');
+    process.exit(2);
+  }
   return createClient({
-    url: process.env.MEMHOUSE_URL || 'http://localhost:8123',
-    username: process.env.MEMHOUSE_USER || 'memhouse_root',
+    // The driver logs a full connection-object dump and a node stack to stderr for every
+    // failed request, at ERROR level, BEFORE we get the exception. A member without
+    // CREATE TABLE then sees 23 lines of @clickhouse/client internals and the word "fatal"
+    // ahead of the handled, actionable refusal — it reads like a crash that recovered.
+    // Silence the driver; every call site already catches the throw and prints something
+    // a person can act on. MEMHOUSE_DEBUG=1 puts it back.
+    log: { level: process.env.MEMHOUSE_DEBUG ? ClickHouseLogLevel.DEBUG : ClickHouseLogLevel.OFF },
+    url: process.env.MEMHOUSE_URL,
+    username: process.env.MEMHOUSE_USER,
     password: process.env.MEMHOUSE_PASSWORD || '',
     database: process.env.MEMHOUSE_DB || 'mem',
     request_timeout: 300000, // full re-ships move tens of MB; don't cut inserts short
@@ -576,7 +600,19 @@ async function main() {
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         failed = true;
-        console.error(`[memhouse] pass failed: ${e.message}`);
+        // A connection failure arrives as an AggregateError whose own `message` is empty,
+        // so this printed "[memhouse] pass failed:" and nothing else, after 35 lines of
+        // driver internals. Dig out a cause and name the fix; `status` and `doctor`
+        // already handle the same condition cleanly and `ship` was the odd one out.
+        const causes = (e && e.errors) ? e.errors.map((x) => x && x.message).filter(Boolean) : [];
+        const why = e.message || causes[0] || e.code || String(e);
+        console.error(`[memhouse] pass failed: ${why}`);
+        if (/ECONNREFUSED|fetch failed|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(why + causes.join(' '))) {
+          console.error(`[memhouse] ${process.env.MEMHOUSE_URL} did not answer — is the house running?`);
+          console.error('[memhouse] check it with: memhouse doctor');
+        }
+        if (process.env.MEMHOUSE_DEBUG) console.error(e);
+        else console.error('[memhouse] MEMHOUSE_DEBUG=1 for the full error');
         if (!loop) process.exitCode = 1;
       }
       full = false; // --full applies to the first pass only; loop passes stay incremental
