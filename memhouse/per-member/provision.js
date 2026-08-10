@@ -133,12 +133,38 @@ async function main() {
   // would become something a member could hand to a colleague while meaning "let them
   // read my sessions". Measured: with this split, `GRANT SELECT … TO bob` succeeds and
   // `GRANT DROP TABLE … TO bob` is refused 497.
+  // NOT `GRANT ALL`. On 26.7 that expands to 45 privileges including CREATE TABLE **on
+  // the member's own room name** — which means a member owns the NAME, not just the data,
+  // and can put any engine behind it. Measured on both versions:
+  //
+  //     DROP TABLE messages_alice;                                      -- allowed
+  //     CREATE TABLE messages_alice AS all_messages
+  //       ENGINE = Merge('<db>','^messages_');                          -- allowed
+  //
+  // `all_messages` is Merge(db,'^messages_'), so it then contains a Merge over its own
+  // namespace and every OTHER member's rows are counted twice in the team room: a house
+  // reading alice 6030 / bob 2401 / carol 12 became bob 4802 / carol 24, silently, no
+  // error. Confidentiality survives — the Merge still narrows by grants, so alice reads
+  // nothing new — but integrity does not, and a team-wide number is the whole point of
+  // the room. SCHEMA.md already records the same failure reached by accident; this is the
+  // same failure reachable on purpose by any member.
+  //
+  // So: the privileges the shipper actually uses, and nothing that lets a member define
+  // an object. ALTER UPDATE and ALTER DELETE both, because `DELETE FROM` is a lightweight
+  // delete implemented as `ALTER TABLE … UPDATE _row_exists = 0` and which of the two a
+  // server demands varies by version (25.11 wants UPDATE where 26.7 wanted DELETE).
+  // ALTER ADD COLUMN for ensureSchema's rollout. No CREATE TABLE, no DROP TABLE, no
+  // TRUNCATE: the admin who provisioned the room is the one who can replace it.
+  //
+  // SELECT is re-grantable so a share is READ-ONLY BY CONSTRUCTION rather than by
+  // convention — `GRANT SELECT … TO bob` succeeds, `GRANT DROP TABLE … TO bob` is 497.
+  const MEMBER_PRIVS = 'SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD COLUMN, OPTIMIZE';
   for (const t of ROOM_TYPES) {
     const room = `${cfg.database}.${t}_${member}`;
-    await client.command({ query: `GRANT ALL ON ${room} TO ${member}` });
+    await client.command({ query: `GRANT ${MEMBER_PRIVS} ON ${room} TO ${member}` });
     await client.command({ query: `GRANT SELECT ON ${room} TO ${member} WITH GRANT OPTION` });
   }
-  console.log(`[mem] granted ALL on 3 rooms to '${member}'; SELECT is the only re-grantable one`);
+  console.log(`[mem] granted ${MEMBER_PRIVS} on 3 rooms to '${member}'; SELECT is the only re-grantable one`);
 
   // 3. Merge rooms
   if (flag('merge')) {

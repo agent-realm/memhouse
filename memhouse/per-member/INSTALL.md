@@ -183,3 +183,26 @@ failed install leaves a config behind that the next command reads as truth.
 `memhouse service install` inlines the same values into the unit file, because a service
 must not depend on a shell-quoted file it does not parse the same way. That is a second
 copy, also 0600, removed by `memhouse service uninstall`.
+
+## `--adopt-user` needs house admin — it is not the new-machine path
+
+`--adopt-user` is read only on the `--admin-user` branch, so it provisions a member and
+requires admin on the house. Passing it without `--admin-user` used to be ignored silently;
+it is refused now.
+
+The actual "same person, new machine" path needs no admin at all — you already have a
+member credential, so just use it:
+
+    memhouse install --url https://… --user <member> --password …
+
+That finds the existing rooms and writes the config. `--adopt-user` is for the case where
+an admin is *creating or re-attaching* a member and wants the existing password verified
+before anything is written.
+
+## Offboarding, from the member's side
+
+`DROP USER <member>` leaves their rooms and revokes everything (verified: no orphan grants
+survive). From that member's machine every command then fails with `AUTHENTICATION_FAILED`
+and advises reinstalling — which cannot work, and is indistinguishable from a wrong
+password. There is no signal that says "you were offboarded"; ClickHouse does not
+distinguish the two either. Worth knowing before you use it on someone.

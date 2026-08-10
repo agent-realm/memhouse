@@ -722,7 +722,24 @@ async function adminBootstrap(cfg, admin) {
   // 2. the user. An EXISTING user is refused: adopting one silently hands the second
   // human the first's identity and rooms, and user_id MATERIALIZED currentUser() would
   // stamp them identically, so nothing downstream would ever notice.
-  const exists = (await chRows(adminCfg, `SELECT name FROM system.users WHERE name = '${admin.member}'`, { database: '' })).length > 0;
+  // A member who passes --admin-user gets ACCESS_DENIED here, because no member holds
+  // SELECT ON system.users. That is the isolation working — but the raw 497 names neither
+  // side, while INSTALL.md promises install "refuses, names both sides, and creates
+  // nothing". Say who you are not, and what the owner has to run instead.
+  let exists;
+  try {
+    exists = (await chRows(adminCfg, `SELECT name FROM system.users WHERE name = '${admin.member}'`, { database: '' })).length > 0;
+  } catch (e) {
+    if (/Not enough privileges|ACCESS_DENIED|system\.users/i.test(e.message || '')) {
+      console.log(bad(`'${admin.user}' is not an admin of this house — it cannot read system.users, so it cannot provision a member`));
+      console.log('  Adding a member is the house owner\'s job. Ask them for:');
+      console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${admin.member} --merge`);
+      console.log('  If you already HAVE a member credential on this house, you do not need admin:');
+      console.log(`     memhouse install --url ${adminCfg.url} --user ${admin.member} --password …`);
+      return null;
+    }
+    throw e;
+  }
   let password = flags['member-password'] || null;
   if (exists) {
     if (flags['adopt-user'] !== true) {
@@ -892,7 +909,31 @@ async function cmdInstall({ interactive }) {
     return 0;
   }
 
+  // Flags that only mean something on the admin branch. Silently ignoring them is how a
+  // run with --adopt-user --member bob --member-password … and no --admin-user ended up
+  // authenticating as memhouse_root instead: the three flags did nothing, --yes satisfied
+  // haveAll so no prompt asked who you were, and resolveConfig's default was used AS A
+  // CREDENTIAL. Refuse rather than do something else silently.
+  const adminOnly = ['adopt-user', 'member', 'member-password'].filter((k) => flags[k] !== undefined);
+  if (!adminUser && adminOnly.length) {
+    console.log(bad(`--${adminOnly.join(', --')} ${adminOnly.length > 1 ? 'are' : 'is'} only read with --admin-user`));
+    console.log('  Those flags provision a member, which needs house admin. Without them this');
+    console.log('  command connects as an EXISTING member instead:');
+    console.log('     memhouse install --url … --user <member> --password …');
+    console.log('  That is also the "same person on a new machine" path — no admin needed.');
+    return 1;
+  }
+
   const haveAll = flags.yes === true || (flags.url && flags.user !== undefined);
+  // --yes must not turn "unanswered" into "the default". Everywhere else in the product a
+  // missing house is refused; here it was authenticated with.
+  if (haveAll && !cfg.stated) {
+    console.log(bad('no house given: --url and --user are required with --yes'));
+    console.log('  memhouse will not fall back to http://localhost:8123 as memhouse_root —');
+    console.log('  on many machines that is a real house belonging to someone else.');
+    console.log('  No ClickHouse yet?  memhouse deploy --local --house-port <port>');
+    return 1;
+  }
   if (interactive || !haveAll) {
     // Offer a default only where one was actually STATED. Otherwise this prompt said
     // "Enter keeps the default" over `http://localhost:8123` / `memhouse_root` — the pair
@@ -1257,14 +1298,33 @@ async function cmdDoctor() {
       // `continue` above, so on an empty house this printed a green "sorting keys carry
       // origin correctly" having examined zero tables — a reassuring tick on the exact
       // check that a broken house needs to fail.
+      // A room whose sorting_key is empty was SKIPPED by the loop — that is a Merge, a
+      // View, a Log engine, anything that is not the MergeTree this expects. Skipping is
+      // right; calling the result a pass is not. It printed
+      // "✓ sorting keys carry origin correctly (2/3 rooms)" on a house where `ship` then
+      // failed with "DELETE query is not supported for table …". The number was right
+      // there in the green line.
       if (!checked) add(false, 'sorting keys: no rooms to check', 'create them first: memhouse install');
-      else add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ` carry origin correctly (${checked}/3 rooms)`}`,
+      else if (checked < ROOM_TYPES.length) {
+        add(false, `sorting keys: only ${checked}/${ROOM_TYPES.length} rooms are MergeTree — the rest have no sorting key at all`,
+          'a room was replaced by a Merge/View/Log engine; rebuild it from the schema template as the house owner');
+      } else add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ` carry origin correctly (${checked}/${ROOM_TYPES.length} rooms)`}`,
         `rebuild those rooms from the schema template, then: memhouse ship --full\n     template: ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}`);
     } catch (e) { add(false, 'sorting keys', e.message); }
     try {
-      const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
-      add((u[0]?.u ?? '') !== '' || (await chRows(cfg, `SELECT count() AS c FROM ${rooms.sessions}`))[0].c === 0,
-        `identity stamping (user_id='${u[0]?.u ?? ''}')`, 'writers must use async_insert=0');
+      // countIf, not any(). `any()` returns an arbitrary row's value, so on a house with
+      // four correctly-stamped rows and one blank it reported a pass five times out of
+      // six — the one check whose whole purpose is to catch unattributed rows. Count them
+      // instead, and say how many: a row with an empty user_id is invisible to every
+      // identity-bound path at once (loadExisting's WHERE, the shipper's clear, reset's
+      // DELETE), so its owner cannot even remove it.
+      const u = (await chRows(cfg, `SELECT count() AS c, countIf(user_id = '') AS blank FROM ${rooms.sessions} FINAL`))[0] || {};
+      const total = Number(u.c || 0); const blank = Number(u.blank || 0);
+      add(blank === 0,
+        total === 0 ? 'identity stamping (no rows yet)'
+          : blank === 0 ? `identity stamping (${total} rows, all attributed)`
+            : `identity stamping: ${blank} of ${total} session rows have an empty user_id`,
+        'a writer used async_insert=1 — the MATERIALIZED currentUser() stamp does not run during an async flush');
     } catch { add(false, 'identity stamping', 'schema missing? run: memhouse install'); }
   }
   let adapterErrors = [];
@@ -1477,7 +1537,15 @@ async function cmdReset() {
   if (!uid) return console.log(bad('could not determine currentUser() — refusing to reset')), 1;
   const esc = uid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   const originScope = allOrigins ? '' : " AND origin = 'ship'";
-  for (const t of targets) await ch(cfg, `DELETE FROM ${t} WHERE user_id = '${esc}'${originScope}`);
+  // `OR user_id = ''` because rows written under async_insert=1 never got the
+  // MATERIALIZED currentUser() stamp, and a DELETE bound to the caller's name cannot
+  // reach them — so `reset --all-origins`, whose prompt says "EVERY row", left them
+  // behind and only an admin could clear them. Safe to include here and nowhere else:
+  // these rooms are named for one member, so an unattributed row IN THIS ROOM is theirs
+  // by construction. The shipper's per-session clear deliberately does NOT do this — it
+  // only ever removes what it wrote, and it always writes with async_insert=0.
+  const owner = `(user_id = '${esc}' OR user_id = '')`;
+  for (const t of targets) await ch(cfg, `DELETE FROM ${t} WHERE ${owner}${originScope}`);
   console.log(ok(`cleared ${uid}'s ${allOrigins ? '' : 'shipped '}rows from ${targets.join(', ')}`));
   return run(SHIP_JS, ['--full'], cfg);
 }
