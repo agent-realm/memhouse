@@ -87,6 +87,33 @@ test('every Merge selector matches member rooms and never itself', () => {
   }
 });
 
+test('the shipper clear must bind origin, or it deletes imported history', () => {
+  // Regression, and an expensive one. The clear exists so a shorter re-parse cannot leave
+  // a stale seq tail; scoped to (session_id, user_id) alone it removed EVERY row for the
+  // session, including imported rows the adapters cannot reproduce. On a real house that
+  // cost 27,948 of 135,307 messages in a single ship pass.
+  //
+  // Asserted against the source text because the delete is one line inside a loop with no
+  // seam to call — and a seam invented purely for a test is a worse guarantee than reading
+  // the statement that actually runs.
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'mem-house', 'shipper', 'ship.js'), 'utf-8');
+  const del = src.match(/DELETE FROM \$\{rooms\[t\]\}[^`]*/);
+  assert.ok(del, 'the per-session clear was not found in ship.js');
+  assert.ok(/session_id = \{id:String\}/.test(del[0]), 'clear must bind the session');
+  assert.ok(/user_id = \{uid:String\}/.test(del[0]), 'clear must bind the user');
+  assert.ok(/origin = 'ship'/.test(del[0]),
+    "clear must bind origin='ship' — without it, re-shipping a session destroys imported rows");
+});
+
+test('every room type carries an origin column defaulting to ship', () => {
+  const tpl = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'mem-house', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+  const n = (tpl.match(/origin LowCardinality\(String\) DEFAULT 'ship'/g) || []).length;
+  assert.strictEqual(n, rooms.ROOM_TYPES.length,
+    `origin must be on all ${rooms.ROOM_TYPES.length} room types, found ${n}`);
+});
+
 // ── env file ────────────────────────────────────────────────────────────────────
 test('shell quoting round-trips, including quotes and backslashes', () => {
   for (const v of ["ab'cd", 'ab\\ef', "ab'cd\\ef", 'plain', 'a b c', '$(rm -rf /)', '']) {

@@ -25,6 +25,12 @@ CREATE TABLE IF NOT EXISTS sessions_{{MEMBER}}
     message_count UInt32 DEFAULT 0,
     path String DEFAULT '',
     extra JSON,
+    -- Who put this row here. The shipper CLEARS a session before re-inserting it (a
+    -- shorter re-parse must not leave a stale seq tail), and that clear used to remove
+    -- every row for the session regardless of origin -- destroying imported history the
+    -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
+    -- survives a re-ship of the same session.
+    origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
@@ -50,6 +56,12 @@ CREATE TABLE IF NOT EXISTS messages_{{MEMBER}}
     is_subagent Bool DEFAULT false,
     extra JSON,
     line_hash UInt64,
+    -- Who put this row here. The shipper CLEARS a session before re-inserting it (a
+    -- shorter re-parse must not leave a stale seq tail), and that clear used to remove
+    -- every row for the session regardless of origin -- destroying imported history the
+    -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
+    -- survives a re-ship of the same session.
+    origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3),
     text_ngram String MATERIALIZED lower(text),
@@ -72,6 +84,12 @@ CREATE TABLE IF NOT EXISTS tool_calls_{{MEMBER}}
     ts DateTime64(3, 'UTC'),
     project String DEFAULT '',
     folder String DEFAULT '',
+    -- Who put this row here. The shipper CLEARS a session before re-inserting it (a
+    -- shorter re-parse must not leave a stale seq tail), and that clear used to remove
+    -- every row for the session regardless of origin -- destroying imported history the
+    -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
+    -- survives a re-ship of the same session.
+    origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )

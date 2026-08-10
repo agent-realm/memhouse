@@ -33,7 +33,7 @@ const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
-const { resolveRooms, READ_SETTINGS } = require('../per-member/rooms');
+const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -113,7 +113,8 @@ function makeClient() {
 // SECOND member — grants, Merge rooms, sharing — is owner work and lives in
 // ../per-member/provision.js.
 async function ensureSchema(client) {
-  const { member } = await resolveRooms(client);
+  const rooms = await resolveRooms(client);
+  const { member } = rooms;
   const tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
   const sql = tpl.replaceAll('{{MEMBER}}', member);
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
@@ -127,6 +128,21 @@ async function ensureSchema(client) {
       // rights are needed. Verified on 25.11 and 26.7.
       clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
     });
+  }
+  // A house created before origin existed has no such column, and the clear binds it —
+  // an unguarded DELETE there would be the old destructive behaviour, and a guarded one
+  // would error. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
+  // pre-existing row reads as 'ship', which is what it was.
+  //
+  // Deliberately NOT applied to the Merge rooms: they take their structure from a member
+  // room at CREATE time and reject ALTER. A Merge room simply will not expose `origin`
+  // until it is recreated, which costs nothing — nothing reads origin through it.
+  for (const t of ROOM_TYPES) {
+    try {
+      await client.command({
+        query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
+      });
+    } catch { /* no rights to alter is not fatal: a member on someone else's house */ }
   }
   return stmts.length;
 }
@@ -373,9 +389,16 @@ async function runShip(client, opts = {}) {
       // the identical predicate with the literal value deleted 2000 rows where
       // currentUser() deleted 0. The value is the same identity either way: it is read
       // from the server over this very connection.
+      // origin='ship' is the third bind, and it is not cosmetic. This clear exists so a
+      // shorter re-parse cannot leave a stale seq tail behind — but scoped to
+      // (session_id, user_id) alone it deletes EVERY row for the session, including rows
+      // the adapters did not write and cannot rewrite. Measured, on a real house: an
+      // import of 135,307 messages lost 27,948 of them to one ship pass, because
+      // memory-house had captured more per session than the adapters emit. The rows the
+      // shipper owns are the only rows it may remove.
       for (const t of ['messages', 'tool_calls']) {
         await client.command({
-          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = {uid:String}`,
+          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = {uid:String} AND origin = 'ship'`,
           query_params: { id, uid: rooms.user },
           clickhouse_settings: { async_insert: 0 },
         });
