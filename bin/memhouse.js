@@ -90,6 +90,8 @@ function legacySoloGuard() {
   return true;
 }
 
+let ONBOARDING = false;
+
 // ── config ──────────────────────────────────────────────────────────────────────
 function readEnvFile() {
   try { return envfile.parse(fs.readFileSync(ENV_FILE, 'utf-8')); } catch { return {}; }
@@ -325,6 +327,32 @@ function netReason(e) {
   return e.message && e.message !== detail ? `${e.message} (${detail})` : detail;
 }
 
+// Read without echoing. `onboard` and `setup` both prompt for the house password and
+// printed it back on the terminal — in a wizard whose whole audience is someone typing a
+// credential in front of whoever is in the room.
+function askSecret(label, dflt = '') {
+  if (!process.stdin.isTTY) return ask(label, dflt);
+  return new Promise((resolve) => {
+    process.stdout.write(`${label}${dflt ? ` [${'*'.repeat(Math.min(dflt.length, 8))}]` : ''}: `);
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    stdin.setRawMode(true); stdin.resume(); stdin.setEncoding('utf-8');
+    let buf = '';
+    const onData = (ch) => {
+      if (ch === '\r' || ch === '\n' || ch === '\u0004') {
+        stdin.removeListener('data', onData);
+        stdin.setRawMode(!!wasRaw); stdin.pause();
+        process.stdout.write('\n');
+        return resolve(buf || dflt);
+      }
+      if (ch === '\u0003') { process.stdout.write('\n'); process.exit(130); }
+      if (ch === '\u007f' || ch === '\b') { buf = buf.slice(0, -1); return; }
+      buf += ch;
+    };
+    stdin.on('data', onData);
+  });
+}
+
 function pidOf(name) {
   try {
     const pid = parseInt(fs.readFileSync(path.join(RUN_DIR, name + '.pid'), 'utf-8'), 10);
@@ -334,6 +362,12 @@ function pidOf(name) {
 }
 
 // Signal 0 tests for existence without delivering anything.
+// The port the RUNNING dashboard was started with, not the one currently configured.
+function runningPort(cfg) {
+  try { return fs.readFileSync(path.join(RUN_DIR, 'dashboard.port'), 'utf-8').trim() || cfg.port; }
+  catch { return cfg.port; }
+}
+
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -447,7 +481,9 @@ async function cmdDiscover() {
     else console.log(ok(`${p.url} — v${p.version}${p.hasHouse ? ', house present' : ''}${p.kernel ? ', KERNEL detected' : ''}`));
   }
   console.log('');
-  console.log(out.config ? ok(`config: ${out.config}`) : warn('no config yet — run: memhouse install (or onboard)'));
+  // This banner is shared with `onboard`, which was therefore telling the user, mid-wizard,
+  // to run the wizard they are already inside.
+  console.log(out.config ? ok(`config: ${out.config}`) : warn(ONBOARDING ? 'no config yet — setting one up now' : 'no config yet — run: memhouse install (or onboard)'));
   if (out.memoryHouse) console.log(warn('memory-house detected on this machine (they coexist fine)'));
   return out;
 }
@@ -950,7 +986,7 @@ async function cmdInstall({ interactive }) {
       console.log('  no ClickHouse yet?  memhouse deploy --local --house-port <port>');
       return 1;
     }
-    cfg.password = await ask('  password', cfg.password);
+    cfg.password = await askSecret('  password', cfg.password);
     cfg.db = await ask('  database (the house)', cfg.db);
     cfg.port = await ask('  dashboard port', cfg.port);
   }
@@ -1046,6 +1082,7 @@ async function cmdInstall({ interactive }) {
 }
 
 async function cmdOnboard() {
+  ONBOARDING = true;
   console.log(`memhouse ${PKG.version} — onboarding\n`);
   const found = await cmdDiscover();
   console.log('');
@@ -1083,6 +1120,10 @@ async function cmdOnboard() {
 async function cmdStart() {
   const cfg = requireConfig(resolveConfig(), 'start');
   fs.mkdirSync(RUN_DIR, { recursive: true });
+  // Record the port this run actually used. `start --port 4673` did not persist it, so
+  // `status` fell back to the env file and printed `dashboard → http://localhost:4640` —
+  // a live process on 4673 named alongside a link to someone else's dashboard on 4640.
+  try { fs.writeFileSync(path.join(RUN_DIR, 'dashboard.port'), String(cfg.port)); } catch { /* best effort */ }
   fs.mkdirSync(LOG_DIR, { recursive: true });
   ensureUiBuilt();
   const daemons = [
@@ -1214,7 +1255,7 @@ async function cmdStatus() {
   else if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
   console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
-  if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${cfg.port}`);
+  if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${runningPort(cfg)}`);
   // Exit non-zero when the house is unreachable. `status` is what a health check, a
   // cron, or an agent gates on; printing '✗ not connected' and exiting 0 tells every
   // one of them the house is fine.
@@ -1407,6 +1448,19 @@ async function cmdDoctor() {
         ? `pricing: every model in this house has a price (${rows.length} models)`
         : `pricing: ${unpriced.length} model${unpriced.length > 1 ? 's' : ''} unpriced — ${share} cost nothing in the dashboard (${unpriced.map((r) => r.model).join(', ')})`,
       'node sync-pricing.js --write   (then re-run doctor)');
+
+    // A source whose rows carry NO tokens costs nothing in the dashboard, which reads as
+    // "this editor is free" rather than "this editor's usage was never parsed". That is
+    // the same shape as the unpriced-model gap above, which once hid $6,919 — except no
+    // price list can fix it, because the numbers were never extracted. zed is the current
+    // case: editors/zed.js contains no usage handling at all.
+    const zero = await chRows(cfg,
+      `SELECT source, count() AS n FROM ${rooms.messages} FINAL WHERE role = 'assistant' GROUP BY source HAVING sum(input_tokens) + sum(output_tokens) = 0 ORDER BY source`);
+    add(zero.length === 0,
+      zero.length === 0
+        ? 'token capture: every editor in this house reports usage'
+        : `token capture: ${zero.map((r) => `${r.source} (${r.n} messages)`).join(', ')} report ZERO tokens — their cost shows as $0, not as unknown`,
+      'that adapter does not extract usage; the messages are stored, the numbers are not');
   } catch { /* a house that cannot be read is already reported above */ }
   const sh = shipperHealth();
   add(sh.running, `shipper${sh.via ? ` — ${sh.via}` : ''}`, 'memhouse start (or: memhouse service install)');
@@ -1592,10 +1646,25 @@ function cmdUninstall() {
       // --port overrides, already resolved into cfg) skips every prompt so
       // agents/CI can rewrite the config non-interactively.
       const c = { ...cfg };
+      // `install` refuses to guess http://localhost:8123 as memhouse_root, with a comment
+      // explaining why; `setup --yes` wrote precisely that config in one command, exit 0,
+      // and five Enters through the interactive form did the same. A guard at one command
+      // is not a guard.
+      if (!cfg.stated && flags.yes === true) {
+        console.log(bad('no house given: --url and --user are required with --yes'));
+        console.log('  setup will not write http://localhost:8123 as memhouse_root into your config.');
+        process.exitCode = 1;
+        break;
+      }
       if (flags.yes !== true) {
-        c.url = await ask('  ClickHouse URL', c.url);
-        c.user = await ask('  user', c.user);
-        c.password = await ask('  password', c.password);
+        c.url = await ask('  ClickHouse URL', cfg.stated ? c.url : '');
+        c.user = await ask('  user', cfg.stated ? c.user : '');
+        if (!c.url || !c.user) {
+          console.log(bad('a URL and a user are required — memhouse will not pick a house for you'));
+          process.exitCode = 1;
+          break;
+        }
+        c.password = await askSecret('  password', c.password);
         c.db = await ask('  database (the house)', c.db);
         c.port = await ask('  dashboard port', c.port);
       }
@@ -1611,6 +1680,9 @@ function cmdUninstall() {
     case 'ship': {
       requireConfig(cfg, 'ship');
       const args = [];
+      // --ensure-schema was accepted by the parser and never forwarded, so asking for a
+      // schema-only rollout shipped 398 sessions instead and exited 0.
+      if (flags['ensure-schema'] === true) args.push('--ensure-schema');
       if (flags.full === true) args.push('--full');
       if (flags.loop !== undefined) { args.push('--loop'); if (flags.loop !== true) args.push(String(flags.loop)); }
       process.exitCode = run(SHIP_JS, args, cfg);

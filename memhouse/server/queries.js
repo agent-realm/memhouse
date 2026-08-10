@@ -363,16 +363,37 @@ async function getChats(opts = {}) {
   if (rows.length === 0) return [];
 
   // Top model per rollup = most frequent model across THAT WRITER's messages
-  // (session_id alone would blend colliding sessions across members).
+  // (session_id alone would blend colliding sessions across members). Used for DISPLAY.
+  //
+  // Cost is a different question and used to reuse this answer: the whole session's tokens
+  // were priced at the top model's rate, so a session of five cheap messages and one
+  // expensive one was billed entirely as the cheap model. Measured — one session read
+  // $10.02 on the Sessions page and $150 on the Costs page, against a true $150.0175, both
+  // rendered in the same dashboard with nothing saying they disagreed. Cost is now summed
+  // PER MODEL from the same rows, which is what getCostAnalytics already did.
   const ids = rows.map(r => r.id);
   const tmRows = await q(`
-    SELECT session_id, user_id, argMax(model, cnt) AS top_model
-    FROM (SELECT session_id, user_id, model, count() AS cnt FROM {{messages}}
-          WHERE session_id IN {ids:Array(String)} AND model NOT IN ${EXCLUDED_MODELS}
-          GROUP BY session_id, user_id, model)
-    GROUP BY session_id, user_id`, { ids });
+    SELECT session_id, user_id, model,
+           count() AS cnt,
+           sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,
+           sum(cache_read_tokens) AS cache_r, sum(cache_write_tokens) AS cache_w
+    FROM {{messages}}
+    WHERE session_id IN {ids:Array(String)} AND model NOT IN ${EXCLUDED_MODELS}
+    GROUP BY session_id, user_id, model`, { ids });
   const topModelBySession = {};
-  for (const r of tmRows) topModelBySession[`${r.session_id}::${r.user_id}`] = r.top_model;
+  const costBySession = {};
+  const bestCnt = {};
+  for (const r of tmRows) {
+    const k = `${r.session_id}::${r.user_id}`;
+    const cnt = Number(r.cnt) || 0;
+    if (cnt > (bestCnt[k] || 0)) { bestCnt[k] = cnt; topModelBySession[k] = r.model; }
+    const c = calculateCost(r.model, Number(r.in_tok) || 0, Number(r.out_tok) || 0,
+      Number(r.cache_r) || 0, Number(r.cache_w) || 0);
+    // null = unpriced model. Keep it distinguishable from a real zero so the row can say
+    // "partly unpriced" rather than quietly under-reporting.
+    if (c === null) costBySession[k] = costBySession[k] || { total: 0, unpriced: true };
+    else { costBySession[k] = costBySession[k] || { total: 0, unpriced: false }; costBySession[k].total += c; }
+  }
 
   return rows.map(r => {
     const topModel = topModelBySession[`${r.id}::${r.user_id}`] || null;
@@ -381,7 +402,11 @@ async function getChats(opts = {}) {
       inTok = Math.round((r._uChars || 0) / 4);
       outTok = Math.round((r._aChars || 0) / 4);
     }
-    const cost = topModel ? (calculateCost(topModel, inTok, outTok, Number(r._cacheR) || 0, Number(r._cacheW) || 0) || 0) : 0;
+    // Summed per model above. The char-estimate fallback below only applies when the row
+    // carries no token counts at all, in which case there is nothing per-model to sum.
+    const summed = costBySession[`${r.id}::${r.user_id}`];
+    const cost = summed ? summed.total
+      : (topModel ? (calculateCost(topModel, inTok, outTok, Number(r._cacheR) || 0, Number(r._cacheW) || 0) || 0) : 0);
     return {
       // Composite API id: rollups are keyed (session_id, user_id), so the id a
       // client clicks must pin BOTH — otherwise opening one of two colliding

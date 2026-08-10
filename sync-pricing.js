@@ -110,7 +110,7 @@ async function main() {
   for (const [key, pricing] of Object.entries(remote)) {
     if (key.startsWith('_')) continue;
     const cur = current[key];
-    const merged = mergePricing(cur, pricing);
+    const merged = mergePricing(cur, pricing, key);
     if (!cur) {
       added.push({ key, pricing: merged });
     } else {
@@ -185,6 +185,11 @@ async function main() {
   result._meta = { ...meta, lastVerified: new Date().toISOString().slice(0, 7) };
 
   fs.writeFileSync(PRICING_PATH, JSON.stringify(result, null, 2) + '\n');
+  if (unknownRates.length) {
+    console.log(`\n\x1b[33m! ${unknownRates.length} new model(s) have no published cache rate — those tokens will cost $0:\x1b[0m`);
+    for (const u of unknownRates) console.log(`    ${u.key} — ${u.missing.join(', ')} unknown, recorded as 0`);
+    console.log('  That is the source\'s gap, not a price of zero. Set them by hand in pricing.json if you know them.');
+  }
   console.log(`\n\x1b[32m✓ pricing.json updated (${added.length} added, ${updated.length} updated)\x1b[0m`);
 }
 
@@ -202,13 +207,27 @@ function pricingDiff(a, b) {
 }
 
 // Merge remote pricing into existing, preserving local cache values when remote is undefined
-function mergePricing(existing, remote) {
-  return {
+// Keep a rate we already know when the remote omits it — 80 of 97 remote models publish no
+// cache_write and 27 no cache_read, so taking the remote at face value would overwrite a
+// good number with zero. For a model we have never seen, zero is what the source says, but
+// zero MEANS "these tokens are free" everywhere downstream. Record which ones so --write
+// can say so out loud instead of quietly under-reporting, the same failure mode as an
+// unpriced model.
+const unknownRates = [];
+function mergePricing(existing, remote, key) {
+  const out = {
     input: remote.input,
     output: remote.output,
     cacheRead: remote.cacheRead !== undefined ? remote.cacheRead : (existing?.cacheRead || 0),
     cacheWrite: remote.cacheWrite !== undefined ? remote.cacheWrite : (existing?.cacheWrite || 0),
   };
+  if (key && !existing) {
+    const missing = [];
+    if (remote.cacheRead === undefined) missing.push('cacheRead');
+    if (remote.cacheWrite === undefined) missing.push('cacheWrite');
+    if (missing.length) unknownRates.push({ key, missing });
+  }
+  return out;
 }
 
 main().catch((err) => {

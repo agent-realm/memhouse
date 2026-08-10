@@ -27,6 +27,7 @@
 // USER are REQUIRED — see the note at cfg. MEM_DB defaults to 'mem'.
 
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 // Named, not thrown as a raw MODULE_NOT_FOUND with a require stack. This runs as a
 // SUBPROCESS of `memhouse install`, after the admin path has already created a ClickHouse
@@ -106,6 +107,30 @@ async function main() {
 
   console.log(`[mem] provisioning in ${cfg.url} database '${cfg.database}' as '${cfg.username}'`);
   const client = createClient({ ...cfg, log: quiet, clickhouse_settings: { async_insert: 0 } });
+
+  // 0. the member themselves.
+  //
+  // This file never created the ClickHouse user, so the path `memhouse install` prints and
+  // INSTALL.md repeats — `provision.js --member <name> --merge` — created three rooms and
+  // then died on `There is no role \`<name>\` in \`user directories\``, leaving orphan rooms
+  // that nothing removes and that the --merge step then folded into all_sessions. It also
+  // ignored --member-password. The documented second-member path did not work at all.
+  const existing = await client.query({
+    query: `SELECT name FROM system.users WHERE name = {n:String}`,
+    query_params: { n: member }, format: 'JSONEachRow',
+  });
+  if ((await existing.json()).length === 0) {
+    const pw = opt('member-password') || crypto.randomBytes(24).toString('base64url');
+    await client.command({ query: `CREATE USER ${member} IDENTIFIED BY '${pw.replace(/'/g, "\\'")}'` });
+    console.log(`[mem] created ClickHouse user '${member}'`);
+    if (!opt('member-password')) {
+      console.log(`[mem] password for '${member}': ${pw}`);
+      console.log('[mem] shown once — hand it over, or pass --member-password next time');
+    }
+    console.log(`[mem] they finish with: memhouse install --url ${cfg.url} --db ${cfg.database} --user ${member} --password '…'`);
+  } else {
+    console.log(`[mem] ClickHouse user '${member}' already exists — provisioning rooms only`);
+  }
 
   // 1. rooms
   const tpl = fs.readFileSync(path.join(here, 'schema-member.sql.tpl'), 'utf-8');

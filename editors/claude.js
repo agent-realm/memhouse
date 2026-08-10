@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const adapterErrors = require('./adapter-errors');
 
 const HOME = os.homedir();
 
@@ -200,7 +201,15 @@ function parseSessionFile(filePath, isSubagent) {
 
   for (const line of lines) {
     let obj;
-    try { obj = JSON.parse(line); } catch { continue; }
+    // A line that will not parse is a message that will not be stored. Dropping it in
+    // silence means the transcript is quietly short: not withheld, not truncated, and
+    // nothing in ship, discover or doctor says a line was lost. The SQLite adapters
+    // report their parse failures through this sink and the shipper withholds the session
+    // on them; JSONL line failures bypassed it entirely.
+    try { obj = JSON.parse(line); } catch (e) {
+      adapterErrors.record('claude-code', new Error(`unparseable JSONL line: ${e.message}`), filePath);
+      continue;
+    }
 
     // Claude Code stamps every JSONL line with an ISO timestamp. Carrying it through as
     // _ts lets the shipper store when a message was ACTUALLY sent instead of a position

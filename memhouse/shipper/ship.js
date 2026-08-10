@@ -103,6 +103,34 @@ function messageTs(chat, seq, total, msg) {
   return chTs(start + Math.round((end - start) * (seq / (total - 1))));
 }
 
+/**
+ * Truncate without splitting a character.
+ *
+ * `String.prototype.slice` counts UTF-16 code units, so a boundary that lands inside an
+ * astral character (emoji, and everything else above U+FFFF) leaves a lone high surrogate
+ * at the end. `JSON.stringify` then emits "\ud83d", and ClickHouse rejects THE WHOLE
+ * INSERT:
+ *
+ *   Cannot parse escape sequence: missing second part of surrogate pair
+ *   (while reading the value of key text) … CANNOT_PARSE_ESCAPE_SEQUENCE
+ *
+ * The blast radius is not the one message. One poisoned session among ten made every pass
+ * fail and the house stayed completely empty across four passes; under `--loop` it retries
+ * forever. In another ordering the failure landed after the sessions insert, leaving
+ * session rows whose transcripts do not exist and which accumulated on every pass.
+ *
+ * Reachable on ordinary data: four messages in a real 398-session history already sit at
+ * the 50,000 ceiling, and codex folds a whole turn into one assistant message (mean 9,762
+ * chars), so it is the most exposed source. Dropping the orphaned half of a pair costs one
+ * character out of 50,000.
+ */
+function truncate(s, max) {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return (last >= 0xD800 && last <= 0xDBFF) ? cut.slice(0, -1) : cut;
+}
+
 // UInt64-bound coercion: integers only, never negative, garbage → 0.
 function toInt(v) {
   const n = Math.trunc(Number(v));
@@ -270,7 +298,18 @@ async function ensureSchema(client) {
         // on 26.x, and query-scoped, so it needs no server config.
         clickhouse_settings: { allow_experimental_full_text_index: 1 },
       });
-    } catch { /* no rights to alter is not fatal: a member on someone else's house */ }
+    } catch (e) {
+      // No rights to alter is genuinely not fatal — a member on someone else's house
+      // cannot roll a column out and does not need to. But this used to swallow
+      // EVERYTHING, including the 25.11 Code 344 this call carries a setting to avoid, and
+      // `schema ensured` printed regardless. Name anything that is not a permissions
+      // problem, and keep going.
+      const m = e && e.message ? e.message : String(e);
+      if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
+        console.error(`[memhouse] could not add the 'origin' column to ${rooms[t]}: ${m}`);
+        console.error('[memhouse] the room still works; a house that predates 0.4.4 needs rebuilding — memhouse doctor');
+      }
+    }
   }
 
   await assertRoomsExist(client, rooms);
@@ -389,7 +428,7 @@ function rowsForChat(chat, host) {
   for (let seq = 0; seq < total; seq++) {
     const m = messages[seq];
     const raw = typeof m.content === 'string' ? m.content : JSON.stringify(m.content) ?? '';
-    const text = raw.length > TEXT_MAX ? raw.slice(0, TEXT_MAX) : raw;
+    const text = truncate(raw, TEXT_MAX);
     const ts = messageTs(chat, seq, total, m);
     const row = {
       session_id: id,
@@ -437,7 +476,7 @@ function rowsForChat(chat, host) {
         source,
         host,
         tool_name: tc.name,
-        args: args.length > ARGS_MAX ? args.slice(0, ARGS_MAX) : args,
+        args: truncate(args, ARGS_MAX),
         ts,
         project,
         folder,
