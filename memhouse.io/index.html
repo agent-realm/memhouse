@@ -40,7 +40,7 @@
       <img class="on-light" src="/mark.png" alt="MemHouse" width="37" height="28">
       <img class="on-dark" src="/mark-dark.png" alt="MemHouse" width="37" height="28" hidden>
       memhouse
-      <span class="ver">v0.4.1</span>
+      <span class="ver">v0.4.4</span>
     </a>
     <nav class="nav-links">
       <a class="hide-sm" href="#compare">Why</a>
@@ -60,7 +60,7 @@
 <!-- ============ HERO ============ -->
 <section class="hero">
   <div class="wrap">
-    <div class="status"><span class="dot"></span> <b>v0.4.1</b> &middot; 17 editor adapters &middot; MIT</div>
+    <div class="status"><span class="dot"></span> <b>v0.4.4</b> &middot; 17 editor adapters &middot; MIT</div>
 
     <h1 class="hero-title"><span class="dim">Your agents forget.</span><br><span class="mark">The house remembers.</span></h1>
 
@@ -287,6 +287,8 @@
       purpose, for the two things a proxy structurally cannot do: <b>read the history already
       sitting on your disk</b>, and <b>stay out of the path between you and your model</b>.
       If you would rather not run a man-in-the-middle on every prompt you send, that is the trade.
+      The repo grades the whole field bet by bet in
+      <a href="https://github.com/agent-realm/memhouse/blob/master/mem-house/COMPETITION.md">COMPETITION.md</a>.
     </div>
   </div>
 </section>
@@ -484,7 +486,7 @@
         <tbody>
           <tr>
             <td>deploy --local</td>
-            <td>Stock ClickHouse in docker or podman, bound to loopback. It labels what it creates and refuses to touch a container or volume it did not create, so a name collision costs you an error rather than somebody else's data.</td>
+            <td>Stock ClickHouse in docker or podman, bound to loopback. Since 0.4.2 <code>onboard</code> offers it when discover has just proved there is nothing to point at, instead of demanding a URL you do not have. It labels what it creates and refuses to touch a container or volume it did not create, so a name collision costs you an error rather than somebody else's data.</td>
             <td>One machine — or several members later.</td>
           </tr>
           <tr>
@@ -515,7 +517,7 @@
 <pre><span class="c"># install (keep the flag — five adapters read SQLite)</span>
 <span class="p">$</span> <span class="k">npm install -g memhouse --allow-scripts=better-sqlite3</span>
 
-<span class="c"># no ClickHouse yet? one command stands one up</span>
+<span class="c"># no ClickHouse yet? onboard offers to stand one up</span>
 <span class="p">$</span> <span class="k">memhouse deploy --local</span>
 
 <span class="c"># the wizard: discover → configure → ship → start</span>
@@ -546,7 +548,8 @@
         <ul class="list" style="margin-top:0">
           <li><b>Incremental.</b> A pass skips every session that hasn't grown or changed; a full re-ship stays safe.</li>
           <li><b>Idempotent.</b> Re-shipping a known session clears its old message and tool rows first, so a shrunken re-parse can't leave a stale tail behind.</li>
-          <li><b>Honest about failure.</b> <code>doctor</code> diagnoses the whole pipeline, and <code>discover</code> says out loud when the SQLite binding is missing rather than silently shipping a partial history.</li>
+          <li><b>Degrades one adapter at a time.</b> A missing SQLite binding used to make <code>discover</code> report <em>zero</em> editors — one absent native module threw before any adapter ran. Since 0.4.3 the eleven adapters that need no native code work regardless, and the five that do are named as skipped.</li>
+          <li><b>Honest about failure.</b> <code>doctor</code> diagnoses the whole pipeline, and both it and <code>discover</code> say out loud when the binding is missing rather than leaving you to infer it from a low number.</li>
         </ul>
       </div>
     </div>
@@ -570,6 +573,7 @@
           <li><b>Skills.</b> <code>/memhouse:search</code>, <code>/memhouse:sessions</code>, <code>/memhouse:sql</code> — full text, session listing, free-form read-only SQL.</li>
           <li><b>A plugin.</b> <code>memhouse plugins install claude</code> drops them into Claude Code.</li>
           <li><b>A prompt snippet.</b> <code>memhouse prompt</code> prints the system-prompt block that tells an agent to search memory <em>before</em> claiming ignorance.</li>
+          <li><b>An install prompt, rendered for this machine.</b> <code>memhouse prompt --install</code> probes for a house, a container engine and an existing config, then states the <em>one</em> route that applies — including "already installed, do not reinstall" and "configured but the house does not answer, diagnose before repointing". An agent gets an instruction, not a decision tree to walk and a branch to pick wrong.</li>
           <li><b>Read-only by construction.</b> Agents query; only the shipper writes. Other members' sessions stay invisible unless they granted you their rooms.</li>
         </ul>
       </div>
@@ -585,6 +589,9 @@
 <span class="g">  ✓</span> skills installed: search · sessions · sql
 
 <span class="p">$</span> <span class="k">memhouse prompt</span> &gt;&gt; CLAUDE.md
+
+<span class="c"># or hand an agent the install itself</span>
+<span class="p">$</span> <span class="k">memhouse prompt --install</span>
 </pre>
       </div>
     </div>
@@ -627,8 +634,29 @@
         <summary>Why do I need <code>--allow-scripts=better-sqlite3</code>?</summary>
         <p>Five adapters — Cursor, Goose, OpenCode, Zed and Antigravity — read sessions out of SQLite files,
         and <code>better-sqlite3</code> builds its native binding from an install script. npm 12 blocks
-        install scripts by default, so without the flag those five read nothing and you would silently ship
-        a partial history. <code>discover</code> and <code>doctor</code> both say so when the binding is missing.</p>
+        install scripts by default, so without the flag those five read nothing and your history is partial
+        by exactly those five editors.</p>
+        <p>Up to 0.4.3 it was worse than that: the missing module threw at import time, before any adapter
+        ran, so <code>discover</code> reported <em>zero</em> editors on a machine that had plenty. The four
+        remaining offenders now load it lazily, so the eleven adapters needing no native code work either
+        way and the five that do are named as skipped. Keep the flag anyway — a partial history that looks
+        complete is the failure worth avoiding.</p>
+      </details>
+
+      <details>
+        <summary>I already have a memhouse house — is upgrading to 0.4.4 safe?</summary>
+        <p>Upgrade, and read the refusal it prints. 0.4.4 fixes a data-loss bug that matters if you ever
+        <em>imported</em> history into your house: a ship pass clears and re-inserts a session's rows so a
+        shorter re-parse cannot leave a stale tail, and that clear was scoped to the session alone — so it
+        removed rows the adapters never wrote and cannot rewrite. Measured on a real house of 135,307
+        imported messages, one pass took a source from 126,098 rows to 98,150, and would have continued a
+        pass at a time.</p>
+        <p>Rooms now carry an <code>origin</code> column, and it is <em>in the sorting key</em> — guarding
+        only the delete leaves ReplacingMergeTree to collapse an imported row against a shipped one sharing
+        the same key, which is the same loss reached through the merge. <code>ORDER BY</code> cannot be
+        altered in place, so a house built earlier needs its rooms rebuilt; the shipper refuses to write
+        into one and prints the steps, and it checks on every pass rather than at schema time. A house with
+        no imported rows can simply be re-shipped from scratch.</p>
       </details>
 
       <details>
@@ -688,6 +716,8 @@
       <a href="https://github.com/agent-realm/memhouse">github</a>
       <a href="https://www.npmjs.com/package/memhouse">npm</a>
       <a href="https://github.com/agent-realm/memhouse/blob/master/mem-house/DESIGN.md">design</a>
+      <a href="https://github.com/agent-realm/memhouse/blob/master/mem-house/COMPETITION.md">competition</a>
+      <a href="https://github.com/agent-realm/memhouse/releases">releases</a>
       <a href="https://github.com/agent-realm/memhouse/issues">issues</a>
     </div>
   </div>
