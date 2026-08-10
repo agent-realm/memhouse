@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// memhouse — the mem-house CLI. One command to install, ship, serve, and query
-// agent conversation memory (see mem-house/DESIGN.md).
+// memhouse — the memhouse CLI. One command to install, ship, serve, and query
+// agent conversation memory (see memhouse/DESIGN.md).
 //
 // Thin orchestrator: heavy operations run the existing entrypoints
-// (mem-house/shipper/ship.js, mem-house/server/server.js) as children with the
+// (memhouse/shipper/ship.js, memhouse/server/server.js) as children with the
 // resolved MEMHOUSE_* env, so there is a single source of truth for shipping and
 // serving. The CLI owns: config (~/.memhouse/env), daemons (pidfiles), probes,
 // and the small read-only queries (status/search) done over ClickHouse HTTP.
@@ -19,12 +19,12 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
 const REPO_ROOT = path.join(__dirname, '..');
-const SHIP_JS = path.join(REPO_ROOT, 'mem-house', 'shipper', 'ship.js');
-const SERVER_JS = path.join(REPO_ROOT, 'mem-house', 'server', 'server.js');
-const DELIVERY = path.join(REPO_ROOT, 'mem-house', 'delivery');
+const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
+const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
+const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, mergeRooms } = require(path.join(REPO_ROOT, 'mem-house', 'per-member', 'rooms'));
-const envfile = require(path.join(REPO_ROOT, 'mem-house', 'envfile'));
+const { roomNames, ROOM_TYPES, mergeRooms } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
+const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
 const ENV_FILE = path.join(HOME_DIR, 'env');
@@ -122,7 +122,7 @@ function writeEnvFile(cfg) {
   // `. ~/.memhouse/env`), so metacharacters in a password must never be bare.
   const sq = envfile.quoteShell;
   const body = [
-    '# mem-house connection — written by `memhouse install/setup`',
+    '# memhouse connection — written by `memhouse install/setup`',
     `MEMHOUSE_URL=${sq(cfg.url)}`,
     `MEMHOUSE_USER=${sq(cfg.user)}`,
     `MEMHOUSE_PASSWORD=${sq(cfg.password)}`,
@@ -236,7 +236,7 @@ function shipperHealth() {
   const pid = pidOf('shipper');
   if (pid) return { running: true, via: `daemon (pid ${pid})` };
   try {
-    const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
+    const svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
     const st = svc.status();
     if (st.installed) return { running: st.running, via: `service (${st.kind})` };
   } catch { /* no service integration on this platform */ }
@@ -528,7 +528,7 @@ async function withSuppressedOutput(fn) {
  * "fix the connection" by the one command whose whole job is to get them connected.
  */
 function deployableEngines() {
-  try { return require(path.join(REPO_ROOT, 'mem-house', 'deploy.js')).availableEngines() || []; }
+  try { return require(path.join(REPO_ROOT, 'memhouse', 'deploy.js')).availableEngines() || []; }
   catch { return []; }
 }
 
@@ -574,7 +574,7 @@ function generatePassword() {
  * same templates provision.js applies, so the two cannot drift into different houses.
  */
 function memberSql(db, member, password) {
-  const here = path.join(REPO_ROOT, 'mem-house', 'per-member');
+  const here = path.join(REPO_ROOT, 'memhouse', 'per-member');
   // The templates are written unqualified because provision.js applies them with the
   // house already selected. A human pastes this somewhere unknown — clickhouse-client,
   // the play UI, curl — so every name is qualified here and there is no `USE`.
@@ -692,7 +692,7 @@ async function adminBootstrap(cfg, admin) {
 
   // 3. rooms, 4. grants, 5. Merge rooms + their grant — provision.js owns all of it, so
   // there is one implementation of the grant set rather than two that drift.
-  const provision = path.join(REPO_ROOT, 'mem-house', 'per-member', 'provision.js');
+  const provision = path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js');
   const rc = spawnSync(process.execPath, [provision, '--member', admin.member, '--merge'], {
     stdio: 'inherit',
     env: { ...process.env, MEM_URL: cfg.url, MEM_USER: admin.user, MEM_PASSWORD: admin.password, MEM_DB: cfg.db },
@@ -754,13 +754,13 @@ async function cmdInstall({ interactive }) {
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
     console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
     console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
-    console.log('     node mem-house/per-member/provision.js --member <name> --merge');
+    console.log('     node memhouse/per-member/provision.js --member <name> --merge');
     return 0;
   }
 
   const haveAll = flags.yes === true || (flags.url && flags.user !== undefined);
   if (interactive || !haveAll) {
-    console.log('mem-house connection (Enter keeps the default):');
+    console.log('memhouse connection (Enter keeps the default):');
     cfg.url = await ask('  ClickHouse URL', cfg.url);
     cfg.user = await ask('  user', cfg.user);
     cfg.password = await ask('  password', cfg.password);
@@ -899,7 +899,7 @@ async function cmdStart() {
   // Reachable in the obvious way: after a reboot the user wants the dashboard back, which
   // is not service-managed, and types `memhouse start`.
   let svcStatus = { installed: false, running: false };
-  try { svcStatus = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).status(); } catch { /* unsupported platform */ }
+  try { svcStatus = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { /* unsupported platform */ }
   const owned = [
     ...(svcStatus.installed ? [['shipper', svcStatus.running, 'memhouse-shipper']] : []),
   ];
@@ -995,7 +995,7 @@ async function cmdDoctor() {
     add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
       legacy.length
         ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
-        : `run: memhouse install, or as the owner: node mem-house/per-member/provision.js --member ${rooms.member}`);
+        : `run: memhouse install, or as the owner: node memhouse/per-member/provision.js --member ${rooms.member}`);
   } catch (e) { add(false, 'schema check', e.message); }
   try {
     const u = await chRows(cfg, `SELECT any(user_id) AS u FROM ${rooms.sessions}`);
@@ -1173,7 +1173,7 @@ function cmdUninstall() {
   // design, it holds the credential inlined in its unit file, and it restarts itself. An
   // uninstall that stopped only the daemons would report success while a service kept
   // shipping transcripts — with a credential in a file the user now believes is gone.
-  const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
+  const svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
   const st = svc.status();
   // `legacy` too: a machine that ran the solo tier can have a stale unit and no current
   // one, and skipping the service step there leaves it enabled over a deleted home.
@@ -1261,7 +1261,7 @@ function cmdUninstall() {
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
     case 'deploy': {
-      const dep = require(path.join(REPO_ROOT, 'mem-house', 'deploy.js'));
+      const dep = require(path.join(REPO_ROOT, 'memhouse', 'deploy.js'));
       if (flags.down) {
         // A shipper service outlives the house it points at. Tearing down the container
         // and volume beneath it leaves the service retrying an endpoint that is gone —
@@ -1273,7 +1273,7 @@ function cmdUninstall() {
         // container. Compare the unit's own inlined URL against the port this container
         // publishes; if that cannot be determined, fail closed.
         let svcCfg = { installed: false, url: null };
-        try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
+        try { svcCfg = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).installedConfig(); } catch { /* unsupported */ }
         if (svcCfg.installed) {
           const pub = dep.publishedPort();
           // Host AND port. Port alone classified a service pointing at
@@ -1387,7 +1387,7 @@ function cmdUninstall() {
         // was skipped, and `status` would then report a running shipper beside counts
         // from a different house.
         let svcCfg = { installed: false, url: null };
-        try { svcCfg = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).installedConfig(); } catch { /* unsupported */ }
+        try { svcCfg = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).installedConfig(); } catch { /* unsupported */ }
         // Endpoint AND database. Same URL with a different database is still somewhere
         // else: `deploy --local --db memories` over a service holding `mem` would pass a
         // URL-only check and split reads from service writes.
@@ -1470,7 +1470,7 @@ function cmdUninstall() {
       // (rootless docker has the same exposure, but is the deliberate minority).
       if (process.platform === 'linux' && r.engine === 'podman') {
         let lingering = true;
-        try { lingering = require(path.join(REPO_ROOT, 'mem-house', 'service.js')).lingerEnabled(); } catch { /* assume fine */ }
+        try { lingering = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).lingerEnabled(); } catch { /* assume fine */ }
         if (!lingering) {
           console.log(warn('rootless podman: this container stops when you log out (lingering is off).'));
           console.log(`     loginctl enable-linger ${os.userInfo().username}`);
@@ -1484,7 +1484,7 @@ function cmdUninstall() {
       break;
     }
     case 'service': {
-      const svc = require(path.join(REPO_ROOT, 'mem-house', 'service.js'));
+      const svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
       const sub = positional[0] || 'status';
       if (sub === 'install') {
         // Ask what can be asked before killing the daemon this is taking over from. A

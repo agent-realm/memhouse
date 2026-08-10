@@ -1,11 +1,11 @@
-// mem-house server — the dashboard/API entrypoint.
+// memhouse server — the dashboard/API entrypoint.
 //
 // Speaks the agentlytics REST contract (same routes, same response shapes) over the
-// mem-house typed schema, so the UNMODIFIED agentlytics React SPA is the dashboard:
+// memhouse typed schema, so the UNMODIFIED agentlytics React SPA is the dashboard:
 // queries.js computes every response; this file is routing + config + stubs. Serves
 // the built SPA from the repo root's public/.
 //
-//   node mem-house/server/server.js        (env: MEMHOUSE_* per DESIGN.md; port 4640)
+//   node memhouse/server/server.js        (env: MEMHOUSE_* per DESIGN.md; port 4640)
 
 const express = require('express');
 const path = require('path');
@@ -193,23 +193,23 @@ app.get('/api/refetch', async (req, res) => {
   res.end();
 });
 
-// Not applicable to mem-house (dashboard renders these pages empty/absent).
+// Not applicable to memhouse (dashboard renders these pages empty/absent).
 app.get('/api/usage', (req, res) => res.json([]));
 app.get('/api/artifacts', (req, res) => res.json([]));
-app.get('/api/artifact-content', (req, res) => res.status(404).json({ error: 'not available in mem-house' }));
+app.get('/api/artifact-content', (req, res) => res.status(404).json({ error: 'not available in memhouse' }));
 app.get('/api/mcps', (req, res) => res.json({
   servers: [], toolCalls: [], matchedTools: {}, topSessions: [], projectMcps: [],
   summary: { totalServers: 0, totalToolCalls: 0, uniqueTools: 0, sessionsWithTools: 0, editorsWithServers: [] },
 }));
 app.get('/api/gsd/projects', (req, res) => res.json([]));
 app.get('/api/gsd/phases', (req, res) => res.json([]));
-app.get('/api/gsd/plan', (req, res) => res.status(404).json({ error: 'not available in mem-house' }));
+app.get('/api/gsd/plan', (req, res) => res.status(404).json({ error: 'not available in memhouse' }));
 app.get('/api/gsd/overview', (req, res) => res.json({ totalProjects: 0, totalPhases: 0, completedPhases: 0, activePhases: [], executingPhases: 0, plannedPhases: 0 }));
 app.get('/api/gsd/config', (req, res) => res.json(null));
 app.get('/api/gsd/phase-tokens', (req, res) => res.json([]));
 app.get('/api/gsd/file', (req, res) => res.json({ content: null }));
-app.get('/api/share-image', (req, res) => res.status(501).json({ error: 'not available in mem-house' }));
-app.get('/api/check-ai', (req, res) => res.status(501).json({ error: 'not available in mem-house' }));
+app.get('/api/share-image', (req, res) => res.status(501).json({ error: 'not available in memhouse' }));
+app.get('/api/check-ai', (req, res) => res.status(501).json({ error: 'not available in memhouse' }));
 
 // SPA fallback
 app.get('*', (req, res) => {
@@ -220,7 +220,7 @@ app.get('*', (req, res) => {
 
 if (require.main === module) {
   app.listen(PORT, HOST, () => {
-    console.log(`[mem-house] dashboard → http://localhost:${PORT} (house '${qy.config.database}' @ ${qy.config.url.replace(/\/\/.*@/, '//')})`
+    console.log(`[memhouse] dashboard → http://localhost:${PORT} (house '${qy.config.database}' @ ${qy.config.url.replace(/\/\/.*@/, '//')})`
       + (HOST !== '127.0.0.1' ? ` [bound to ${HOST} — remotely reachable]` : ''));
   });
 }

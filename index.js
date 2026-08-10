@@ -92,7 +92,7 @@ if (isRelay) {
     console.log('');
     console.log(chalk.bold('  Team sharing:'));
     console.log(chalk.dim('    Relay join is not supported in memhouse — members ship with their own'));
-    console.log(chalk.dim('    credentials (kernel-based): see mem-house/delivery/kernel-install.md'));
+    console.log(chalk.dim('    credentials (kernel-based): see memhouse/delivery/kernel-install.md'));
     console.log('');
     console.log(chalk.bold('  MCP server endpoint (add to your AI client):'));
     console.log('');
@@ -123,7 +123,7 @@ if (isJoin) {
   // cutover eliminated — it would crash after connecting. In memhouse, team
   // sharing is grants on per-member rooms, not relay.
   console.error(chalk.red('\n  ✗ Relay join is not supported in memhouse.'));
-  console.error(chalk.dim('    Team sharing here is kernel-based: see mem-house/delivery/kernel-install.md'));
+  console.error(chalk.dim('    Team sharing here is kernel-based: see memhouse/delivery/kernel-install.md'));
   console.error(chalk.dim('    (register-member + per-member rooms + a GRANT on your own rooms).\n'));
   process.exit(1);
 }

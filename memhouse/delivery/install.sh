@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mem-house standalone installer.
+# memhouse standalone installer.
 #
 # Checks node >= 20 and a reachable ClickHouse, writes ~/.memhouse/env
 # (MEMHOUSE_* vars), applies the house schema via the shipper
@@ -22,13 +22,13 @@
 #
 # Defaults resolve in order: flag > MEMHOUSE_* already in the environment >
 # existing ~/.memhouse/env > built-in default. Runs from any cwd — the repo is
-# resolved from this script's own location (mem-house/delivery/ -> repo root).
+# resolved from this script's own location (memhouse/delivery/ -> repo root).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-SHIP="$REPO_ROOT/mem-house/shipper/ship.js"
-SERVER="$REPO_ROOT/mem-house/server/server.js"
+SHIP="$REPO_ROOT/memhouse/shipper/ship.js"
+SERVER="$REPO_ROOT/memhouse/server/server.js"
 ENV_DIR="$HOME/.memhouse"
 ENV_FILE="$ENV_DIR/env"
 
@@ -125,7 +125,7 @@ mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
 # would corrupt the value or execute on source.
 shq() { printf "%s" "$1" | sed "s/'/'\\\\''/g"; }
 cat > "$ENV_FILE" <<EOF
-# mem-house connection (written by install.sh $(date +%Y-%m-%d-%H_%M)). NEVER commit.
+# memhouse connection (written by install.sh $(date +%Y-%m-%d-%H_%M)). NEVER commit.
 MEMHOUSE_URL='$(shq "$CH_URL")'
 MEMHOUSE_USER='$(shq "$CH_USER")'
 MEMHOUSE_PASSWORD='$(shq "$CH_PASSWORD")'
@@ -154,7 +154,7 @@ fi
 # ---------- 7. next steps ----------------------------------------------------
 cat <<EOF
 
-mem-house installed.
+memhouse installed.
 
   env file     $ENV_FILE
   house        $CH_DB @ $CH_URL

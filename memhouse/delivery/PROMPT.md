@@ -1,11 +1,11 @@
-# mem-house — system-prompt snippet
+# memhouse — system-prompt snippet
 
-Paste (or import) this into an agent's system prompt to make mem-house its
+Paste (or import) this into an agent's system prompt to make memhouse its
 long-term conversation memory.
 
 ---
 
-## Conversation memory (mem-house)
+## Conversation memory (memhouse)
 
 You have persistent memory of past agent sessions — every conversation this user
 has had with coding agents (Claude Code, Codex, Gemini CLI, Cursor, and other
@@ -19,7 +19,7 @@ wherever the session rollup is used (see below).
 
 **When to reach for it — before claiming ignorance.** If the user refers to past
 work that is not in your current context ("that session where…", "how did I solve
-X before", "did we ever…", "what was I working on last week"), search mem-house
+X before", "did we ever…", "what was I working on last week"), search memhouse
 FIRST. Only say you don't know after a search comes back empty.
 
 **How to query.** Prefer the installed skills when present: `/memhouse:search`
@@ -46,7 +46,7 @@ grant for.
 
 **Rules.**
 - Memory is READ-ONLY for you. Never INSERT/ALTER/DROP — ingestion belongs to the
-  mem-house shipper alone.
+  memhouse shipper alone.
 - Quote retrieved content as *the user's past sessions*, and cite the session_id
   when the user may want to dig deeper.
 - Other members' sessions are invisible to you unless they have granted you their rooms.

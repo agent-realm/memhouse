@@ -351,7 +351,7 @@ export default function App() {
             <div className="text-[10px] mb-1" style={{ color: 'var(--c-text3)' }}>
               Relay join is not supported in memhouse — team sharing is kernel-based. Each
               member owns their own rooms and shares by granting SELECT on them.
-              See mem-house/delivery/kernel-install.md.
+              See memhouse/delivery/kernel-install.md.
             </div>
             <pre
               className="text-[11px] px-3 py-2 overflow-x-auto"

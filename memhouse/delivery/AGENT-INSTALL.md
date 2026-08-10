@@ -1,6 +1,6 @@
-# mem-house — agent install
+# memhouse — agent install
 
-Imperative steps for an AI coding agent installing mem-house on a machine. Execute
+Imperative steps for an AI coding agent installing memhouse on a machine. Execute
 in order; every command is copy-pasteable.
 
 **Prefer `memhouse prompt --install`.** It renders `AGENT-INSTALL-PROMPT.md` against the
@@ -67,7 +67,7 @@ chmod 600 ~/.memhouse/env
 memhouse install --yes     # applies the schema, then runs the first full ship
 ```
 
-Expected output shape: `[mem-house] shipped N sessions (0 skipped) → M msg rows, T
+Expected output shape: `[memhouse] shipped N sessions (0 skipped) → M msg rows, T
 tool rows in Xs` with N in the hundreds on a machine with real agent usage.
 
 ## 4. Verify

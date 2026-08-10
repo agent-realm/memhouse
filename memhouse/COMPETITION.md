@@ -1,4 +1,4 @@
-# mem-house — the competition
+# memhouse — the competition
 
 Companion to `DESIGN.md`. That file states **the four bets**; this one grades each
 bet against the field as it actually stands.
@@ -25,7 +25,7 @@ whole analysis, because most "agent memory" products are not competitors at all.
 | **Memory SDKs** | Developer calls `add()` / `search()` | Active — the developer writes it | No — different product |
 | **Observability** | OTel/proxy traces of model calls | Passive, at the API layer | Only on analytics |
 
-mem-house is a transcript reader with the observability camp's analytics attached.
+memhouse is a transcript reader with the observability camp's analytics attached.
 That combination is the most defensible thing about the product's *shape*; the
 individual pieces are not scarce.
 
@@ -48,7 +48,7 @@ Editor coverage — the number we lead the README with — is mid-pack:
 | AgentsView | **50+** | each with documented on-disk paths |
 | lean-ctx | 30+ | claimed |
 | CCHV | 28 | each with documented paths |
-| **mem-house** | **17** | |
+| **memhouse** | **17** | |
 | deja-vu | 17 | different 17 — has Cline, aider, Qwen Code, Kimi Code, Roo Code |
 | coding_agent_session_search | 11+ | |
 | ctx | 8 | |
@@ -90,7 +90,7 @@ datastore's own permission layer.
 | mem0 | `user_id` + `agent_id` + `run_id` filters | Metadata filtering, not enforcement |
 | Industry pattern | `tenant_id` column + row-level security | Policy layer, revocable by whoever owns the policy |
 | Contextify | Cloud workspace, per-project opt-in | Real, but proprietary, cloud-first, 2 editors |
-| **mem-house** | three `GRANT SELECT` on the member's own rooms | **A member cannot name another member's rooms.** `WITH GRANT OPTION` on `SELECT` and not on `ALL` makes sharing read-only by construction and operator-free |
+| **memhouse** | three `GRANT SELECT` on the member's own rooms | **A member cannot name another member's rooms.** `WITH GRANT OPTION` on `SELECT` and not on `ALL` makes sharing read-only by construction and operator-free |
 
 Bet 3 is not a niche preference. It is a category-wide blind spot, and it is the
 only thing in this document that nobody else is attempting.
@@ -133,7 +133,7 @@ memory. None ingest agent sessions.
 
 ## What they do better
 
-- **Distribution.** mem-house: 0 stars, 655 npm downloads/month, no HN or search
+- **Distribution.** memhouse: 0 stars, 655 npm downloads/month, no HN or search
   presence. claude-mem: 89,967 stars and 62,940 downloads/month, free, no company.
   This dominates every other consideration in the document.
 - **Automatic recall.** deja-vu installs a SessionStart hook; claude-mem injects into

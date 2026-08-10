@@ -23,8 +23,8 @@
 # reset" tenet covers the VM, not the external ClickHouse. Before running, the house must
 # be provisioned and free of prior shares:
 #
-#   node mem-house/per-member/provision.js --member alice --merge
-#   node mem-house/per-member/provision.js --member bob
+#   node memhouse/per-member/provision.js --member alice --merge
+#   node memhouse/per-member/provision.js --member bob
 #   -- and no outstanding `GRANT SELECT ON mem.messages_alice TO bob`
 #
 # The two isolation assertions below (marked PRECONDITION-SENSITIVE) read `=0`, which a
