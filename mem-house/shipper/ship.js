@@ -33,7 +33,7 @@ const crypto = require('crypto');
 const { createClient } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
-const { resolveRooms, READ_SETTINGS } = require('../per-member/rooms');
+const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -112,8 +112,39 @@ function makeClient() {
 // It does NOT issue grants or create the Merge rooms. A solo owner needs neither. Adding a
 // SECOND member — grants, Merge rooms, sharing — is owner work and lives in
 // ../per-member/provision.js.
+/**
+ * Refuse to write into rooms whose sorting key predates `origin`.
+ *
+ * Called at the top of EVERY ship pass, not just --ensure-schema: a plain `memhouse ship`
+ * never touches ensureSchema, so a guard living only there is a guard that never runs on
+ * the path that does the damage. Found exactly that way — the refusal was in place and
+ * 137 sessions shipped straight past it into a stale-key house.
+ */
+async function assertOriginKeyed(client, rooms) {
+  const stale = [];
+  for (const t of ROOM_TYPES) {
+    const rs = await client.query({
+      query: `SELECT sorting_key FROM system.tables WHERE database = currentDatabase() AND name = {n:String}`,
+      query_params: { n: rooms[t] }, format: 'JSONEachRow',
+    });
+    const key = ((await rs.json())[0] || {}).sorting_key || '';
+    if (key && !/\borigin\b/.test(key)) stale.push(`${rooms[t]} (${key})`);
+  }
+  if (stale.length) {
+    throw new Error(
+      'these rooms predate the origin sorting key, so imported rows would still be lost:\n'
+      + stale.map((s) => `    ${s}`).join('\n')
+      + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
+      + '\n    RENAME TABLE <room> TO <room>_old;'
+      + '\n    -- recreate from mem-house/per-member/schema-member.sql.tpl'
+      + '\n    INSERT INTO <room> SELECT *, \'ship\' AS origin FROM <room>_old;'
+      + '\n  A house with no imported rows can also just be re-shipped from scratch.');
+  }
+}
+
 async function ensureSchema(client) {
-  const { member } = await resolveRooms(client);
+  const rooms = await resolveRooms(client);
+  const { member } = rooms;
   const tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
   const sql = tpl.replaceAll('{{MEMBER}}', member);
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
@@ -128,6 +159,29 @@ async function ensureSchema(client) {
       clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
     });
   }
+  // A house created before origin existed has no such column, and the clear binds it —
+  // an unguarded DELETE there would be the old destructive behaviour, and a guarded one
+  // would error. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
+  // pre-existing row reads as 'ship', which is what it was.
+  //
+  // Deliberately NOT applied to the Merge rooms: they take their structure from a member
+  // room at CREATE time and reject ALTER. A Merge room simply will not expose `origin`
+  // until it is recreated, which costs nothing — nothing reads origin through it.
+  for (const t of ROOM_TYPES) {
+    try {
+      await client.command({
+        query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
+        // 25.11 refuses ANY alter on a table carrying the messages text indexes unless
+        // this is set — including an ADD COLUMN that has nothing to do with them
+        // (Code: 344, SUPPORT_IS_DISABLED). Without it the backfill fails silently and
+        // the guard ends up missing on precisely the houses that need upgrading. A no-op
+        // on 26.x, and query-scoped, so it needs no server config.
+        clickhouse_settings: { allow_experimental_full_text_index: 1 },
+      });
+    } catch { /* no rights to alter is not fatal: a member on someone else's house */ }
+  }
+
+  await assertOriginKeyed(client, rooms);
   return stmts.length;
 }
 
@@ -285,6 +339,7 @@ async function runShip(client, opts = {}) {
   // message/tool rows first (a shrunken re-parse leaves stale higher-seq rows
   // otherwise: ReplacingMergeTree collapses same-key rows only).
   const rooms = await resolveRooms(client);
+  await assertOriginKeyed(client, rooms);
   const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
 
@@ -373,9 +428,16 @@ async function runShip(client, opts = {}) {
       // the identical predicate with the literal value deleted 2000 rows where
       // currentUser() deleted 0. The value is the same identity either way: it is read
       // from the server over this very connection.
+      // origin='ship' is the third bind, and it is not cosmetic. This clear exists so a
+      // shorter re-parse cannot leave a stale seq tail behind — but scoped to
+      // (session_id, user_id) alone it deletes EVERY row for the session, including rows
+      // the adapters did not write and cannot rewrite. Measured, on a real house: an
+      // import of 135,307 messages lost 27,948 of them to one ship pass, because
+      // memory-house had captured more per session than the adapters emit. The rows the
+      // shipper owns are the only rows it may remove.
       for (const t of ['messages', 'tool_calls']) {
         await client.command({
-          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = {uid:String}`,
+          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = {uid:String} AND origin = 'ship'`,
           query_params: { id, uid: rooms.user },
           clickhouse_settings: { async_insert: 0 },
         });

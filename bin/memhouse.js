@@ -608,9 +608,13 @@ function memberSql(db, member, password) {
 -- 26.x accepts the setting as a no-op. The SET below covers any client that keeps a
 -- session — clickhouse-client, a GUI. Over HTTP, where each statement is its own
 -- request and SET does not persist, put it in the URL instead:
---     curl "\$URL/?allow_experimental_full_text_index=1&multiquery=1" --data-binary @-
--- multiquery=1 matters because this is one POST carrying many statements; without it
--- ClickHouse parses only the first and reports a syntax error on the rest.
+--     curl "\$URL/?allow_experimental_full_text_index=1" --data-binary "<one statement>"
+--
+-- One statement PER REQUEST over HTTP. The interface refuses a body carrying several
+-- ("Multi-statements are not allowed"), and there is no setting that changes that —
+-- 'multiquery' is a clickhouse-client flag and sending it as an HTTP param fails the
+-- whole request with UNKNOWN_SETTING. Split on ';' and post each in turn, or use
+-- clickhouse-client, which takes the file whole.
 
 SET allow_experimental_full_text_index = 1;
 
