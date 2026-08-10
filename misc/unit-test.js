@@ -69,6 +69,16 @@ test('the rollup is self-contained — it needs nothing from the caller', () => 
   assert.strictEqual(rooms.READ_SETTINGS.final, 1);
 });
 
+test("'root' is refused at the rooms layer, in any case", () => {
+  // provision.js is an admin entry point in its own right; a reservation that lives only
+  // in the CLI let `provision.js --member root` create three orphan rooms before failing.
+  for (const r of ['root', 'Root', 'ROOT', 'rOOt']) {
+    assert.throws(() => rooms.assertUsableMember(r), /container artefact/, `accepted '${r}'`);
+  }
+  // 'default' is a poor member name but a real one; existing houses use it.
+  assert.doesNotThrow(() => rooms.assertUsableMember('default'));
+});
+
 test('handles that would need quoting are refused', () => {
   for (const bad of ['1alice', 'ali ce', 'ali-ce', "ali'ce", 'ali.ce', '']) {
     assert.throws(() => rooms.assertUsableMember(bad), /expected/, `accepted '${bad}'`);

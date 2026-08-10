@@ -30,6 +30,15 @@ function assertUsableMember(member) {
   if (typeof member !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
     throw new Error(`cannot build room names for user '${member}': expected [A-Za-z][A-Za-z0-9_]*`);
   }
+  // The reservation lives HERE, not only in the CLI, because provision.js is the admin
+  // entry point INSTALL.md sends you to for a second member — and it went as far as
+  // creating sessions_root/messages_root/tool_calls_root before dying on the grant,
+  // leaving three orphan rooms nothing removes. Case-insensitive: Root and ROOT are the
+  // same account. `default` is deliberately NOT reserved — a poor member name, but a real
+  // one that existing houses are built on.
+  if (member.toLowerCase() === 'root') {
+    throw new Error("'root' cannot be a member: it is a container artefact, not a person");
+  }
 }
 
 /**

@@ -35,7 +35,17 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { createClient, ClickHouseLogLevel } = require('@clickhouse/client');
+// Named, not a raw MODULE_NOT_FOUND with a require stack. This runs as a SUBPROCESS of
+// `memhouse ship`/`install`, so its stack trace lands in the middle of the parent's
+// output and reads as a crash in the parent. Same preflight provision.js carries.
+let createClient, ClickHouseLogLevel;
+try { ({ createClient, ClickHouseLogLevel } = require('@clickhouse/client')); }
+catch {
+  console.error("[memhouse] dependency '@clickhouse/client' is not installed.");
+  console.error(`[memhouse] from a checkout:     npm install --prefix ${require('path').join(__dirname, '..', '..')}`);
+  console.error('[memhouse] from an npm install: npm install -g memhouse --allow-scripts=better-sqlite3');
+  process.exit(2);
+}
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
 const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../per-member/rooms');
@@ -167,6 +177,33 @@ function makeClient() {
  * the path that does the damage. Found exactly that way — the refusal was in place and
  * 137 sessions shipped straight past it into a stale-key house.
  */
+/**
+ * Refuse, legibly, when the caller's rooms are not there.
+ *
+ * Without this the first thing to touch a roomless house is loadExisting's SELECT, and the
+ * user gets `Unknown table expression identifier 'sessions_x' in scope SELECT session_id,
+ * last_updated_at, message_count, extra FROM ...` — a raw ClickHouse identifier error with
+ * no next step, from a command that may be running inside a service loop. `install` and
+ * `doctor` both handle the identical situation properly; ship was the one that did not.
+ * It is also the documented 0.3.x-upgrade symptom, which INSTALL.md claims is named.
+ */
+async function assertRoomsExist(client, rooms) {
+  const rs = await client.query({
+    query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ({n:Array(String)})`,
+    query_params: { n: ROOM_TYPES.map((t) => rooms[t]) },
+    format: 'JSONEachRow',
+  });
+  const have = new Set((await rs.json()).map((r) => r.name));
+  const missing = ROOM_TYPES.map((t) => rooms[t]).filter((n) => !have.has(n));
+  if (!missing.length) return;
+  throw new Error(
+    `'${rooms.member}' has no ${missing.join(', ')} in this house.\n`
+    + '  Create them:  memhouse install\n'
+    + '  If you hold no CREATE TABLE here, the owner runs:\n'
+    + `    memhouse install --print-sql --member ${rooms.member}\n`
+    + '  A house from before 0.4 reaches this too — its rooms have different names.');
+}
+
 async function assertOriginKeyed(client, rooms) {
   const wrong = [];
   for (const t of ROOM_TYPES) {
@@ -236,6 +273,7 @@ async function ensureSchema(client) {
     } catch { /* no rights to alter is not fatal: a member on someone else's house */ }
   }
 
+  await assertRoomsExist(client, rooms);
   await assertOriginKeyed(client, rooms);
   return stmts.length;
 }
@@ -268,13 +306,32 @@ async function loadExisting(client, rooms) {
   });
   const msgCounts = new Map();
   for (const r of await mr.json()) msgCounts.set(r.session_id, toInt(r.n));
+  // The tool_calls room needs the same check, and used to have none. shipSession writes
+  // sessions, then messages, then tool_calls — so a pass that fails during the LAST of
+  // those three leaves a session whose message count matches perfectly. The next pass
+  // reads that as intact, skips it, and the tool calls are never written. Not a crash:
+  // exit 0, `status` and `stats` both green, and only `ship --full` ever recovers them.
+  // Reproduced by dropping the room mid-pass; any transient — a ClickHouse restart, a
+  // quota rejection, a network blip — reaches the same state.
+  const tr = await client.query({
+    query: `SELECT session_id, countIf(origin = 'ship') AS n FROM ${rooms.tool_calls} FINAL WHERE user_id = currentUser() GROUP BY session_id`,
+    format: 'JSONEachRow',
+  });
+  const toolCounts = new Map();
+  for (const r of await tr.json()) toolCounts.set(r.session_id, toInt(r.n));
   const map = new Map();
   for (const r of await rs.json()) {
     // DateTime64 comes back as 'YYYY-MM-DD HH:MM:SS.mmm' — re-parse as UTC.
     const ms = r.last_updated_at ? Date.parse(r.last_updated_at.replace(' ', 'T') + 'Z') : null;
     const bc = toInt(r.extra && r.extra.bubbleCount);
     const count = toInt(r.message_count);
-    map.set(r.session_id, { ms, count, bc, intact: (msgCounts.get(r.session_id) || 0) === count });
+    // Sessions shipped before toolCallCount existed read 0 here, so any of them that do
+    // have tool calls re-ship exactly once and then record it. Self-correcting, and
+    // cheaper than a branch that has to be remembered forever.
+    const toolCount = toInt(r.extra && r.extra.toolCallCount);
+    const intact = (msgCounts.get(r.session_id) || 0) === count
+      && (toolCounts.get(r.session_id) || 0) === toolCount;
+    map.set(r.session_id, { ms, count, bc, intact });
   }
   return map;
 }
@@ -387,6 +444,11 @@ function rowsForChat(chat, host) {
       });
     }
   }
+  // What a complete ship of this session looks like, recorded ON the session row so the
+  // next pass can tell "finished" from "got part way". message_count already carries the
+  // message half; without the tool half a pass that dies between the messages insert and
+  // the tool_calls insert leaves a session that looks finished forever. See loadExisting.
+  session.extra.toolCallCount = toolRows.length;
   return { session, msgRows, toolRows };
 }
 
@@ -401,6 +463,7 @@ async function runShip(client, opts = {}) {
   // message/tool rows first (a shrunken re-parse leaves stale higher-seq rows
   // otherwise: ReplacingMergeTree collapses same-key rows only).
   const rooms = await resolveRooms(client);
+  await assertRoomsExist(client, rooms);
   await assertOriginKeyed(client, rooms);
   const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
@@ -609,10 +672,18 @@ async function main() {
         console.error(`[memhouse] pass failed: ${why}`);
         if (/ECONNREFUSED|fetch failed|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(why + causes.join(' '))) {
           console.error(`[memhouse] ${process.env.MEMHOUSE_URL} did not answer — is the house running?`);
-          console.error('[memhouse] check it with: memhouse doctor');
+        } else if (/Authentication failed|ACCESS_DENIED|Not enough privileges/i.test(why)) {
+          console.error(`[memhouse] the credential in ${process.env.MEMHOUSE_HOME || '~/.memhouse'}/env was rejected by ${process.env.MEMHOUSE_URL}`);
+        } else if (/does not exist|UNKNOWN_TABLE|UNKNOWN_DATABASE/i.test(why)) {
+          console.error('[memhouse] the house is missing a room this pass needed');
         }
+        // doctor diagnoses every one of these and prints the fix, so say so ALWAYS rather
+        // than only for the one failure mode that happened to be special-cased. The line
+        // this used to end on — "MEMHOUSE_DEBUG=1 for the full error" — is a next step for
+        // filing a bug, not for fixing the house.
+        console.error('[memhouse] diagnose it with: memhouse doctor');
         if (process.env.MEMHOUSE_DEBUG) console.error(e);
-        else console.error('[memhouse] MEMHOUSE_DEBUG=1 for the full error');
+        else console.error('[memhouse] (MEMHOUSE_DEBUG=1 for the full error)');
         if (!loop) process.exitCode = 1;
       }
       full = false; // --full applies to the first pass only; loop passes stay incremental

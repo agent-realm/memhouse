@@ -38,7 +38,7 @@ already exist.
   runs, ask them for it. Do not guess, do not read it out of a file they did not name.
 - **Do not run `deploy --down`.** It destroys the container *and its volume*. It is never
   part of an install.
-- The install writes `~/.memhouse/env` at mode 0600. Do not print its contents; do not
+- The install writes `{{ENV_FILE}}` at mode 0600. Do not print its contents; do not
   echo a password into the transcript you are writing, which memhouse will then ship.
 - If a command fails, read what it printed before retrying. memhouse's failures name the
   cause and usually name the fix — it is not a generic tool that fails generically.

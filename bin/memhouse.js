@@ -122,6 +122,16 @@ function resolveConfig() {
 // there is no config yet, and doctor probes localhost on purpose.
 function requireConfig(cfg, what) {
   if (cfg.stated) return cfg;
+  if (JSON_OUT) {
+    // A --json caller gets JSON even when refused. Prose on stderr and an empty stdout is
+    // an unparseable answer to a machine-readable request.
+    console.log(JSON.stringify({
+      error: 'no_config', command: what, env_file: ENV_FILE, home: HOME_DIR,
+      message: `no house configured, so ${what} has nothing to talk to`,
+      fix: ['memhouse install --url … --user … --password …', 'memhouse onboard'],
+    }, null, 2));
+    process.exit(2);
+  }
   console.error(`memhouse: no house configured, so ${what} has nothing to talk to.`);
   console.error(`  Nothing was read from ${ENV_FILE.replace(os.homedir(), '~')} and no MEMHOUSE_URL/MEMHOUSE_USER is set.`);
   console.error('  Rather than guess http://localhost:8123 as memhouse_root — which on many');
@@ -301,6 +311,20 @@ async function ask(question, dflt) {
   return a || dflt || '';
 }
 
+// undici reports every transport failure as the string 'fetch failed' and hides the real
+// reason in .cause. `✗ not connected: fetch failed` names neither the host nor the problem,
+// while `ship` prints ECONNREFUSED for the identical condition — the three commands
+// disagreed about the same event.
+function netReason(e) {
+  const cause = e && e.cause;
+  const inner = cause && (cause.message || cause.code);
+  const codes = cause && Array.isArray(cause.errors)
+    ? cause.errors.map((x) => x && (x.code || x.message)).filter(Boolean) : [];
+  const detail = inner || codes[0];
+  if (!detail) return e && e.message ? e.message : String(e);
+  return e.message && e.message !== detail ? `${e.message} (${detail})` : detail;
+}
+
 function pidOf(name) {
   try {
     const pid = parseInt(fs.readFileSync(path.join(RUN_DIR, name + '.pid'), 'utf-8'), 10);
@@ -414,7 +438,7 @@ async function cmdDiscover() {
   if (JSON_OUT) return console.log(JSON.stringify(out, null, 2));
   console.log('\nEditors with sessions on this machine:');
   if (out.editors.length === 0) console.log(warn('none found' + (out.editorsError ? ` (${out.editorsError})` : '')));
-  for (const e of out.editors) console.log(ok(`${e.source.padEnd(16)} ${e.sessions} sessions`));
+  for (const e of out.editors) console.log(ok(`${e.source.padEnd(16)} ${e.sessions} session${e.sessions === 1 ? '' : 's'}`));
   printAdapterErrors(out.adapterErrors);
   console.log('\nClickHouse endpoints:');
   for (const p of out.clickhouse) {
@@ -530,6 +554,10 @@ then \`memhouse discover\` to show them what would be shipped once a house exist
 
   const out = body
     .replaceAll('{{VERSION}}', PKG.version)
+    // The install prompt is otherwise entirely per-machine — db, url, editors, engines —
+    // and then told the agent the config lands at a hardcoded ~/.memhouse/env. `prompt`
+    // without --install already got this right; the fix had landed in one of the two.
+    .replaceAll('{{ENV_FILE}}', ENV_FILE)
     .replaceAll('{{PLATFORM}}', `${process.platform}/${process.arch}`)
     .replaceAll('{{NODE}}', process.versions.node)
     .replaceAll('{{STATE}}', state)
@@ -842,21 +870,23 @@ async function cmdInstall({ interactive }) {
     });
     if (!built) return 1;
     cfg = built;
-    writeEnvFile(cfg);
-    console.log(ok(`config written: ${ENV_FILE}`));
-    if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
-    // The same check the shipper runs before it writes. Without it, install reports
-  // "✓ rooms for 'x'" and "✓ installed" on a house whose very next command refuses with
-  // "a ship pass would corrupt them" — install already resolved the rooms, so it had
-  // everything it needed to say so first.
+  // BEFORE the env file and BEFORE the ship. INSTALL.md's contract is that the config is
+  // written last, "after everything above has proved out", because a config left by a
+  // failed install is read as truth by the next command. Placed after the write, a
+  // wrong-key house got four green ticks and a persisted config, and `status` then added
+  // five more on a house that can never be shipped to.
   const keyProblem = await sortingKeyProblem(cfg);
   if (keyProblem) {
     console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
     console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
     console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}, then: memhouse ship --full`);
+    console.log('  no config was written — nothing here reads as installed.');
     return 1;
   }
-  console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
+    writeEnvFile(cfg);
+    console.log(ok(`config written: ${ENV_FILE}`));
+    if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
+    console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
     console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
     console.log('     node memhouse/per-member/provision.js --member <name> --merge');
     return 0;
@@ -864,9 +894,21 @@ async function cmdInstall({ interactive }) {
 
   const haveAll = flags.yes === true || (flags.url && flags.user !== undefined);
   if (interactive || !haveAll) {
-    console.log('memhouse connection (Enter keeps the default):');
-    cfg.url = await ask('  ClickHouse URL', cfg.url);
-    cfg.user = await ask('  user', cfg.user);
+    // Offer a default only where one was actually STATED. Otherwise this prompt said
+    // "Enter keeps the default" over `http://localhost:8123` / `memhouse_root` — the pair
+    // the no-config refusal three commands away declines to guess, while naming this very
+    // command as the fix. Pressing Enter is not a decision the user made about which house
+    // to use; requiring the answer is.
+    console.log(cfg.stated
+      ? 'memhouse connection (Enter keeps the default):'
+      : 'memhouse connection (no house is configured yet — these have no defaults):');
+    cfg.url = await ask('  ClickHouse URL', cfg.stated ? cfg.url : '');
+    cfg.user = await ask('  user', cfg.stated ? cfg.user : '');
+    if (!cfg.url || !cfg.user) {
+      console.log(bad('a URL and a user are required — memhouse will not pick a house for you'));
+      console.log('  no ClickHouse yet?  memhouse deploy --local --house-port <port>');
+      return 1;
+    }
     cfg.password = await ask('  password', cfg.password);
     cfg.db = await ask('  database (the house)', cfg.db);
     cfg.port = await ask('  dashboard port', cfg.port);
@@ -938,23 +980,25 @@ async function cmdInstall({ interactive }) {
     return 1;
   }
   console.log(ok(`rooms for '${r.member}': ${want.join(', ')}`));
+  // BEFORE the env file and BEFORE the ship. INSTALL.md's contract is that the config is
+  // written last, "after everything above has proved out", because a config left by a
+  // failed install is read as truth by the next command. Placed after the write, a
+  // wrong-key house got four green ticks and a persisted config, and `status` then added
+  // five more on a house that can never be shipped to.
+  const keyProblem = await sortingKeyProblem(cfg);
+  if (keyProblem) {
+    console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
+    console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
+    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}, then: memhouse ship --full`);
+    console.log('  no config was written — nothing here reads as installed.');
+    return 1;
+  }
   // Written LAST, and only once everything above proved out. Writing it first leaves a
   // config file behind every failed attempt, and the next command reads it as truth.
   writeEnvFile(cfg);
   console.log(ok(`config written: ${ENV_FILE}`));
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
-  }
-  // The same check the shipper runs before it writes. Without it, install reports
-  // "✓ rooms for 'x'" and "✓ installed" on a house whose very next command refuses with
-  // "a ship pass would corrupt them" — install already resolved the rooms, so it had
-  // everything it needed to say so first.
-  const keyProblem = await sortingKeyProblem(cfg);
-  if (keyProblem) {
-    console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
-    console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
-    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}, then: memhouse ship --full`);
-    return 1;
   }
   console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
   return 0;
@@ -1066,6 +1110,12 @@ async function cmdStart() {
     console.log(bad(`${d.name} exited immediately${why ? ` — ${why}` : ''}`));
     if (!why) console.log(`  see ${logPath}`);
     process.exitCode = 1;
+    // Partial success is the confusing case: exit 1 reads as "nothing started", and the
+    // daemon that DID start keeps running unmentioned.
+    const others = started.filter((o) => o.name !== d.name && alive(o.pid));
+    if (others.length) {
+      console.log(`  ${others.map((o) => o.name).join(' and ')} ${others.length > 1 ? 'are' : 'is'} still running — memhouse stop, if you did not want that`);
+    }
   }
   if (dashboardAlive || (pidOf('dashboard') && !started.some((d) => d.name === 'dashboard'))) {
     console.log(`  dashboard → http://localhost:${cfg.port}`);
@@ -1110,11 +1160,14 @@ async function cmdStatus() {
     out.sessions = Number(s[0]?.sessions || 0);
     out.messages = Number(m[0]?.msgs || 0);
     out.freshest = m[0]?.freshest || null;
-  } catch (e) { out.connected = false; out.error = e.message; }
+  } catch (e) { out.connected = false; out.error = netReason(e); }
 
   if (JSON_OUT) { console.log(JSON.stringify(out, null, 2)); return out.connected ? 0 : 1; }
   console.log(out.config ? ok(`config: ${out.config}`) : warn('no config (memhouse install)'));
-  console.log(out.connected ? ok(`connected: ${cfg.url} / ${cfg.db} as ${cfg.user}`) : bad(`not connected: ${out.error || cfg.url}`));
+  console.log(out.connected
+    ? ok(`connected: ${cfg.url} / ${cfg.db} as ${cfg.user}`)
+    : bad(`not connected: ${cfg.url} — ${out.error || 'no reason given'}`));
+  if (!out.connected) console.log('  diagnose it with: memhouse doctor');
   if (out.member) console.log(ok(`rooms for '${out.member}'`));
   if (out.connected && !out.messages) console.log(ok(`house: empty — ${out.sessions} sessions, 0 messages (nothing shipped yet)`));
   else if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
@@ -1135,8 +1188,24 @@ async function cmdDoctor() {
   const [major, minor] = process.versions.node.split('.').map(Number);
   add(major > 20 || (major === 20 && minor >= 19), `node ${process.versions.node}`, 'need >= 20.19');
   add(fs.existsSync(ENV_FILE), `config ${ENV_FILE}`, 'run: memhouse install');
+  // doctor is exempt from requireConfig — diagnosing an unconfigured machine is its job —
+  // but "exempt from refusing" is not "licensed to log in somewhere". With no config it
+  // used to print `✗ config … run: memhouse install` and then attempt an AUTHENTICATED
+  // connection to http://localhost:8123 as memhouse_root, the address every other command
+  // explicitly declines to guess. The server answers AUTHENTICATION_FAILED, which on a
+  // hardened house is a failed-login entry per run — and doctor is the first thing a
+  // confused user types. `discover` still probes 8123, and should: it reports what is
+  // reachable as a DISCOVERY. A check that reports someone else's server as a failure of
+  // your config is a different thing.
+  if (!cfg.stated) {
+    add(false, 'house', 'no config, so there is nothing to connect to — run: memhouse install');
+    for (const label of ['rooms', 'schema', 'sorting keys', 'identity stamping']) {
+      add(false, label, 'skipped — no house configured');
+    }
+    return renderDoctor(checks);
+  }
   try { await ch(cfg, 'SELECT 1', { database: '' }); add(true, `clickhouse reachable (${cfg.url})`); }
-  catch (e) { add(false, `clickhouse reachable (${cfg.url})`, e.message); }
+  catch (e) { add(false, `clickhouse reachable (${cfg.url})`, netReason(e)); }
   let rooms = null;
   // Room resolution asks the server who you are (SELECT currentUser()). It fails when
   // the house is unreachable or the credential is rejected — both already reported by
@@ -1160,7 +1229,13 @@ async function cmdDoctor() {
       const want = objects.map((n) => `'${n}'`).join(',');
       const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
       const legacy = t === objects.length ? [] : await looksLikePre040(cfg);
-      add(t === objects.length, `schema: ${t}/${objects.length} rooms in '${cfg.db}' (${objects.join(', ')})`,
+      // Name what is MISSING. The parenthesised list used to be what should exist, so
+      // "2/3" was the only signal and you could not tell which room to worry about.
+      const present = new Set((await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).map((r) => r.name));
+      const absent = objects.filter((n) => !present.has(n));
+      add(t === objects.length, t === objects.length
+        ? `schema: 3/3 rooms in '${cfg.db}' (${objects.join(', ')})`
+        : `schema: ${t}/${objects.length} rooms in '${cfg.db}' — missing ${absent.join(', ')}`,
         legacy.length
           ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
           : `run: memhouse install, or as the owner: node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${rooms.member}`);
@@ -1278,6 +1353,10 @@ async function cmdDoctor() {
   add(!!pidOf('dashboard'), 'dashboard daemon', 'memhouse start');
   add(fs.existsSync(path.join(REPO_ROOT, 'public', 'index.html')), 'dashboard UI built', 'built automatically by memhouse start');
 
+  return renderDoctor(checks);
+}
+
+function renderDoctor(checks) {
   for (const c of checks) console.log(c.ok ? ok(c.label) : bad(`${c.label}${c.hint ? ` — ${c.hint}` : ''}`));
   return checks.every((c) => c.ok) ? 0 : 1;
 }
@@ -1297,7 +1376,11 @@ async function cmdSearch() {
   if (JSON_OUT) return console.log(JSON.stringify(rows, null, 2));
   if (!rows.length) return console.log(warn('no matches'));
   for (const r of rows) {
-    console.log(`\x1b[1m${r.session_id.slice(0, 8)}\x1b[0m  ${r.source}  ${r.project || '-'}  ${r.at}  (${r.hits} hits)`);
+    // The full id. It was sliced to 8 characters, which for claude-code renders every hit
+    // as the literal string "claude-c" — while the shipped prompt tells agents to cite the
+    // session_id and to replay with `WHERE session_id = '<id>'`. Neither is possible from
+    // a prefix, and the prefix is not even distinguishing.
+    console.log(`\x1b[1m${r.session_id}\x1b[0m  ${r.source}  ${r.project || '-'}  ${r.at}  (${r.hits} hit${r.hits === 1 ? '' : 's'})`);
     console.log(`  ${r.snippet.replace(/\s+/g, ' ')}`);
   }
 }
