@@ -16,7 +16,7 @@
 // All reads run with the `final: 1` setting so ReplacingMergeTree collapses
 // duplicate versions at read time (see DESIGN.md data-plane rules).
 
-const { createClient } = require('@clickhouse/client');
+const { createClient, ClickHouseLogLevel } = require('@clickhouse/client');
 const { calculateCost, normalizeModelName } = require('../../pricing');
 const { resolveRooms, READ_SETTINGS } = require('../per-member/rooms');
 
@@ -31,6 +31,9 @@ let _client = null;
 function getClient() {
   if (_client) return _client;
   _client = createClient({
+    // See the note in shipper/ship.js: the driver's ERROR-level dump lands ahead of every
+    // message we print, so a handled refusal reads like a crash. MEMHOUSE_DEBUG=1 restores it.
+    log: { level: process.env.MEMHOUSE_DEBUG ? ClickHouseLogLevel.DEBUG : ClickHouseLogLevel.OFF },
     url: config.url,
     username: config.username,
     password: config.password,

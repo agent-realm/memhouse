@@ -23,12 +23,24 @@
 // longer table names. No wildcards are used anywhere; the only pattern in the design is
 // the Merge regex, anchored on a fixed room type.
 //
-// Env: MEM_URL / MEM_USER / MEM_PASSWORD / MEM_DB, falling back to MEMHOUSE_* and then
-// to the shipper's own defaults — http://localhost:8123, memhouse_root, mem.
+// Env: MEM_URL / MEM_USER / MEM_PASSWORD / MEM_DB, falling back to MEMHOUSE_*. URL and
+// USER are REQUIRED — see the note at cfg. MEM_DB defaults to 'mem'.
 
 const fs = require('fs');
 const path = require('path');
-const { createClient } = require('@clickhouse/client');
+// Named, not thrown as a raw MODULE_NOT_FOUND with a require stack. This runs as a
+// SUBPROCESS of `memhouse install`, after the admin path has already created a ClickHouse
+// user — so its failure mode is a half-provisioned house, and "Cannot find module" plus a
+// stack trace is the least useful thing to print at that moment. Seen for real in a
+// checkout where `npm install` had not been run.
+let createClient, ClickHouseLogLevel;
+try { ({ createClient, ClickHouseLogLevel } = require('@clickhouse/client')); }
+catch {
+  console.error("provision.js: dependency '@clickhouse/client' is not installed.");
+  console.error(`  From a checkout:      npm install --prefix ${path.join(__dirname, '..', '..')}`);
+  console.error('  From an npm install:  npm install -g memhouse --allow-scripts=better-sqlite3');
+  process.exit(2);
+}
 const { ROOM_TYPES, mergeRooms, assertUsableMember } = require('./rooms');
 
 const args = process.argv.slice(2);
@@ -38,12 +50,23 @@ const opt = (n, d = null) => { const i = args.indexOf(`--${n}`); return i >= 0 ?
 // Defaults MUST match what the shipper and CLI use, or an operator who overrides only
 // the thing that differs — a password, say — silently provisions rooms in a house the
 // product never reads, or fails to authenticate as a user that does not exist.
+//
+// Which is why there is no default URL or user any more, here either. This file CREATES
+// USERS AND GRANTS; pointing it at a guessed http://localhost:8123 as memhouse_root aims
+// the most privileged operation in the product at whatever house happens to be listening.
+// Observed: running it with no env at all made an authentication attempt against the
+// pilot's own ClickHouse.
 const cfg = {
-  url: process.env.MEM_URL || process.env.MEMHOUSE_URL || 'http://localhost:8123',
-  username: process.env.MEM_USER || process.env.MEMHOUSE_USER || 'memhouse_root',
+  url: process.env.MEM_URL || process.env.MEMHOUSE_URL,
+  username: process.env.MEM_USER || process.env.MEMHOUSE_USER,
   password: process.env.MEM_PASSWORD || process.env.MEMHOUSE_PASSWORD || '',
   database: process.env.MEM_DB || process.env.MEMHOUSE_DB || 'mem',
 };
+if (!cfg.url || !cfg.username) {
+  console.error('provision.js: no house given. Set MEM_URL and MEM_USER (or MEMHOUSE_URL/MEMHOUSE_USER).');
+  console.error('  This creates users and grants — it will not guess http://localhost:8123 as memhouse_root.');
+  process.exit(2);
+}
 
 // Statements are split on ';' at end of line — the templates contain no ';' inside a
 // statement body, and keeping the splitter dumb keeps the templates readable.
@@ -74,12 +97,15 @@ async function main() {
 
   // Create the house with a client that has NOT selected it — on a fresh server the
   // database does not exist yet, and selecting it fails before it can be created.
-  const bootstrap = createClient({ ...cfg, database: '' });
+  // See the note in shipper/ship.js: the driver's ERROR-level dump buries every
+  // refusal this file prints. MEMHOUSE_DEBUG=1 restores it.
+  const quiet = { level: process.env.MEMHOUSE_DEBUG ? ClickHouseLogLevel.DEBUG : ClickHouseLogLevel.OFF };
+  const bootstrap = createClient({ ...cfg, database: '', log: quiet });
   await bootstrap.command({ query: `CREATE DATABASE IF NOT EXISTS ${cfg.database}` });
   await bootstrap.close();
 
   console.log(`[mem] provisioning in ${cfg.url} database '${cfg.database}' as '${cfg.username}'`);
-  const client = createClient({ ...cfg, clickhouse_settings: { async_insert: 0 } });
+  const client = createClient({ ...cfg, log: quiet, clickhouse_settings: { async_insert: 0 } });
 
   // 1. rooms
   const tpl = fs.readFileSync(path.join(here, 'schema-member.sql.tpl'), 'utf-8');

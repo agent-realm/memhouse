@@ -25,23 +25,27 @@ CREATE TABLE IF NOT EXISTS sessions_{{MEMBER}}
     message_count UInt32 DEFAULT 0,
     path String DEFAULT '',
     extra JSON,
-    -- Who put this row here. The shipper CLEARS a session before re-inserting it (a
-    -- shorter re-parse must not leave a stale seq tail), and that clear used to remove
-    -- every row for the session regardless of origin -- destroying imported history the
-    -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
-    -- survives a re-ship of the same session.
-    -- IN THE SORTING KEY, and that is the load-bearing half. Guarding the DELETE alone
-    -- is not enough: ReplacingMergeTree collapses on the sorting key, so an imported row
-    -- and a shipped row sharing (session_id, user_id, seq) are the SAME row and the newer
-    -- ingested_at wins. Measured: 3 imported + 2 shipped rows became 3, and the two
-    -- imported ones the shipper happened to overlap were gone. Same loss as the
-    -- unguarded delete, reached through the merge instead.
+    -- Who put this row here. Carried on every room so a reader can tell shipped rows
+    -- from imported ones, and so the shipper's clear can bind origin='ship'.
+    --
+    -- NOTE the sorting key below does NOT include origin, and sessions is the one room
+    -- where that is correct. A session has exactly ONE metadata row: title, counts,
+    -- bounds. If origin were in the key, an imported session and its shipped twin would
+    -- be two rows, and everything that reads sessions as one-row-per-session breaks --
+    -- sessions_v joins messages twice and over-reports (measured on a real house: one
+    -- duplicate row inflated the totals by 1,764 messages and 655M tokens), and the
+    -- incremental skip cannot decide which row is current. Collapsing them is what we
+    -- want: the newer ingested_at wins, which is the shipper's row for any session that
+    -- still exists on disk. Nothing is lost -- a session the adapters no longer see is
+    -- never cleared and never re-inserted, so its imported row stands untouched.
+    --
+    -- messages and tool_calls are the opposite case and DO key on origin; see there.
     origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, user_id, origin);
+ORDER BY (session_id, user_id);
 
 CREATE TABLE IF NOT EXISTS messages_{{MEMBER}}
 (

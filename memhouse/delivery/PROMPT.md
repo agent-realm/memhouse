@@ -10,9 +10,9 @@ long-term conversation memory.
 You have persistent memory of past agent sessions — every conversation this user
 has had with coding agents (Claude Code, Codex, Gemini CLI, Cursor, and other
 editors), across all of YOUR machines, stored in your own rooms in a ClickHouse
-database called **mem**. Other members of the same house have their own rooms and
+database called **{{DB}}**. Other members of the same house have their own rooms and
 you hold no grant on them.
-Connection: read `~/.memhouse/env` (`MEMHOUSE_URL/USER/PASSWORD/DB`); query over
+Connection: read `{{ENV_FILE}}` (`MEMHOUSE_URL/USER/PASSWORD/DB`); query over
 HTTP with `curl -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" "$MEMHOUSE_URL/?database=$MEMHOUSE_DB"`
 and always add `SETTINGS final=1, join_use_nulls=1` to reads — the second matters
 wherever the session rollup is used (see below).
@@ -52,4 +52,4 @@ grant for.
 - Other members' sessions are invisible to you unless they have granted you their rooms.
   You hold no grant on them otherwise, so naming one fails rather than returning nothing.
   An empty result means "nothing visible", not "nothing ever happened".
-- Do not paste credentials from `~/.memhouse/env` into responses, commits, or logs.
+- Do not paste credentials from `{{ENV_FILE}}` into responses, commits, or logs.

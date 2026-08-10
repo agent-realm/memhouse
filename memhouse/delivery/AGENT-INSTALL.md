@@ -107,7 +107,9 @@ re-ship loop, so this replaces any separate cron. `memhouse stop` ends both.
 memhouse plugins install claude
 ```
 
-Installs the `memhouse-search` / `memhouse-sessions` / `memhouse-sql` skills into
-the agent's skills directory; they read the connection from `~/.memhouse/env`.
-`memhouse plugins list` shows what is installed, `memhouse plugins remove claude`
-undoes it.
+Installs the memhouse plugin into `<claude-config>/skills/memhouse`, which loads next
+session as `memhouse@skills-dir` and exposes `/memhouse:search`, `/memhouse:sessions`
+and `/memhouse:sql`. They read the connection from `$MEMHOUSE_HOME/env` (default
+`~/.memhouse/env`), with exported `MEMHOUSE_*` vars taking precedence, and refuse to run
+rather than guessing a URL when neither is set. `memhouse plugins list` shows what is
+installed, `memhouse plugins remove claude` undoes it.

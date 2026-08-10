@@ -38,9 +38,20 @@ function assertUsableMember(member) {
  * Two properties are load bearing: the join is a LEFT JOIN, so a session with no messages
  * still appears with zero aggregates instead of vanishing from every count; and
  * `join_use_nulls = 1` makes the unmatched message columns NULL so `coalesce` yields true
- * zeros rather than counting the placeholder row. The setting is applied by the CALLER (a
- * client setting, not a trailing SETTINGS clause) because this text is used as a subquery,
- * and a subquery cannot carry its own SETTINGS.
+ * zeros rather than counting the placeholder row.
+ *
+ * BOTH ARE NOW CARRIED BY THE TEXT ITSELF — `FINAL` on each room and a trailing
+ * `SETTINGS join_use_nulls = 1`. It used to depend on the caller passing `final=1` and
+ * `join_use_nulls=1`, on the belief that a subquery cannot carry its own SETTINGS. It can
+ * (verified on 26.7 and 25.11), and the belief was expensive: every consumer that forgot
+ * the settings silently counted each message once per undeleted ReplacingMergeTree
+ * version. Measured right after a `ship --full` — 2x, and 3x three ships later. It does
+ * not self-heal; the error grows with each pass until a merge happens to collapse the
+ * parts. `memhouse sessions-query > q.sql` lost the warning entirely, because it was
+ * printed on stderr as a SQL comment that never reached the SQL.
+ *
+ * Passing final=1 as well is harmless, so READ_SETTINGS stays as it is for direct room
+ * reads, which still need it.
  */
 function sessionsRollup({ sessions, messages }) {
   return `(
@@ -71,9 +82,10 @@ function sessionsRollup({ sessions, messages }) {
         coalesce(sumIf(length(m.text), m.role = 'user'), 0) AS user_chars,
         coalesce(sumIf(length(m.text), m.role = 'assistant'), 0) AS assistant_chars,
         coalesce(substring(argMinIf(m.text, m.seq, m.role = 'user' AND m.text != ''), 1, 200), '') AS first_prompt
-    FROM ${sessions} AS s
-    LEFT JOIN ${messages} AS m ON m.session_id = s.session_id AND m.user_id = s.user_id
+    FROM ${sessions} AS s FINAL
+    LEFT JOIN ${messages} AS m FINAL ON m.session_id = s.session_id AND m.user_id = s.user_id
     GROUP BY s.session_id, s.user_id
+    SETTINGS join_use_nulls = 1
   )`;
 }
 

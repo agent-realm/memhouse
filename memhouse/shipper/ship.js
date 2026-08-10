@@ -14,8 +14,11 @@
 //   - DateTime64 values travel as 'YYYY-MM-DD HH:MM:SS.mmm' UTC strings (plain
 //     format; ISO 'T'/'Z' forms parse unreliably under JSONEachRow). Nullable → null.
 //   - Int64-bound values are integer-coerced (some adapters emit fractional ms).
-//   - Re-shipping is always safe: ReplacingMergeTree(ingested_at) keyed
-//     (session_id, user_id, seq) collapses to latest-wins at FINAL.
+//   - Re-shipping is always safe: ReplacingMergeTree(ingested_at) collapses to
+//     latest-wins at FINAL. Keyed (session_id, user_id, origin, seq) on messages and
+//     (session_id, user_id, origin, idx) on tool_calls, so an imported row and a shipped
+//     one at the same seq are two rows, not one. sessions is (session_id, user_id) with
+//     NO origin — one metadata row per session is what every read path assumes.
 //
 // CLI:  node ship.js                one incremental pass
 //       node ship.js --loop [sec]   repeat every sec seconds (default 300)
@@ -24,13 +27,15 @@
 //       node ship.js --stats        per-source counts from sessions_v and exit
 //
 // Env (DESIGN.md contract): MEMHOUSE_URL / MEMHOUSE_USER / MEMHOUSE_PASSWORD /
-// MEMHOUSE_DB — defaults http://localhost:8123 / memhouse_root / '' / mem.
+// MEMHOUSE_DB. URL and USER are REQUIRED — there is no default house, because the old
+// one (http://localhost:8123 as memhouse_root) is a real house on many machines. DB
+// defaults to 'mem'.
 
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { createClient } = require('@clickhouse/client');
+const { createClient, ClickHouseLogLevel } = require('@clickhouse/client');
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
 const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../per-member/rooms');
@@ -61,11 +66,27 @@ function chTs(ms) {
     `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}.${p(d.getUTCMilliseconds(), 3)}`;
 }
 
-// Per-message timestamp interpolated across [createdAt, lastUpdatedAt] — adapters
-// don't expose per-message times, so we synthesize monotonic-by-seq ones that make
-// sessions_v started/ended line up with the session bounds (same approximation as
-// agency/ingest.js; documented in DESIGN.md).
-function messageTs(chat, seq, total) {
+// When a message was actually sent.
+//
+// Prefer the adapter's own `_ts` (epoch ms). It is optional by contract — `getMessages`
+// returns `{ role, content }` and nothing more is required — but a transcript format that
+// records a time per line should not have it thrown away. Claude Code's JSONL does, and
+// discarding it produced timestamps wrong by up to the whole span of a session: four
+// messages sent within three minutes came back spread over 08:00, 18:43, 03:27 and 12:11,
+// and the search skill reported those to the user as fact.
+//
+// Fall back to interpolating across [createdAt, lastUpdatedAt] for the adapters that
+// genuinely have nothing per message — monotonic-by-seq, so sessions_v started/ended
+// still line up with the session bounds (same approximation as agency/ingest.js;
+// documented in DESIGN.md). Real timestamps are NOT necessarily monotonic by seq — a
+// folded subagent transcript is appended after its parent's turns but ran during them.
+// Nothing depends on that: ordering is by `seq`, and started/ended are min/max.
+function messageTs(chat, seq, total, msg) {
+  const at = Number(msg && msg._ts);
+  // Seconds or milliseconds, depending on the format: goose stores seconds, Claude Code
+  // and opencode milliseconds. Real epoch-ms is > 1e12 and real epoch-seconds ~1.7e9, so
+  // the split point is unambiguous for any date this side of 1973.
+  if (Number.isFinite(at) && at > 0) return chTs(at < 1e11 ? at * 1000 : at);
   const start = chat.createdAt || chat.lastUpdatedAt || Date.now();
   const end = chat.lastUpdatedAt || chat.createdAt || start;
   if (total <= 1) return chTs(start);
@@ -79,9 +100,28 @@ function toInt(v) {
 }
 
 function makeClient() {
+  // No house-shaped default. `memhouse` spawns this with the resolved config in the
+  // environment, so a missing MEMHOUSE_URL here means the shipper was started some other
+  // way — a stale service unit, a hand-rolled cron, a copied command — and the old
+  // defaults sent it at http://localhost:8123 as memhouse_root, which on a lot of machines
+  // is a real house belonging to someone else. Writing memory into it is worse than
+  // reading from it.
+  if (!process.env.MEMHOUSE_URL || !process.env.MEMHOUSE_USER) {
+    console.error('[memhouse] no house configured: MEMHOUSE_URL and MEMHOUSE_USER are unset.');
+    console.error('[memhouse] run `memhouse install`, or set them for this process. Refusing to');
+    console.error('[memhouse] guess http://localhost:8123 as memhouse_root.');
+    process.exit(2);
+  }
   return createClient({
-    url: process.env.MEMHOUSE_URL || 'http://localhost:8123',
-    username: process.env.MEMHOUSE_USER || 'memhouse_root',
+    // The driver logs a full connection-object dump and a node stack to stderr for every
+    // failed request, at ERROR level, BEFORE we get the exception. A member without
+    // CREATE TABLE then sees 23 lines of @clickhouse/client internals and the word "fatal"
+    // ahead of the handled, actionable refusal — it reads like a crash that recovered.
+    // Silence the driver; every call site already catches the throw and prints something
+    // a person can act on. MEMHOUSE_DEBUG=1 puts it back.
+    log: { level: process.env.MEMHOUSE_DEBUG ? ClickHouseLogLevel.DEBUG : ClickHouseLogLevel.OFF },
+    url: process.env.MEMHOUSE_URL,
+    username: process.env.MEMHOUSE_USER,
     password: process.env.MEMHOUSE_PASSWORD || '',
     database: process.env.MEMHOUSE_DB || 'mem',
     request_timeout: 300000, // full re-ships move tens of MB; don't cut inserts short
@@ -113,7 +153,14 @@ function makeClient() {
 // SECOND member — grants, Merge rooms, sharing — is owner work and lives in
 // ../per-member/provision.js.
 /**
- * Refuse to write into rooms whose sorting key predates `origin`.
+ * Refuse to write into rooms whose sorting key is wrong for `origin` — in EITHER
+ * direction. Two different houses are broken in two opposite ways:
+ *
+ *   - pre-0.4.4: no `origin` in the messages/tool_calls key, so ReplacingMergeTree
+ *     collapses an imported row against a shipped one and the import is lost.
+ *   - 0.4.4 exactly: `origin` was also put in the SESSIONS key, which gives a session
+ *     two metadata rows. sessions_v then joins messages twice and over-reports, and the
+ *     incremental skip cannot tell which row is current.
  *
  * Called at the top of EVERY ship pass, not just --ensure-schema: a plain `memhouse ship`
  * never touches ensureSchema, so a guard living only there is a guard that never runs on
@@ -121,23 +168,31 @@ function makeClient() {
  * 137 sessions shipped straight past it into a stale-key house.
  */
 async function assertOriginKeyed(client, rooms) {
-  const stale = [];
+  const wrong = [];
   for (const t of ROOM_TYPES) {
     const rs = await client.query({
       query: `SELECT sorting_key FROM system.tables WHERE database = currentDatabase() AND name = {n:String}`,
       query_params: { n: rooms[t] }, format: 'JSONEachRow',
     });
     const key = ((await rs.json())[0] || {}).sorting_key || '';
-    if (key && !/\borigin\b/.test(key)) stale.push(`${rooms[t]} (${key})`);
+    if (!key) continue;
+    const keyed = /\borigin\b/.test(key);
+    // sessions is one row per session and must NOT key on origin; the transcript rooms
+    // hold many rows per session and must.
+    const want = t !== 'sessions';
+    if (keyed !== want) {
+      wrong.push(`${rooms[t]} (${key}) — origin ${want ? 'missing from' : 'must not be in'} the key`);
+    }
   }
-  if (stale.length) {
+  if (wrong.length) {
     throw new Error(
-      'these rooms predate the origin sorting key, so imported rows would still be lost:\n'
-      + stale.map((s) => `    ${s}`).join('\n')
+      'these rooms have the wrong sorting key, so a ship pass would corrupt them:\n'
+      + wrong.map((s) => `    ${s}`).join('\n')
       + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
       + '\n    RENAME TABLE <room> TO <room>_old;'
       + '\n    -- recreate from memhouse/per-member/schema-member.sql.tpl'
-      + '\n    INSERT INTO <room> SELECT *, \'ship\' AS origin FROM <room>_old;'
+      + '\n    INSERT INTO <room> SELECT * FROM <room>_old;'
+      + '\n  (add `, \'ship\' AS origin` to the SELECT only if <room>_old has no origin column)'
       + '\n  A house with no imported rows can also just be re-shipped from scratch.');
   }
 }
@@ -200,8 +255,15 @@ async function loadExisting(client, rooms) {
   // fresh-looking session row with a missing or PARTIAL transcript — the skip
   // must compare the real row count against the recorded message_count, not
   // merely check that some row exists.
+  //
+  // countIf(origin='ship'), not count(). message_count records how many rows the
+  // SHIPPER wrote; a session that also carries imported rows would never match a
+  // plain count(), so `intact` would be false forever and the session would re-ship
+  // on every pass — no data lost, but the incremental skip silently stops existing.
+  // Measured: adding one origin='import' row to a settled session made it re-ship
+  // every pass; removing it froze the session again.
   const mr = await client.query({
-    query: `SELECT session_id, count() AS n FROM ${rooms.messages} FINAL WHERE user_id = currentUser() GROUP BY session_id`,
+    query: `SELECT session_id, countIf(origin = 'ship') AS n FROM ${rooms.messages} FINAL WHERE user_id = currentUser() GROUP BY session_id`,
     format: 'JSONEachRow',
   });
   const msgCounts = new Map();
@@ -271,7 +333,7 @@ function rowsForChat(chat, host) {
     const m = messages[seq];
     const raw = typeof m.content === 'string' ? m.content : JSON.stringify(m.content) ?? '';
     const text = raw.length > TEXT_MAX ? raw.slice(0, TEXT_MAX) : raw;
-    const ts = messageTs(chat, seq, total);
+    const ts = messageTs(chat, seq, total, m);
     const row = {
       session_id: id,
       seq,
@@ -538,7 +600,19 @@ async function main() {
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         failed = true;
-        console.error(`[memhouse] pass failed: ${e.message}`);
+        // A connection failure arrives as an AggregateError whose own `message` is empty,
+        // so this printed "[memhouse] pass failed:" and nothing else, after 35 lines of
+        // driver internals. Dig out a cause and name the fix; `status` and `doctor`
+        // already handle the same condition cleanly and `ship` was the odd one out.
+        const causes = (e && e.errors) ? e.errors.map((x) => x && x.message).filter(Boolean) : [];
+        const why = e.message || causes[0] || e.code || String(e);
+        console.error(`[memhouse] pass failed: ${why}`);
+        if (/ECONNREFUSED|fetch failed|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(why + causes.join(' '))) {
+          console.error(`[memhouse] ${process.env.MEMHOUSE_URL} did not answer — is the house running?`);
+          console.error('[memhouse] check it with: memhouse doctor');
+        }
+        if (process.env.MEMHOUSE_DEBUG) console.error(e);
+        else console.error('[memhouse] MEMHOUSE_DEBUG=1 for the full error');
         if (!loop) process.exitCode = 1;
       }
       full = false; // --full applies to the first pass only; loop passes stay incremental

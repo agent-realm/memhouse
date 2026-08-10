@@ -171,8 +171,9 @@ Next steps:
 
   # agent skills (search/sessions/sql from inside Claude Code):
   node "$REPO_ROOT/bin/memhouse.js" plugins install claude
-  # -> installs memhouse-search / memhouse-sessions / memhouse-sql into
-  #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills (loads next session)
+  # -> installs the memhouse plugin into
+  #    \${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/skills/memhouse, which loads next session
+  #    as memhouse@skills-dir: /memhouse:search, /memhouse:sessions, /memhouse:sql
 
 Verify anytime (rooms are named for your ClickHouse user):
   set -a; . "$ENV_FILE"; set +a

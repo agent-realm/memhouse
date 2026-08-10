@@ -50,7 +50,9 @@ Two properties that make the block safe to paste anywhere:
   otherwise build Merge rooms pointing at `default` that return zero rows forever, with no
   error at any point.
 
-Measured: 17 statements, run over HTTP with no database selected, 17 succeeded, and the
+Measured: 18 statements (the 17 objects plus a leading `SET
+allow_experimental_full_text_index = 1`), run over HTTP with no database selected, 18
+succeeded on both 26.7.2.59 and 25.11.9.34, and the
 Merge rooms came out bound to `Merge('mem', '^sessions_')`.
 
 ## Option 2 — give the installer admin, it runs the SQL
