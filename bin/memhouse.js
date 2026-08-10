@@ -676,6 +676,8 @@ ${mergeGrants}
  * log. A shipper running as the house owner makes per-member rooms decoration.
  */
 async function adminBootstrap(cfg, admin) {
+  // What this run has already changed on the server, for an honest failure message.
+  let createdUser = null;
   const adminCfg = { ...cfg, user: admin.user, password: admin.password };
   const q = (sql, opts) => ch(adminCfg, sql, opts);
 
@@ -720,6 +722,7 @@ async function adminBootstrap(cfg, admin) {
     try { await q(`CREATE USER ${admin.member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}'`, { database: '' }); }
     catch (e) { console.log(bad(`could not create user '${admin.member}': ${e.message}`)); return null; }
     console.log(ok(`created ClickHouse user '${admin.member}'`));
+    createdUser = admin.member;
   }
 
   // 3. rooms, 4. grants, 5. Merge rooms + their grant — provision.js owns all of it, so
@@ -729,7 +732,23 @@ async function adminBootstrap(cfg, admin) {
     stdio: 'inherit',
     env: { ...process.env, MEM_URL: cfg.url, MEM_USER: admin.user, MEM_PASSWORD: admin.password, MEM_DB: cfg.db },
   });
-  if (rc.status !== 0) { console.log(bad('provisioning failed — nothing was written')); return null; }
+  if (rc.status !== 0) {
+    // "nothing was written" was a lie whenever the CREATE USER above had already run —
+    // and it runs before this. Observed: provision.js died on a missing dependency, this
+    // printed the all-clear, and the next install refused with the identity-takeover
+    // message because the user it said it had not created was there. Say what exists, and
+    // name the two ways forward.
+    console.log(bad('provisioning failed'));
+    if (createdUser) {
+      console.log(`  ClickHouse user '${createdUser}' WAS created before this failed; its rooms were not.`);
+      console.log('  Nothing was written to disk. To continue once the cause is fixed:');
+      console.log(`     memhouse install --adopt-user --member ${createdUser} --member-password '<the password above>' …`);
+      console.log(`  Or undo it as the admin:  DROP USER ${createdUser}`);
+    } else {
+      console.log('  nothing was written');
+    }
+    return null;
+  }
 
   // The step that makes this trustworthy: stop being admin, and prove the credential we
   // are about to persist actually reaches the rooms.

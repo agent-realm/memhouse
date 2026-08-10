@@ -38,8 +38,8 @@ set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
 # No default URL. localhost:8123 as memhouse_root is a REAL house on many machines,
 # usually the pilot's own — guessing it reads someone else's memory and looks like it
 # worked. If there is no config, say so and stop.
-: "${MEMHOUSE_URL:?no memhouse house configured — run: memhouse install}"
-: "${MEMHOUSE_USER:?no memhouse house configured — run: memhouse install}"
+: "${MEMHOUSE_URL:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_URL set. Run: memhouse install}"
+: "${MEMHOUSE_USER:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_USER set. Run: memhouse install}"
 
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
   --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
@@ -68,10 +68,18 @@ MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-
 rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
 paste into a `FROM (...) AS c` position.
 
-**Read the rollup with `join_use_nulls=1`.** The connection recipe above sets it. Without
-it, ClickHouse gives an unmatched `m.seq` a default instead of NULL, so a session with no
-messages reports `total_msgs = 1` rather than 0 — measured, not theoretical. A subquery
-has no `SETTINGS` clause of its own, so the setting has to come from the caller.
+**The rollup is self-contained.** As of 0.4.5 the printed text carries its own `FINAL` on
+both rooms and a trailing `SETTINGS join_use_nulls = 1`, so it is correct wherever you
+paste it. Both matter: without `FINAL` every message is counted once per undeleted
+ReplacingMergeTree version (2x right after a ship, 3x a few ships later — measured, and it
+grows); without `join_use_nulls` a session with no messages reports `total_msgs = 1`
+rather than 0.
+
+**If the `memhouse` binary is not on PATH**, you cannot print the rollup — the skills are
+installable on their own. Query the rooms directly instead: `sessions_<you>` for metadata
+and `messages_<you>` for counts, each read `FINAL`, joined on `session_id` and `user_id`.
+Prefer the binary when it is there; a rollup you assemble by hand and one printed by a
+DIFFERENT memhouse version are the two ways this goes quietly wrong.
 
 If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
 across every member at once, narrowed to whatever grants you actually have — a Merge room

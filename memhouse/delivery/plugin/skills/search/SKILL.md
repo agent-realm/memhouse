@@ -31,8 +31,8 @@ set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
 # No default URL. localhost:8123 as memhouse_root is a REAL house on many machines,
 # usually the pilot's own — guessing it reads someone else's memory and looks like it
 # worked. If there is no config, say so and stop.
-: "${MEMHOUSE_URL:?no memhouse house configured — run: memhouse install}"
-: "${MEMHOUSE_USER:?no memhouse house configured — run: memhouse install}"
+: "${MEMHOUSE_URL:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_URL set. Run: memhouse install}"
+: "${MEMHOUSE_USER:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_USER set. Run: memhouse install}"
 
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
   --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
@@ -64,10 +64,10 @@ MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-
 rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
 paste into a `FROM (...) AS c` position.
 
-**Read the rollup with `join_use_nulls=1`.** The connection recipe above sets it. Without
-it, ClickHouse gives an unmatched `m.seq` a default instead of NULL, so a session with no
-messages reports `total_msgs = 1` rather than 0 — measured, not theoretical. A subquery
-has no `SETTINGS` clause of its own, so the setting has to come from the caller.
+**The rollup is self-contained.** As of 0.4.5 the printed text carries its own `FINAL` on
+both rooms and a trailing `SETTINGS join_use_nulls = 1`, so it is correct wherever you
+paste it. `final=1` on the connection still matters for reads of the rooms THEMSELVES,
+which carry no FINAL of their own.
 
 If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
 across every member at once, narrowed to whatever grants you actually have — a Merge room
