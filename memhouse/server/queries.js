@@ -1,12 +1,12 @@
-// queries.js — mem-house read/query layer.
+// queries.js — memhouse read/query layer.
 //
 // Serves the SAME response shapes as the root cache.js (the agentlytics API
-// contract) but computed over the mem-house typed schema — one set of rooms per member,
+// contract) but computed over the memhouse typed schema — one set of rooms per member,
 // `sessions_<m>` / `messages_<m>` / `tool_calls_<m>` (../per-member/schema-member.sql.tpl),
 // plus the session rollup, which is a SAVED QUERY and not an object
 // (../per-member/rooms.js). The dashboard SPA consumes these shapes unchanged.
 //
-// Schema mapping notes (root cache schema → mem-house):
+// Schema mapping notes (root cache schema → memhouse):
 //   chats            → sessions_<m> / the rollup  (id → session_id, bubble_count → total_msgs)
 //   chat_stats       → rollup aggregates          (token/char sums, models array)
 //   messages.content → messages_<m>.text          (cache_read → cache_read_tokens, …)
@@ -643,7 +643,7 @@ async function getToolCalls(toolName, opts = {}) {
 // ── cost estimation ─────────────────────────────────────────────────────────────
 // Messages with model '' or '<synthetic>' are "orphans": their tokens are
 // attributed to the session's dominant model (root cache.js treats model IS NULL
-// the same way; '' is the mem-house null and synthetic models have no pricing).
+// the same way; '' is the memhouse null and synthetic models have no pricing).
 const ORPHAN_TOKENS = '(m.input_tokens > 0 OR m.output_tokens > 0 OR m.cache_read_tokens > 0 OR m.cache_write_tokens > 0)';
 
 // session_id → dominant model (most frequent across the session's messages).

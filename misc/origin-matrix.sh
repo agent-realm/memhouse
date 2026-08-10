@@ -23,7 +23,7 @@ qroot "DROP DATABASE IF EXISTS mhtest" >/dev/null; qroot "CREATE DATABASE mhtest
 
 # --- A. a house built from the CURRENT template (origin present) -----------------
 ddl() { # ddl <member> [drop-origin]  -- HTTP takes ONE statement per request
-  local src="$REPO/mem-house/per-member/schema-member.sql.tpl"
+  local src="$REPO/memhouse/per-member/schema-member.sql.tpl"
   if [ "${2:-}" = "no-origin" ]; then
     sed "/origin LowCardinality/d; s/, origin, seq)/, seq)/; s/, origin, idx)/, idx)/; s/, user_id, origin)/, user_id)/" "$src" > /tmp/_ddl.tpl
     src=/tmp/_ddl.tpl

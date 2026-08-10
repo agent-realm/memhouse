@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// mem-house SHIPPER — parse-on-client (bet #1 in ../DESIGN.md). Runs the 17 editor
+// memhouse SHIPPER — parse-on-client (bet #1 in ../DESIGN.md). Runs the 17 editor
 // adapters locally and ships TYPED rows into THE CALLER'S OWN rooms — sessions_<m> /
 // messages_<m> / tool_calls_<m>, where <m> is `SELECT currentUser()` and never config
 // (../per-member/schema-member.sql.tpl, ../per-member/rooms.js). All of one member's
@@ -136,7 +136,7 @@ async function assertOriginKeyed(client, rooms) {
       + stale.map((s) => `    ${s}`).join('\n')
       + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
       + '\n    RENAME TABLE <room> TO <room>_old;'
-      + '\n    -- recreate from mem-house/per-member/schema-member.sql.tpl'
+      + '\n    -- recreate from memhouse/per-member/schema-member.sql.tpl'
       + '\n    INSERT INTO <room> SELECT *, \'ship\' AS origin FROM <room>_old;'
       + '\n  A house with no imported rows can also just be re-shipped from scratch.');
   }
@@ -463,11 +463,11 @@ function reportAdapterErrors(warned) {
   for (const e of errors) warned.add(e.source);
   const noBinding = errors.filter((e) => e.missingBinding).map((e) => e.source);
   if (noBinding.length) {
-    console.log(`[mem-house] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
-    console.log('[mem-house]          fix: npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log(`[memhouse] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
+    console.log('[memhouse]          fix: npm install -g memhouse --allow-scripts=better-sqlite3');
   }
   for (const e of errors.filter((x) => !x.missingBinding)) {
-    console.log(`[mem-house] WARNING: ${e.source} skipped — ${e.message}`);
+    console.log(`[memhouse] WARNING: ${e.source} skipped — ${e.message}`);
   }
 }
 
@@ -488,7 +488,7 @@ async function printStats(client) {
     clickhouse_settings: READ_SETTINGS,
   });
   const rows = await rs.json();
-  if (!rows.length) { console.log('[mem-house] house is empty'); return; }
+  if (!rows.length) { console.log('[memhouse] house is empty'); return; }
   const w = [Math.max(6, ...rows.map((r) => r.source.length)), 8, 8, 14];
   const line = (a, b, c, d) =>
     console.log(`${String(a).padEnd(w[0])}  ${String(b).padStart(w[1])}  ${String(c).padStart(w[2])}  ${String(d).padStart(w[3])}`);
@@ -507,7 +507,7 @@ async function main() {
   try {
     if (argv.includes('--ensure-schema')) {
       const n = await ensureSchema(client);
-      console.log(`[mem-house] schema ensured (${n} statements)`);
+      console.log(`[memhouse] schema ensured (${n} statements)`);
       return;
     }
     if (argv.includes('--stats')) { await printStats(client); return; }
@@ -534,18 +534,18 @@ async function main() {
       let failed = false;
       try {
         const r = await runShip(client, { full });
-        console.log(`[mem-house] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}) → ` +
+        console.log(`[memhouse] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}) → ` +
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         failed = true;
-        console.error(`[mem-house] pass failed: ${e.message}`);
+        console.error(`[memhouse] pass failed: ${e.message}`);
         if (!loop) process.exitCode = 1;
       }
       full = false; // --full applies to the first pass only; loop passes stay incremental
       if (loop) {
         const waitMs = failed ? Math.min(retryMs, intervalSec * 1000) : intervalSec * 1000;
         if (failed) {
-          console.error(`[mem-house] retrying in ${Math.round(waitMs / 1000)}s`);
+          console.error(`[memhouse] retrying in ${Math.round(waitMs / 1000)}s`);
           retryMs = Math.min(retryMs * 2, intervalSec * 1000);
         } else {
           retryMs = RETRY_START_MS;
@@ -562,5 +562,5 @@ async function main() {
 module.exports = { runShip, ensureSchema };
 
 if (require.main === module) {
-  main().catch((e) => { console.error(`[mem-house] fatal: ${e.message}`); process.exit(1); });
+  main().catch((e) => { console.error(`[memhouse] fatal: ${e.message}`); process.exit(1); });
 }

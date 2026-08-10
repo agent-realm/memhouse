@@ -1,6 +1,6 @@
-# mem-house — install as a kernel agency
+# memhouse — install as a kernel agency
 
-How to run mem-house as an **agency** on an ultimagent kernel — a ClickHouse server
+How to run memhouse as an **agency** on an ultimagent kernel — a ClickHouse server
 (a **town**) promoted into a realm — instead of a plain ClickHouse. Same flow proven
 for the agentlytics agency (`agency/AGENCY.md`); the agency is named **`memhouse`** and
 its house is the **`mem`** database (CH identifiers can't carry a dash, and the owning
@@ -67,7 +67,7 @@ python3 executor/executor.py approve <call_id> && python3 executor/executor.py d
 # grant-option on mem.*). One idempotent step — see ../per-member/PROVISIONING.md:
 MEM_URL=https://<kernel-host>:8443 MEM_USER=memhouse_root \
 MEM_PASSWORD=<credential> MEM_DB=mem \
-  node mem-house/per-member/provision.js --member alice --merge
+  node memhouse/per-member/provision.js --member alice --merge
 ```
 
 **Never `GRANT … ON mem.*` to a member.** A member who can read `mem.*` can read every

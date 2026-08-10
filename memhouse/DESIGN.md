@@ -1,6 +1,6 @@
-# mem-house — design
+# memhouse — design
 
-**mem-house** is agent conversation memory as a product: every coding-agent session
+**memhouse** is agent conversation memory as a product: every coding-agent session
 on your machines — across **all 17 editors** agentlytics supports — parsed locally,
 shipped to a typed ClickHouse store, shareable with a team, installable on the
 ultimagent kernel as an **agency**, and visible through the agentlytics dashboard.
@@ -10,7 +10,7 @@ ultimagent kernel as an **agency**, and visible through the agentlytics dashboar
 apart by the `host` column; no member writes into another's. The shared-table layout
 this once had was removed in 0.4.0; see `per-member/`.
 
-**Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) mem-house is a
+**Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) memhouse is a
 **house** — the `mem` database — **plus a resident**: the shipper. That pairing
 is what the word *agency* means; a house on its own only holds.
 
@@ -26,7 +26,7 @@ on   = "loop"      # a daemon — not an insert trigger, not a schedule
 The session rollup is a **routine** — house machinery, not a second resident. Since
 0.4.0 it is not even an object: it is SQL text (`per-member/rooms.js`), substituted with
 the caller's own room names and computed during your query, for your query, writing
-nothing. mem-house has **no materialized views at all** — in fact no stored views at all
+nothing. memhouse has **no materialized views at all** — in fact no stored views at all
 — so the shipper is not merely a resident, it is the only candidate in the tree. Strip
 it and every remaining moving part is a routine over rows nobody is writing any more.
 
@@ -42,7 +42,7 @@ skills/plugin delivery) and agentlytics' proven assets (adapters, UI, cost engin
 but **not** its shared-table-plus-row-policy layout, which 0.4.0 removed in favour of
 one set of rooms per member. If it wins, it can become memory-house v4; until then the
 two run side by side as separate agencies, each in its own house. Naming: the product is
-**mem-house**; the agency is **`memhouse`** and its house is the **`mem`** database
+**memhouse**; the agency is **`memhouse`** and its house is the **`mem`** database
 (identifiers can't carry a dash; the owner kept the longer name, `memhouse_root`).
 
 ## The four bets
@@ -58,7 +58,7 @@ them free and further along; **bet 3 is the one nobody else attempts.**
    parsing is not a style choice — it is what unlocks 17-editor coverage. The
    shipper runs the adapters (`editors/`) and ships **typed rows**. On the canon's
    write axis this bet is precisely *moving work from routine to resident*:
-   memory-house parses when you query, mem-house parses before anyone asks and
+   memory-house parses when you query, memhouse parses before anyone asks and
    writes the result down.
 2. **Typed common schema** (`per-member/schema-member.sql.tpl`, applied once per
    member; `schema-merge.sql.tpl` for the team rooms). Physical typed columns (what
@@ -75,8 +75,8 @@ them free and further along; **bet 3 is the one nobody else attempts.**
    (requires `async_insert=0`). Sharing is a further GRANT, issued by the member
    themselves (grant-option) or the owner.
 4. **Borrowed UI, zero fork.** The React SPA consumes REST JSON, not tables. The
-   mem-house server implements the **same `/api/*` contract** as agentlytics'
-   `server.js` (same routes, same response shapes) over the mem-house schema, and
+   memhouse server implements the **same `/api/*` contract** as agentlytics'
+   `server.js` (same routes, same response shapes) over the memhouse schema, and
    serves the same built `public/` bundle. UI changes: none.
 
 ## Components (this directory)
@@ -132,9 +132,9 @@ Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
 ## Delivery kit (mirrors memory-house)
 
 `install.sh` (standalone), `AGENT-INSTALL.md` (agent-facing install steps),
-`skills/` (Claude Code skills to query/search mem-house), `plugin/` (Claude Code
+`skills/` (Claude Code skills to query/search memhouse), `plugin/` (Claude Code
 plugin wrapping the skills), `PROMPT.md` (system-prompt snippet teaching an agent
-to use mem-house as memory), `kernel-install.md` (provision as agency `memhouse`).
+to use memhouse as memory), `kernel-install.md` (provision as agency `memhouse`).
 
 ## Non-goals (v0)
 

@@ -364,17 +364,26 @@ Recorded rather than silently reconciled.
    schema-level convergence. If memhouse wins it becomes memory-house v4 — at which point the
    agency name and the component name diverge for a while. Noted so the constellation catalog does
    not treat the duplication as drift.
-6. **`mem-house` (hyphenated) survives structurally; the product is `memhouse`.** Decided
-   2026-07-30, by the same public-register/structural split this list already applies to `agency`
-   (item 1) and SQL comments (item 3). **Corrected** on every surface a member, agent, or npm
-   browser reads: `README.md`'s lede (which said `**mem-house**` under an `# memhouse` heading — a
-   self-contradiction), the `package.json` description, the plugin description, and the three
-   `memhouse-*` skill descriptions. **Deliberately left**: the `mem-house/` directory, the
-   shipper's `[mem-house]` log prefix, code headers, SQL comments, and the design/runbook docs
-   (`DESIGN.md`, `PROMPT.md`, `kernel-install.md`, `install.sh`) — those are structural or
-   operator-facing, where renaming is a code change, not an editorial one. The `mem-house` npm
-   keyword also stands, as a deliberate discovery alias. Read `mem-house` in a path or a log line
-   as the directory; the agency, package, and command are all `memhouse`.
+6. **~~`mem-house` (hyphenated) survives structurally~~ — REVERSED 2026-08-10. There is one
+   name: `memhouse`.** The 2026-07-30 ruling split the name: `memhouse` on every surface a
+   member, agent or npm browser reads, `mem-house` kept for the directory, the shipper's
+   `[mem-house]` log prefix, code headers, SQL comments, the runbooks, and an npm keyword —
+   on the grounds that those are structural, and renaming them is a code change rather than
+   an editorial one.
+
+   That reasoning was sound and the outcome still cost more than it saved. The split meant a
+   reader met both spellings and had to know which surface they were on to tell whether it
+   was drift; the pilot asked exactly that question on 2026-08-10 ("we retired memory-house
+   and mem-house was old name"), which is the split working as designed and still being
+   indistinguishable from rot. A name a reader has to be briefed about is not carrying its
+   weight.
+
+   So the code change was made: `mem-house/` is now `memhouse/`, the log prefix is
+   `[memhouse]`, the npm keyword is dropped, and every header, comment, runbook and doc
+   follows. `memory-house` is untouched and stays — it is a different product, the one this
+   competes with and migrated from, and its name appears here as heritage and comparison,
+   not as drift.
+
 
 ## Sweeps that came back clean
 

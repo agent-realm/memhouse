@@ -14,8 +14,8 @@
 // No server, no fixtures, no network. Runs in milliseconds.
 
 const assert = require('assert');
-const rooms = require('../mem-house/per-member/rooms');
-const envfile = require('../mem-house/envfile');
+const rooms = require('../memhouse/per-member/rooms');
+const envfile = require('../memhouse/envfile');
 
 let passed = 0;
 function test(name, fn) {
@@ -75,7 +75,7 @@ test('every Merge selector matches member rooms and never itself', () => {
   // must catch `sessions_<anyone>` and must NOT catch `all_sessions`, or the Merge room
   // reads itself. Type-first naming is what buys this — `<member>_sessions` could not.
   const tpl = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'mem-house', 'per-member', 'schema-merge.sql.tpl'), 'utf-8');
+    require('path').join(__dirname, '..', 'memhouse', 'per-member', 'schema-merge.sql.tpl'), 'utf-8');
   const pats = [...tpl.matchAll(/Merge\(currentDatabase\(\), '([^']+)'\)/g)].map((m) => m[1]);
   assert.strictEqual(pats.length, rooms.ROOM_TYPES.length, 'one Merge room per room type');
   const all = Object.values(rooms.mergeRooms());
@@ -97,7 +97,7 @@ test('the shipper clear must bind origin, or it deletes imported history', () =>
   // seam to call — and a seam invented purely for a test is a worse guarantee than reading
   // the statement that actually runs.
   const src = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'mem-house', 'shipper', 'ship.js'), 'utf-8');
+    require('path').join(__dirname, '..', 'memhouse', 'shipper', 'ship.js'), 'utf-8');
   const del = src.match(/DELETE FROM \$\{rooms\[t\]\}[^`]*/);
   assert.ok(del, 'the per-session clear was not found in ship.js');
   assert.ok(/session_id = \{id:String\}/.test(del[0]), 'clear must bind the session');
@@ -108,7 +108,7 @@ test('the shipper clear must bind origin, or it deletes imported history', () =>
 
 test('every room type carries an origin column defaulting to ship', () => {
   const tpl = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'mem-house', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+    require('path').join(__dirname, '..', 'memhouse', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
   const n = (tpl.match(/origin LowCardinality\(String\) DEFAULT 'ship'/g) || []).length;
   assert.strictEqual(n, rooms.ROOM_TYPES.length,
     `origin must be on all ${rooms.ROOM_TYPES.length} room types, found ${n}`);
@@ -149,7 +149,7 @@ test('comments and blank lines are ignored', () => {
 // ── service files ───────────────────────────────────────────────────────────────
 // Rendered, not installed. On macOS the plist is additionally linted with plutil, which
 // is the only check available for a file we must not load on this machine.
-const service = require('../mem-house/service');
+const service = require('../memhouse/service');
 const os = require('os');
 
 const SVC = {
@@ -216,7 +216,7 @@ test('ExecStart quotes paths containing spaces', () => {
 // answer". Getting it wrong in the permissive direction made an unreachable daemon read
 // as a clean slate, and `deploy --down` reported success having removed nothing.
 test('only object-not-found messages mean absent', () => {
-  const deploy = require('../mem-house/deploy');
+  const deploy = require('../memhouse/deploy');
   const cases = [
     ['Cannot connect to Podman. stat /run/user/1000/podman/podman.sock: no such file or directory', false],
     ['Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?', false],
@@ -232,7 +232,7 @@ test('only object-not-found messages mean absent', () => {
 });
 
 test('an engine that cannot answer is never dropped from ownership', () => {
-  const deploy = require('../mem-house/deploy');
+  const deploy = require('../memhouse/deploy');
   // The pin is the escape hatch, and it must win outright — this is the only way off
   // the indeterminate path when a second engine's daemon is down.
   const saved = process.env.MEMHOUSE_ENGINE;

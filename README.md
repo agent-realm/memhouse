@@ -22,14 +22,14 @@ outlive any query; everything else here is only ever read. The house alone would
 hold; the shipper is what makes it act.
 
 An alternative agency **competing with memory-house**; if it wins, it becomes
-memory-house v4. Start with `mem-house/DESIGN.md` for the four bets
+memory-house v4. Start with `memhouse/DESIGN.md` for the four bets
 (parse-on-client, typed common schema, kernel-agency, borrowed UI).
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `mem-house/` | the product: `DESIGN.md`, `per-member/`, `shipper/`, `server/`, `delivery/` |
+| `memhouse/` | the product: `DESIGN.md`, `per-member/`, `shipper/`, `server/`, `delivery/` |
 | `editors/` | the 17 editor adapters (inherited from agentlytics; the crown jewels) |
 | `pricing.js` + `pricing.json` | the cost engine |
 | `ui/` | the dashboard SPA (built to `public/`, served unchanged by the memhouse server) |
@@ -132,17 +132,17 @@ The session rollup is a saved query over those rooms rather than a stored view, 
 is no fourth object to provision, grant, or collide with the team rooms;
 `memhouse sessions-query` prints it. On a house you own, `memhouse install` mints your
 three rooms and you are done. On someone else's, the owner mints them
-(`mem-house/per-member/provision.js`) and sharing a whole room is then self-serve, with
-no operator. Design and measurements: `mem-house/per-member/`.
+(`memhouse/per-member/provision.js`) and sharing a whole room is then self-serve, with
+no operator. Design and measurements: `memhouse/per-member/`.
 
 Every command is dual-mode: interactive for humans, `--yes`/flags/`--json` for
 agents — so an agent can self-install its own memory (`memhouse install --yes …`,
 `memhouse plugins install claude`). Config: flags > `MEMHOUSE_*` env >
 `~/.memhouse/env` > defaults.
 
-Deeper docs: `mem-house/delivery/AGENT-INSTALL.md`, kernel install (agency
+Deeper docs: `memhouse/delivery/AGENT-INSTALL.md`, kernel install (agency
 `memhouse`, members, per-member rooms and their grants):
-`mem-house/delivery/kernel-install.md`, skills/plugin payloads: `mem-house/delivery/`.
+`memhouse/delivery/kernel-install.md`, skills/plugin payloads: `memhouse/delivery/`.
 
 ## Heritage & license
 

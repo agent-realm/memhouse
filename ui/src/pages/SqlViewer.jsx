@@ -8,7 +8,7 @@ import PageHeader from '../components/PageHeader'
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Filler)
 
-// Two backends share this SPA: the typed mem-house house (sessions / messages /
+// Two backends share this SPA: the typed memhouse house (sessions / messages /
 // tool_calls + the session rollup) and the legacy agentlytics cache (chats /
 // chat_stats). Both are ClickHouse, and the flavor comes from /api/schema.
 //

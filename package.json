@@ -1,7 +1,7 @@
 {
   "name": "memhouse",
   "version": "0.4.4",
-  "description": "memhouse — agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store with one set of rooms per member, kernel-agency install, and the agentlytics dashboard",
+  "description": "memhouse \u2014 agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store with one set of rooms per member, kernel-agency install, and the agentlytics dashboard",
   "main": "bin/memhouse.js",
   "bin": {
     "memhouse": "./bin/memhouse.js",
@@ -9,7 +9,7 @@
   },
   "files": [
     "bin/",
-    "mem-house/",
+    "memhouse/",
     "misc/syntax-check.js",
     "index.js",
     "cache.js",
@@ -49,7 +49,7 @@
     "gemini",
     "cursor",
     "analytics",
-    "mem-house"
+    "memhouse"
   ],
   "author": "Ramazan Polat <ramazanpolat@gmail.com> (built on agentlytics by fkadev)",
   "license": "MIT",
