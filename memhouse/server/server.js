@@ -36,7 +36,9 @@ function writeConfig(config) {
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
-const hiddenFolders = () => readConfig().hiddenProjects || [];
+// Both keys. `hiddenFolders` was accepted by PUT /api/config, validated, written to disk
+// — and never read, so setting it changed nothing and said nothing.
+const hiddenFolders = () => [...(readConfig().hiddenProjects || []), ...(readConfig().hiddenFolders || [])] || [];
 
 function parseDateOpts(query) {
   const opts = {};
@@ -177,23 +179,48 @@ function clampInt(v, dflt, min, max) {
 app.post('/api/query', route(async (req, res) => {
   const { sql } = req.body;
   if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'sql string required' });
-  // Strip comments and string literals BEFORE inspecting anything.
+  // ONE pass. Strings and comments have to be recognised in the order they actually
+  // appear, because each can contain the other's opening marker:
   //
-  // Both halves were measured. The old first-token check read `/* note */ SELECT 1` as the
-  // token `/*` and refused it; and the table-function check used `\s*\(`, which a comment
-  // is not — so `url/*x*/('http://…')` slipped straight through and FETCHED, returning the
-  // remote body. ClickHouse treats a comment as a token separator; a guard that does not
-  // is guarding a different language.
+  //   SELECT * FROM /* ' */ url('http://…')   -- a quote inside a comment
+  //   SELECT '--', url('http://…')            -- a comment marker inside a string
   //
-  // Literals go too, in the other direction: without that,
-  // `WHERE text LIKE '%url(%'` was refused as an attempt to call url() — and this endpoint
-  // exists to search transcripts, which are full of code.
-  const bare = sql
-    .replace(/'(?:[^'\\]|\\.|'')*'/g, "''")   // string literals
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""')     // quoted identifiers
-    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')       // block comments
-    .replace(/--[^\n]*/g, ' ');                // line comments
+  // Stripping literals first lets the first one through: the `'` inside the comment opens
+  // a "literal" that swallows `' */ url('`, so the function scan sees nothing and the
+  // query runs. Stripping comments first lets the second one through for the mirror
+  // reason. Both were reachable; the first was demonstrated fetching a remote URL. A
+  // regex pipeline cannot do this — the two constructs are mutually nesting, so it takes
+  // a scanner.
+  let bare = '';
+  for (let i = 0; i < sql.length;) {
+    const c = sql[i];
+    const two = sql.slice(i, i + 2);
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === '\\') { i += 2; continue; }
+        if (sql[i] === quote) {
+          if (quote === "'" && sql[i + 1] === "'") { i += 2; continue; }  // '' escape
+          i++; break;
+        }
+        i++;
+      }
+      bare += quote + quote;
+    } else if (two === '/*') {
+      const end = sql.indexOf('*/', i + 2);
+      i = end === -1 ? sql.length : end + 2;
+      bare += ' ';
+    } else if (two === '--') {
+      const nl = sql.indexOf('\n', i);
+      i = nl === -1 ? sql.length : nl;
+      bare += ' ';
+    } else {
+      bare += c;
+      i++;
+    }
+  }
+
   const first = bare.trim().split(/\s+/)[0].toUpperCase();
   if (!['SELECT', 'WITH', 'EXPLAIN', 'DESCRIBE', 'SHOW'].includes(first)) {
     return res.status(403).json({ error: 'Only SELECT queries are allowed' });
@@ -215,16 +242,26 @@ app.post('/api/query', route(async (req, res) => {
   // than anyone can enumerate, and it gains more every release; the set this endpoint
   // legitimately needs is tiny and does not grow.
   const ALLOWED_FN = new Set(['numbers', 'values', 'null', 'generateseries', 'format', 'view', 'merge']);
-  for (const m of bare.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
-    const name = m[1].toLowerCase();
-    // Only FROM/JOIN positions can introduce a table function; everything else is an
-    // ordinary scalar or aggregate call.
-    const before = bare.slice(0, m.index).toUpperCase();
-    if (!/\b(FROM|JOIN)\s*$/.test(before.replace(/\s+/g, ' '))) continue;
-    if (!ALLOWED_FN.has(name)) {
-      return res.status(403).json({ error: `table function ${m[1]}() is not allowed here — this endpoint reads only this house` });
+  // A table function can appear anywhere in a FROM clause, not only straight after the
+  // FROM or JOIN keyword. Checking only those two positions missed the comma join:
+  //   SELECT * FROM numbers(1) AS n, /* ' */ url('http://…')
+  // which reached ClickHouse and was parsed as a table function. So: find each FROM
+  // clause and check every call inside it. Outside a FROM clause a call is an ordinary
+  // scalar or aggregate — flagging those would refuse `SELECT count(), sum(x)`.
+  const CLAUSE_END = /\b(WHERE|PREWHERE|GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING|SETTINGS|UNION|INTO|FORMAT|WINDOW|QUALIFY)\b/i;
+  const upper = bare.toUpperCase();
+  for (const kw of upper.matchAll(/\bFROM\b/g)) {
+    const rest = bare.slice(kw.index + 4);
+    const stop = rest.match(CLAUSE_END);
+    const clause = rest.slice(0, stop ? stop.index : rest.length);
+    for (const m of clause.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+      const name = m[1].toLowerCase();
+      if (!ALLOWED_FN.has(name)) {
+        return res.status(403).json({ error: `table function ${m[1]}() is not allowed here — this endpoint reads only this house` });
+      }
     }
   }
+
   try { res.json(await qy.rawQuery(sql)); }
   catch (err) { res.status(400).json({ error: err.message }); }
 }));

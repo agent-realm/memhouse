@@ -287,7 +287,9 @@ export default function Sessions({ overview }) {
         )}
       </td>
       <td className="py-2 px-3 text-[12px] font-mono text-right" style={{ color: c.cost > 0 ? 'var(--c-text2)' : 'var(--c-text3)' }}>
-        {c.cost > 0 ? formatCost(c.cost) : ''}
+        {/* costPartial: the session used a model with no price, so this number omits part
+            of itself. The API has carried the flag since 0.4.6 and nothing rendered it. */}
+        {c.cost > 0 ? <span title={c.costPartial ? 'partial — this session used a model with no price' : undefined}>{formatCost(c.cost)}{c.costPartial ? '*' : ''}</span> : ''}
       </td>
       <td className="py-2 px-3 text-[12px] whitespace-nowrap" style={{ color: 'var(--c-text3)' }}>
         {formatDate(c.lastUpdatedAt || c.createdAt)}
