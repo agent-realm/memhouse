@@ -721,7 +721,7 @@ function memberSql(db, member, password) {
 SET allow_experimental_full_text_index = 1;
 
 CREATE DATABASE IF NOT EXISTS ${db};
-CREATE USER ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
+CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
 
 ${rooms.trim()}
 
@@ -949,7 +949,7 @@ async function cmdInstall({ interactive }) {
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
     console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
     console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
-    console.log('     node memhouse/per-member/provision.js --member <name> --merge');
+    console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member <name> --merge`);
     return 0;
   }
 
@@ -1091,6 +1091,7 @@ async function cmdInstall({ interactive }) {
 
 async function cmdOnboard() {
   ONBOARDING = true;
+  let deployed = false;
   console.log(`memhouse ${PKG.version} — onboarding\n`);
   const found = await cmdDiscover();
   console.log('');
@@ -1110,7 +1111,14 @@ async function cmdOnboard() {
         // process reading its own flags. Reaching into it with a synthesised flag object
         // is how one of them silently stops applying.
         const rc = spawnSync(process.execPath, [__filename, 'deploy', '--local'], { stdio: 'inherit' });
-        return rc.status === 0 ? 0 : (rc.status || 1);
+        if (rc.status !== 0) return rc.status || 1;
+        // Fall through to the daemon prompt below rather than returning. This branch —
+        // "no ClickHouse yet", the README's headline scenario — used to return here, so
+        // `onboard` skipped its own last step: HELP says onboard is
+        // discover → configure → ship → START, the README says it "ships, and starts the
+        // dashboard", and doctor then exited 1 on a fresh, entirely successful install
+        // because neither daemon was running. Measured on a clean machine.
+        deployed = true;
       }
     } else {
       console.log(warn('No reachable ClickHouse found, and neither docker nor podman is on PATH.'));
@@ -1118,8 +1126,12 @@ async function cmdOnboard() {
     }
     console.log('');
   }
-  const code = await cmdInstall({ interactive: true });
-  if (code !== 0) return code;
+  // `deploy --local` already installed and shipped, so asking the install questions again
+  // would prompt for a house it just built.
+  if (!deployed) {
+    const code = await cmdInstall({ interactive: true });
+    if (code !== 0) return code;
+  }
   const yn = (await ask('Start the daemons now? (Y/n)', 'Y')).toLowerCase();
   if (yn !== 'n' && yn !== 'no') await cmdStart();
   return 0;
@@ -1431,7 +1443,12 @@ async function cmdDoctor() {
     const blocked = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
     const failed = adapterErrors.map((e) => e.source);
     add(adapterErrors.length === 0,
-      `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''}`,
+      // "visible locally" is what the ADAPTERS see; `stats` reports what the house HOLDS,
+      // and the two differ legitimately — a session that parses to zero messages is
+      // visible and not worth a row. Saying "visible locally" and leaving the reader to
+      // find the other number elsewhere (161 here, 156 there, on a real machine) gives
+      // them no way to tell "correctly skipped" from "silently dropped".
+      `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''} — compare with what the house holds: memhouse stats`,
       blocked.length ? 'npm install -g memhouse --allow-scripts=better-sqlite3'
         : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
           : undefined);
@@ -1945,12 +1962,18 @@ function cmdUninstall() {
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));
-      // A ROOTLESS container lives in the user's systemd slice, and that slice is torn
-      // down at logout unless lingering is enabled — the container takes a SIGTERM and
-      // the house goes down with it. Measured on a testbed VM: `deploy --local` over ssh
-      // shipped 211 sessions, the ssh session ended, and the container was
-      // `Exited (143)` twenty seconds later with `Linger=no`. The volume survives, so
-      // nothing is lost, but the house is gone with no explanation anywhere.
+      // A ROOTLESS container lives in the user's systemd slice, which MAY be torn down at
+      // logout — if so the container takes a SIGTERM and the house goes with it. The
+      // volume survives, so nothing is lost, but the house is gone with no explanation.
+      //
+      // Whether it happens depends on logind's KillUserProcesses. Measured once on a
+      // testbed VM as `Exited (143)` twenty seconds after the ssh session ended; measured
+      // again later on Ubuntu 24.04, which ships KillUserProcesses=no, and the container
+      // and the user manager both survived 44 seconds with zero sessions and Linger=no.
+      // So the warning is conditional, and it is worded as a possibility rather than a
+      // certainty: enabling lingering is harmless and makes it moot either way, but
+      // telling a user to fix a problem their distro does not have costs credibility on
+      // every other thing this command says.
       //
       // `service install` already detects exactly this for its own unit. The container
       // needs the same check, and podman is the case that matters: it is rootless by
@@ -1960,11 +1983,25 @@ function cmdUninstall() {
         let lingering = true;
         try { lingering = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).lingerEnabled(); } catch { /* assume fine */ }
         if (!lingering) {
-          console.log(warn('rootless podman: this container stops when you log out (lingering is off).'));
-          console.log(`     loginctl enable-linger ${os.userInfo().username}`);
-          console.log('  Until then, after a logout: memhouse deploy --local   (the data volume persists)');
+          console.log(warn('rootless podman: this container MAY stop when you log out (lingering is off).'));
+          console.log('  Whether it does depends on your distro — Ubuntu 24.04 keeps it, others kill it.');
+          console.log(`  To make it moot:  loginctl enable-linger ${os.userInfo().username}`);
+          // Repeat the port that was actually used. cmdPlugins already knows to echo back
+          // the --target it was given; this line dropped --house-port, so following it
+          // would stand the house up somewhere else.
+          console.log(`  If it does stop: memhouse deploy --local${flags['house-port'] ? ` --house-port ${flags['house-port']}` : ''}   (the data volume persists)`);
         }
       }
+      // Say what this credential is. `deploy --local` stands up a house you own, so the
+      // member IS the superuser — SHOW GRANTS for it includes CREATE USER, FILE, URL,
+      // REMOTE and S3, all WITH GRANT OPTION, and `service install` inlines it into a
+      // systemd unit. That is a defensible position for a single-owner house (DESIGN.md
+      // anticipates it) and it is NOT the narrow set INSTALL.md's grant-set argument
+      // describes. A user who later adds a second member should know which house they
+      // have.
+      console.log(warn(`this house is yours alone: '${'memhouse_root'}' is its superuser, and that is the credential being saved`));
+      console.log('  Adding a second person later? Give them their own member instead:');
+      console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member <name> --merge`);
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
       flags.db = targetDb;
       flags.yes = true;
