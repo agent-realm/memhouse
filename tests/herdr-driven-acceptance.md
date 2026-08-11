@@ -160,8 +160,10 @@ Verify the "change nothing" half by counting rows before and after.
 
 ## Phase 5 — the data guarantees
 
-Run `misc/origin-matrix.sh <label> <url> <user> <pass>` — 14 checks covering the
-import/ship split. It must be 14/14 on **both** ClickHouse versions.
+Run `misc/origin-matrix.sh <label> <url> <user> <pass>` — 20 checks covering the
+import/ship split. It must be 20/20 on **both** ClickHouse versions. It derives its own
+database name per run, so two copies can share one server — run them concurrently and
+confirm they do not corrupt each other.
 
 Then the same thing through the CLI, which the matrix does not cover:
 
@@ -189,6 +191,29 @@ Then the same thing through the CLI, which the matrix does not cover:
    inserts leaves behind. The next ORDINARY pass must re-ship it. Before 0.4.6 the skip
    predicate read only the messages room, so those tool calls were skipped forever and
    only `ship --full` recovered them: silent loss, exit 0, `status` and `stats` green.
+
+## Phase 5b — what the previous round's fixes broke
+
+Most of the last forty defects came from disbelieving a fix, not from new ground.
+
+- **A partial ship must be retried.** Let a session settle into `skipped`, delete only its
+  `tool_calls` rows, and confirm the next ORDINARY pass re-ships it. The skip once read
+  only the messages room, so those tool calls were skipped forever and exit 0.
+- **Truncation must not split a character.** An emoji straddling the 50,000-char text
+  boundary, the 20,000-char `args` boundary, and — the one the first fix missed — the
+  **120-char session title**. Also a lone surrogate already present in the source JSONL,
+  which involves no truncation at all. Any of these once stopped the house shipping
+  entirely: exit 1 forever under `--loop`, house empty, `doctor` all green.
+- **Both provisioning paths must grant the same set.** `provision.js` and
+  `install --print-sql` build the same house — compare `SHOW GRANTS` from each. If either
+  grants `ALL`, a member can `DROP` their own room and recreate it as
+  `Merge('<db>','^messages_')`, doubling every other member's rows in the team room.
+  Verify that attack is refused from BOTH paths.
+- **The skill recipe must survive bash AND zsh.** Copy it verbatim out of each SKILL.md
+  and run it in both, with a password containing `"` `\` `$` `` ` `` `!`, and with a
+  search term containing `$x` and a backtick. A recipe that forces the agent to unquote
+  its heredoc turns a search term into shell input — measured, both driven instances
+  unquoted it unprompted and a backtick executed.
 
 ## Phase 6 — every other command
 
@@ -260,6 +285,61 @@ What must hold:
 - credentials never appear in the transcript
 
 Then uninstall the plugin and confirm the skills are gone.
+
+## Phase 9 — a shared house, and the isolation claim
+
+The product's central claim is *"isolation is a grant that is simply absent, so it fails
+closed."* Build a house with three members via `provision.js --member <n> --merge`, ship
+distinct content into each, then try to break it:
+
+- read, INSERT, ALTER, DROP, TRUNCATE, RENAME another member's rooms — all must refuse
+- write a row claiming another member's `user_id`, by VALUES and by `INSERT … SELECT`, and
+  under `async_insert=1` (the stamp does not run during an async flush on 25.11)
+- squat or shadow another member's name
+- reach another member's CONTENT through `system.*` — metadata is fine, content is not
+- read the Merge rooms as each member: they must narrow, not deny
+- two members shipping concurrently, and two shippers as the SAME member
+- `reset` and `reset --all-origins` as one member must not touch another's rows
+
+Report anything where isolation held but the ERROR MESSAGE leaked — table existence, row
+counts, other members' names. `messages_bob` answering 497 while `messages_nobody` answers
+60 is a roster oracle, and handles are table names here.
+
+## Phase 10 — the dashboard, the API, and money
+
+A wrong number on a dashboard is believed. Recompute every one independently in SQL:
+session counts, message counts, per-model and per-editor totals, costs, rankings. Ship the
+same data three times and re-check — undeleted ReplacingMergeTree versions once inflated
+the rollup 2x, then 3x, growing with each pass.
+
+Then the HTTP API directly. Does a malformed parameter 500? Does a negative `limit` leak a
+ClickHouse internal? Can `/api/query` be made to call a table function that reads outside
+the house — try comments (`url/*x*/(`), case, whitespace, nesting? Can one query exhaust
+the server's memory? Does any response, error page or `/api/*` payload carry the credential?
+
+And the cost engine: verify the arithmetic by hand including cache rates, check what an
+UNPRICED model costs (zero is not "unknown"), and whether the user is told.
+
+## Phase 11 — a real machine (testbed)
+
+`lab` gives you a house. **`testbed` gives you a pilot's machine** — `ssh testbed`, a
+Proxmox VM with a macOS-shaped home at `/Users/polat`, podman but no docker. No round
+before 0.4.6 installed onto one, so the install path was only ever exercised where a
+developer's environment already existed.
+
+```bash
+ssh testbed 'bin/refresh-synced.sh'     # start of a test day
+# … run the install …
+ssh testbed 'bin/rollback-synced.sh'    # fresh machine in seconds, between runs
+```
+
+Install from the **published tarball**, not a checkout — `npm pack`, then
+`npm install -g <tgz> --allow-scripts=better-sqlite3`. That is what a user gets, and it
+differs from a worktree in ways that have mattered: `public/assets/` is gitignored and
+built by `prepack`, so a worktree can be testing a stale dashboard bundle.
+
+There is no ClickHouse on testbed. Either `deploy --local --house-port <port>` (podman,
+rootless — check the lingering warning) or point at a lab over the tunnel.
 
 ## Phase 8 — uninstall and teardown
 
