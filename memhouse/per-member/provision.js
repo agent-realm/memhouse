@@ -142,6 +142,30 @@ async function main() {
     // messages text indexes.
     await client.command({ query: q, clickhouse_settings: { allow_experimental_full_text_index: 1 } });
   }
+  // CREATE TABLE IF NOT EXISTS is a no-op on an existing room, so re-running provision.js
+  // over a room that has DRIFTED left it lossy while printing "rooms ready". The owner's
+  // route has to heal as well as create — it is the one route that always holds the rights.
+  {
+    const { templateColumns } = require('../shipper/ship');
+    const want = templateColumns(tpl);
+    for (const ty of ROOM_TYPES) {
+      const room = `${ty}_${member}`;
+      const rs = await client.query({
+        query: 'SELECT name FROM system.columns WHERE database = {d:String} AND table = {n:String}',
+        query_params: { d: cfg.database, n: room }, format: 'JSONEachRow',
+      });
+      const have = new Set((await rs.json()).map((r) => r.name));
+      if (!have.size) continue;
+      for (const c of (want[ty] || [])) {
+        if (have.has(c.name)) continue;
+        await client.command({
+          query: `ALTER TABLE ${cfg.database}.${room} ADD COLUMN IF NOT EXISTS ${c.name} ${c.type}`,
+          clickhouse_settings: { allow_experimental_full_text_index: 1 },
+        });
+        console.log(`[mem] added missing column ${room}.${c.name}`);
+      }
+    }
+  }
   console.log(`[mem] rooms ready for '${member}': ${ROOM_TYPES.map((t) => `${t}_${member}`).join(', ')}`);
 
   // 2. grants — two statements per room, and the split is the point.
@@ -203,7 +227,7 @@ async function main() {
   // Generous on purpose: a full re-ship of a large house is a big INSERT, and the point is
   // to stop one member exhausting the box, not to make honest work fail.
   try {
-    await client.command({ query: `CREATE OR REPLACE SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
+    await client.command({ query: `CREATE SETTINGS PROFILE OR REPLACE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
     await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}'` });
     console.log(`[mem] settings profile '${MEMBER_PROFILE}' applied to '${member}' (memory, time and thread ceilings)`);
   } catch (e) {

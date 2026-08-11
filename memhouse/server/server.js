@@ -176,7 +176,23 @@ function clampInt(v, dflt, min, max) {
   return Math.min(Math.max(Math.trunc(n), min), max);
 }
 
+// The databases that actually exist on this server, refreshed lazily. Comparing against
+// real names keeps `alias.column` — the common case — from being refused, while still
+// catching a genuine cross-database read.
+let KNOWN_DBS = new Set(['system']);
+let knownDbsAt = 0;
+async function refreshKnownDbs() {
+  if (Date.now() - knownDbsAt < 60000) return;
+  try {
+    const rows = await qy.rawQueryUnguarded('SELECT name FROM system.databases');
+    KNOWN_DBS = new Set(rows.map((r) => String(r.name).toLowerCase()));
+    KNOWN_DBS.add('system');
+    knownDbsAt = Date.now();
+  } catch { /* keep whatever we had */ }
+}
+
 app.post('/api/query', route(async (req, res) => {
+  await refreshKnownDbs();
   const { sql } = req.body;
   if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'sql string required' });
   // ONE pass, and it has to know every construct ClickHouse does, because each one can
@@ -247,7 +263,28 @@ app.post('/api/query', route(async (req, res) => {
   //
   // DESCRIBE takes a table expression too, with no FROM at all: `DESCRIBE url('http://…')`
   // performs schema inference, which dials out.
-  const ALLOWED_FN = new Set(['numbers', 'values', 'null', 'generateseries', 'format', 'view', 'merge']);
+  // `view` and `merge` are gone from this list. Both take a table expression or a database
+  // name as an ARGUMENT, so allowing them re-opened everything the list is for:
+  // `view(SELECT count() FROM system.tables)` returned 190, and
+  // `merge('other_db','^messages_')` returned 5,000 rows from a database this house does
+  // not own. The house's own team rooms are Merge TABLES, not calls to merge(), so nothing
+  // legitimate needs them here.
+  const ALLOWED_FN = new Set(['numbers', 'values', 'null', 'generateseries', 'format']);
+
+  // A table function was never the only way out. `SELECT count() FROM system.users`
+  // returned 2, and a database-qualified name reads any database the credential can see —
+  // which after `deploy --local` is all of them, because that path makes the member the
+  // superuser. The error text said "this endpoint reads only this house"; make that true.
+  const OWN_DB = (process.env.MEMHOUSE_DB || 'mem').toLowerCase();
+  for (const m of bare.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const db = m[1].toLowerCase();
+    // A bare `alias.column` is the overwhelmingly common case and is not a database
+    // reference; only refuse names that actually resolve to another DATABASE.
+    if (db === OWN_DB) continue;
+    if (db === 'system' || KNOWN_DBS.has(db)) {
+      return res.status(403).json({ error: `'${m[1]}' is another database — this endpoint reads only '${process.env.MEMHOUSE_DB || 'mem'}'` });
+    }
+  }
 
   // Walk the normalised text once, tracking paren depth and whether the current depth is
   // inside a FROM clause. A table function is an identifier-call that appears where a
@@ -260,7 +297,13 @@ app.post('/api/query', route(async (req, res) => {
   // matches on JOIN and refuses `splitByChar()`. Both are ordinary read SQL on the
   // endpoint whose purpose is reading transcripts — and `any()` in a derived table is the
   // shape of this product's own session rollup.
-  const CLAUSE_END = /^(WHERE|PREWHERE|GROUP|ORDER|LIMIT|HAVING|SETTINGS|UNION|INTO|FORMAT|WINDOW|QUALIFY|ON|USING)$/i;
+  // ON and USING do NOT end the FROM clause — they are part of a JOIN, and a comma join
+  // can follow them: `FROM a JOIN b ON 1=1, file('/etc/hostname')` is ordinary SQL and
+  // walked straight through when they were listed here. Neither does a quoted alias that
+  // merely SPELLS one of these words: `FROM numbers(1) AS "WHERE", file(…)` was the same
+  // bypass with two characters of disguise. Only a keyword in KEYWORD POSITION ends it —
+  // that is, one that was not just introduced by AS.
+  const CLAUSE_END = /^(WHERE|PREWHERE|GROUP|ORDER|LIMIT|HAVING|SETTINGS|UNION|INTO|FORMAT|WINDOW|QUALIFY)$/i;
   const tableFns = [];
   const inFrom = [];
   let depth = 0;
@@ -292,8 +335,12 @@ app.post('/api/query', route(async (req, res) => {
       continue;
     }
     if (raw === ')') { depth = Math.max(0, depth - 1); prev3 = prevPrev; prevPrev = prev; prev = raw; continue; }
-    if (up === 'FROM') inFrom[depth] = true;
-    else if (CLAUSE_END.test(up)) inFrom[depth] = false;
+    // `prev === 'AS'` means this token is an ALIAS, whatever it spells. A quoted alias
+    // arrives here as its bare text (the tokenizer keeps identifier content so that
+    // `FROM "url"(…)` is still visible), so `AS "WHERE"` would otherwise close the clause.
+    const isAlias = prev === 'AS';
+    if (up === 'FROM' && !isAlias) inFrom[depth] = true;
+    else if (CLAUSE_END.test(up) && !isAlias) inFrom[depth] = false;
     prev3 = prevPrev; prevPrev = prev; prev = (raw === ',') ? ',' : up;
   }
 

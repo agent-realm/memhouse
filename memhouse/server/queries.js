@@ -968,4 +968,7 @@ module.exports = {
   getProjects, getDeepAnalytics, getToolCalls,
   estimateCosts, getCostAnalytics,
   rawQuery, schema,
+  // Used only by the server's own guard to learn which database names are real. Not
+  // reachable from any route.
+  rawQueryUnguarded: (sql) => q(sql),
 };

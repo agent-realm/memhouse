@@ -746,7 +746,7 @@ ${mergeGrants}
 -- CONST, not MAX: a plain default is advisory, and MAX is not enough either because 0 means
 -- UNLIMITED in ClickHouse and 0 satisfies any MAX. Measured — with a MAX ceiling in force,
 -- SETTINGS max_memory_usage = 0 was accepted and the ceiling was gone.
-CREATE OR REPLACE SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
+CREATE SETTINGS PROFILE OR REPLACE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
 ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}';
 `;
 }
@@ -1367,16 +1367,39 @@ async function cmdDoctor() {
       const { templateColumns } = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'));
       const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
       const want = templateColumns(tpl);
+      // Names AND types AND the MATERIALIZED kind. Comparing names alone left every other
+      // kind of drift invisible, with measured consequences: a `UInt64` column narrowed to
+      // `Int8` stored 200 as **-56**, silently, so token counts and every cost derived
+      // from them were wrong; and `text_ngram` without its MATERIALIZED clause was empty
+      // on all 33 rows, so the FTS column the search skill queries had simply stopped
+      // being populated. Both read `✓ columns: every room matches the schema template`.
       const missing = [];
+      const wrong = [];
+      let roomsSeen = 0;
       for (const ty of ROOM_TYPES) {
-        const have = new Set((await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${rooms[ty]}'`, { database: '' })).map((r) => r.name));
-        if (!have.size) continue;
-        for (const c of (want[ty] || [])) if (!have.has(c.name)) missing.push(`${rooms[ty]}.${c.name}`);
+        const cols = await chRows(cfg, `SELECT name, type, default_kind FROM system.columns WHERE database = '${cfg.db}' AND table = '${rooms[ty]}'`, { database: '' });
+        if (!cols.length) continue;
+        roomsSeen++;
+        const byName = new Map(cols.map((r) => [r.name, r]));
+        for (const c of (want[ty] || [])) {
+          const got = byName.get(c.name);
+          if (!got) { missing.push(`${rooms[ty]}.${c.name}`); continue; }
+          // The template's declaration is `<type> [DEFAULT x | MATERIALIZED x]`; compare
+          // the type word and, when the template says MATERIALIZED, that the column still is.
+          const wantType = c.type.replace(/\s+(DEFAULT|MATERIALIZED|ALIAS|EPHEMERAL)\b[\s\S]*$/i, '').trim();
+          const wantKind = /\bMATERIALIZED\b/i.test(c.type) ? 'MATERIALIZED' : null;
+          if (wantType && got.type !== wantType) wrong.push(`${rooms[ty]}.${c.name} is ${got.type}, template says ${wantType}`);
+          else if (wantKind && got.default_kind !== 'MATERIALIZED') wrong.push(`${rooms[ty]}.${c.name} lost its MATERIALIZED clause`);
+        }
       }
-      add(missing.length === 0,
-        missing.length === 0 ? 'columns: every room matches the schema template'
-          : `columns: ${missing.length} missing — ${missing.slice(0, 6).join(', ')}${missing.length > 6 ? ' …' : ''}`,
-        'those fields are being discarded on every ship; heal with: memhouse ship --ensure-schema');
+      const bad2 = missing.length + wrong.length;
+      add(bad2 === 0 && roomsSeen === ROOM_TYPES.length,
+        roomsSeen !== ROOM_TYPES.length ? `columns: only ${roomsSeen}/${ROOM_TYPES.length} rooms exist, so the template comparison is incomplete`
+          : bad2 === 0 ? 'columns: every room matches the schema template (name, type and kind)'
+            : `columns: ${missing.length} missing, ${wrong.length} wrong — ${[...missing, ...wrong].slice(0, 4).join('; ')}${bad2 > 4 ? ' …' : ''}`,
+        missing.length && !wrong.length
+          ? 'those fields are being discarded on every ship; heal with: memhouse ship --ensure-schema'
+          : 'a changed type silently corrupts values and a lost MATERIALIZED clause stops a column being computed; the room has to be rebuilt by its owner');
     } catch (e) { add(false, 'columns', `could not compare against the template: ${e.message}`); }
 
     // The sorting keys the shipper refuses to write into. doctor is where a house should
@@ -1416,12 +1439,19 @@ async function cmdDoctor() {
       // instead, and say how many: a row with an empty user_id is invisible to every
       // identity-bound path at once (loadExisting's WHERE, the shipper's clear, reset's
       // DELETE), so its owner cannot even remove it.
-      const u = (await chRows(cfg, `SELECT count() AS c, countIf(user_id = '') AS blank FROM ${rooms.sessions} FINAL`))[0] || {};
-      const total = Number(u.c || 0); const blank = Number(u.blank || 0);
+      // All three rooms. This read only `sessions`, and the two it skipped are where the
+      // shipper writes almost everything — measured, a messages row with an empty user_id
+      // sat there while this printed "all attributed". An unattributed row is invisible to
+      // every identity-bound path at once, including its owner's own reset.
+      let total = 0; let blank = 0;
+      for (const ty of ROOM_TYPES) {
+        const r = (await chRows(cfg, `SELECT count() AS c, countIf(user_id = '') AS blank FROM ${rooms[ty]} FINAL`))[0] || {};
+        total += Number(r.c || 0); blank += Number(r.blank || 0);
+      }
       add(blank === 0,
         total === 0 ? 'identity stamping (no rows yet)'
-          : blank === 0 ? `identity stamping (${total} rows, all attributed)`
-            : `identity stamping: ${blank} of ${total} session rows have an empty user_id`,
+          : blank === 0 ? `identity stamping (${total} rows across all three rooms, all attributed)`
+            : `identity stamping: ${blank} of ${total} rows have an empty user_id`,
         'a writer used async_insert=1 — the MATERIALIZED currentUser() stamp does not run during an async flush');
     } catch { add(false, 'identity stamping', 'schema missing? run: memhouse install'); }
   }

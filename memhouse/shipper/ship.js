@@ -415,9 +415,13 @@ async function ensureSchema(client) {
   // would error. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
   // pre-existing row reads as 'ship', which is what it was.
   //
-  // Deliberately NOT applied to the Merge rooms: they take their structure from a member
-  // room at CREATE time and reject ALTER. A Merge room simply will not expose `origin`
-  // until it is recreated, which costs nothing — nothing reads origin through it.
+  // Deliberately NOT applied to the Merge rooms — but not for the reason this comment used
+  // to give. It claimed they "reject ALTER"; they do not, on either 26.7 or 25.11, where
+  // `ALTER TABLE all_messages ADD COLUMN …` succeeds. The real reason is that a Merge room
+  // is a VIEW over whatever `^messages_` matches: a column added to it is cosmetic, is not
+  // backed by the underlying rooms, and drifts from them the moment a member is added. It
+  // takes its structure from a member room at CREATE time, so recreating it is the only
+  // correct way to change it — and nothing reads `origin` through it anyway.
   // EVERY column the template declares, not just `origin`.
   //
   // This used to add exactly one column, which meant any OTHER column missing from a room
