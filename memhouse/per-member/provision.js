@@ -44,7 +44,7 @@ catch {
   console.error('  From an npm install:  npm install -g memhouse --allow-scripts=better-sqlite3');
   process.exit(2);
 }
-const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS } = require('./rooms');
+const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -202,19 +202,14 @@ async function main() {
   //
   // Generous on purpose: a full re-ship of a large house is a big INSERT, and the point is
   // to stop one member exhausting the box, not to make honest work fail.
-  const profile = `memhouse_member`;
   try {
-    await client.command({ query: `CREATE SETTINGS PROFILE IF NOT EXISTS ${profile} SETTINGS `
-      + `max_memory_usage = 8000000000 MAX 8000000000, `
-      + `max_execution_time = 600 MAX 600, `
-      + `max_threads = 16 MAX 16, `
-      + `max_result_rows = 10000000 MAX 10000000` });
-    await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${profile}'` });
-    console.log(`[mem] settings profile '${profile}' applied to '${member}' (memory, time and thread ceilings)`);
+    await client.command({ query: `CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
+    await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}'` });
+    console.log(`[mem] settings profile '${MEMBER_PROFILE}' applied to '${member}' (memory, time and thread ceilings)`);
   } catch (e) {
     // A server where the admin cannot create profiles still gets a working member; say so
     // rather than failing the provision.
-    console.log(`[mem] note: could not apply the '${profile}' settings profile — ${e.message}`);
+    console.log(`[mem] note: could not apply the '${MEMBER_PROFILE}' settings profile — ${e.message}`);
     console.log('[mem] the member works, but nothing bounds their query resources on this server');
   }
 

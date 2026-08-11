@@ -38,6 +38,35 @@ const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
  */
 const MEMBER_PRIVS = 'SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD COLUMN, OPTIMIZE';
 
+/**
+ * Resource ceilings for a member, as a settings profile.
+ *
+ * Here for the same reason MEMBER_PRIVS is here: there are two paths that provision a
+ * house — provision.js and `install --print-sql` — and a change made to one of them and
+ * not the other has now happened eight times. Anything a member is GIVEN belongs in this
+ * file, so both paths read the same definition.
+ *
+ * CONST, not MAX. A plain default is advisory — a member writes
+ * `SETTINGS max_memory_usage = …` on their query and overrides it, which is what they were
+ * doing. But `MAX` is not enough either, and this is the trap: in ClickHouse **0 means
+ * unlimited** for all of these, and 0 satisfies any MAX constraint. Measured — with
+ * `max_memory_usage = 8000000000 MAX 8000000000` in force, `SETTINGS max_memory_usage = 0`
+ * was accepted and the ceiling was gone. Same for max_execution_time and max_result_rows.
+ * CONST refuses any change at all, including to 0.
+ *
+ * The cost is that a member cannot LOWER these either. That is a courtesy, not a right,
+ * and the ceiling is the thing worth having. Limits are generous on purpose: the point is
+ * to stop one member exhausting a shared server, not to make an honest full re-ship fail —
+ * verified that a 20M-row scan still runs under them.
+ */
+const MEMBER_PROFILE = 'memhouse_member';
+const MEMBER_PROFILE_SETTINGS = [
+  'max_memory_usage = 8000000000 CONST',
+  'max_execution_time = 600 CONST',
+  'max_threads = 16 CONST',
+  'max_result_rows = 10000000 CONST',
+].join(', ');
+
 // ClickHouse usernames are permissive; room names are not. Refuse anything that would
 // need quoting or could change how a Merge regex or a name-splitter reads.
 function assertUsableMember(member) {
@@ -162,7 +191,7 @@ function mergeRooms() {
 }
 
 module.exports = {
-  MEMBER_PRIVS,
+  MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS,
   ROOM_TYPES, READ_SETTINGS, assertUsableMember,
   sessionsRollup, roomNames, currentUser, resolveRooms, mergeRooms,
 };

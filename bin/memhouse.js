@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
+const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -736,6 +736,15 @@ ${grants}
 ${merge.trim()}
 
 ${mergeGrants}
+
+-- Resource ceilings. Confidentiality isolation is a grant that is absent; this is the
+-- availability half, and it did not exist until 0.4.7 — a member could raise
+-- max_memory_usage, zero max_execution_time and take a shared server down for everyone.
+-- CONST, not MAX: a plain default is advisory, and MAX is not enough either because 0 means
+-- UNLIMITED in ClickHouse and 0 satisfies any MAX. Measured — with a MAX ceiling in force,
+-- SETTINGS max_memory_usage = 0 was accepted and the ceiling was gone.
+CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
+ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}';
 `;
 }
 
