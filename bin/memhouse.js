@@ -1463,12 +1463,19 @@ async function cmdDoctor() {
     // the same shape as the unpriced-model gap above, which once hid $6,919 — except no
     // price list can fix it, because the numbers were never extracted. zed is the current
     // case: editors/zed.js contains no usage handling at all.
+    // origin='ship' only. Imported history came from another product that may never have
+    // recorded usage — on this machine four of the five zero-token sources are imports
+    // from memory-house, which is a fact about the past, not an adapter that needs fixing.
+    // Naming them alongside a live adapter gap makes the real one easy to dismiss.
     const zero = await chRows(cfg,
-      `SELECT source, count() AS n FROM ${rooms.messages} FINAL WHERE role = 'assistant' GROUP BY source HAVING sum(input_tokens) + sum(output_tokens) = 0 ORDER BY source`);
+      `SELECT source, count() AS n FROM ${rooms.messages} FINAL WHERE role = 'assistant' AND origin = 'ship' GROUP BY source HAVING sum(input_tokens) + sum(output_tokens) = 0 ORDER BY source`);
+    const zeroImported = await chRows(cfg,
+      `SELECT count() AS n FROM ${rooms.messages} FINAL WHERE role = 'assistant' AND origin != 'ship' AND input_tokens = 0 AND output_tokens = 0`);
+    const impN = Number(zeroImported[0]?.n || 0);
     add(zero.length === 0,
       zero.length === 0
-        ? 'token capture: every editor in this house reports usage'
-        : `token capture: ${zero.map((r) => `${r.source} (${r.n} messages)`).join(', ')} report ZERO tokens — their cost shows as $0, not as unknown`,
+        ? `token capture: every editor shipping into this house reports usage${impN ? ` (${impN} imported messages carry none — historical, not fixable here)` : ''}`
+        : `token capture: ${zero.map((r) => `${r.source} (${r.n} messages)`).join(', ')} ship ZERO tokens — their cost shows as $0, not as unknown`,
       'that adapter does not extract usage; the messages are stored, the numbers are not');
   } catch { /* a house that cannot be read is already reported above */ }
   const sh = shipperHealth();
