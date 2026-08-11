@@ -3,7 +3,7 @@ name: sessions
 description: List recent agent sessions from memhouse conversation memory — names, projects, editors, hosts, times, message and token counts across all 17 supported editors. Use for "what was I working on", "show my recent sessions", "sessions from last week", "what did I do in project X", "list my cursor sessions", or to orient before drilling into one session.
 user-invocable: true
 argument-hint: "[N] [project <name>] [from <editor>] [today|week|month]"
-allowed-tools: Bash(set -a*), Bash(. *), Bash(curl*)
+allowed-tools: Bash
 ---
 
 # /memhouse:sessions — browse session history
@@ -19,6 +19,10 @@ message aggregates) in the memhouse house.
   id/name yet.
 
 ## Connection
+
+**Never print this file or the variables in it.** No `cat "$MH_ENV"`, no `env | grep
+MEMHOUSE`, no `set -x` around these commands. Anything you print becomes part of a
+transcript that memhouse itself ships into the house.
 
 Credentials resolve as **flags > exported `MEMHOUSE_*` > `$MEMHOUSE_HOME/env`**
 (default `~/.memhouse/env`) — the same order the `memhouse` CLI uses. Every query
@@ -38,9 +42,20 @@ set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
 # No default URL. localhost:8123 as memhouse_root is a REAL house on many machines,
 # usually the pilot's own — guessing it reads someone else's memory and looks like it
 # worked. If there is no config, say so and stop.
-: "${MEMHOUSE_URL:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_URL set. Run: memhouse install}"
-: "${MEMHOUSE_USER:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_USER set. Run: memhouse install}"
+if [ -z "${MEMHOUSE_URL:-}" ] || [ -z "${MEMHOUSE_USER:-}" ]; then
+  # An explicit test, not ${VAR:?msg}: zsh does not expand the message, so under the
+  # shell Claude Code actually uses the refusal read "nothing in $MH_ENV" literally.
+  echo "no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_URL/MEMHOUSE_USER set." >&2
+  echo "Run: memhouse install" >&2
+  exit 1
+fi
 
+# --user, not a -K config file. The config-file parser treats `"` and `\` specially, so a
+# password containing either authenticates fine from the CLI and fails from every skill
+# with "password is incorrect" — measured. The argv exposure -K was meant to avoid is not
+# observable here either: curl blanks the --user argument before `ps` can read it (0 hits
+# in 50 samples). What actually leaks a credential is PRINTING it, which the rule above
+# covers.
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
   --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
@@ -55,14 +70,28 @@ Every member owns their own rooms, named for their ClickHouse user:
 the bare names fail with `UNKNOWN_TABLE` rather than returning nothing. You hold no grant
 on anyone else's rooms, so isolation is not something a query can work around.
 
-Resolve your own name once and substitute it into every table name below:
+Ask the server your name once, then **type the literal room name into your SQL** — do not
+reference a shell variable inside the query:
 
 ```bash
-MEM_ME="$(curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
+curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
   --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-  "$MEMHOUSE_URL/" | tr -d '\r\n')"
-# rooms: messages_$MEM_ME, sessions_$MEM_ME, tool_calls_$MEM_ME
+  "$MEMHOUSE_URL/?readonly=1"
+# prints e.g. alice  →  your rooms are messages_alice, sessions_alice, tool_calls_alice
 ```
+
+**Keep the SQL heredoc quoted (`<<'SQL'`) and put the real name in the text.** This used to
+say "substitute it into every table name below" and show `messages_$MEM_ME`, which cannot
+expand inside a quoted heredoc — so the agent unquotes it, and then the SEARCH TERMS expand
+too. Both instances driving this skill did exactly that, unprompted, on the first attempt.
+Measured consequences, from `system.query_log`:
+
+- a term containing `$home` became the empty string, so `LIKE '%%'` matched **every row**
+  and reported hits with exit 0 — silently wrong, not an error;
+- a term containing a backtick **executed the command inside it**.
+
+A user's search term is arbitrary text. With the heredoc quoted and the room name written
+out, neither can happen.
 
 **There is no `sessions_v` object.** The session rollup is a saved query over those same
 rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to

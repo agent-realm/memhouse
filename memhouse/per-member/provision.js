@@ -27,6 +27,7 @@
 // USER are REQUIRED — see the note at cfg. MEM_DB defaults to 'mem'.
 
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 // Named, not thrown as a raw MODULE_NOT_FOUND with a require stack. This runs as a
 // SUBPROCESS of `memhouse install`, after the admin path has already created a ClickHouse
@@ -41,7 +42,7 @@ catch {
   console.error('  From an npm install:  npm install -g memhouse --allow-scripts=better-sqlite3');
   process.exit(2);
 }
-const { ROOM_TYPES, mergeRooms, assertUsableMember } = require('./rooms');
+const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -107,6 +108,30 @@ async function main() {
   console.log(`[mem] provisioning in ${cfg.url} database '${cfg.database}' as '${cfg.username}'`);
   const client = createClient({ ...cfg, log: quiet, clickhouse_settings: { async_insert: 0 } });
 
+  // 0. the member themselves.
+  //
+  // This file never created the ClickHouse user, so the path `memhouse install` prints and
+  // INSTALL.md repeats — `provision.js --member <name> --merge` — created three rooms and
+  // then died on `There is no role \`<name>\` in \`user directories\``, leaving orphan rooms
+  // that nothing removes and that the --merge step then folded into all_sessions. It also
+  // ignored --member-password. The documented second-member path did not work at all.
+  const existing = await client.query({
+    query: `SELECT name FROM system.users WHERE name = {n:String}`,
+    query_params: { n: member }, format: 'JSONEachRow',
+  });
+  if ((await existing.json()).length === 0) {
+    const pw = opt('member-password') || crypto.randomBytes(24).toString('base64url');
+    await client.command({ query: `CREATE USER ${member} IDENTIFIED BY '${pw.replace(/'/g, "\\'")}'` });
+    console.log(`[mem] created ClickHouse user '${member}'`);
+    if (!opt('member-password')) {
+      console.log(`[mem] password for '${member}': ${pw}`);
+      console.log('[mem] shown once — hand it over, or pass --member-password next time');
+    }
+    console.log(`[mem] they finish with: memhouse install --url ${cfg.url} --db ${cfg.database} --user ${member} --password '…'`);
+  } else {
+    console.log(`[mem] ClickHouse user '${member}' already exists — provisioning rooms only`);
+  }
+
   // 1. rooms
   const tpl = fs.readFileSync(path.join(here, 'schema-member.sql.tpl'), 'utf-8');
   const roomSql = statements(tpl.replaceAll('{{MEMBER}}', member));
@@ -133,12 +158,37 @@ async function main() {
   // would become something a member could hand to a colleague while meaning "let them
   // read my sessions". Measured: with this split, `GRANT SELECT … TO bob` succeeds and
   // `GRANT DROP TABLE … TO bob` is refused 497.
+  // NOT `GRANT ALL`. On 26.7 that expands to 45 privileges including CREATE TABLE **on
+  // the member's own room name** — which means a member owns the NAME, not just the data,
+  // and can put any engine behind it. Measured on both versions:
+  //
+  //     DROP TABLE messages_alice;                                      -- allowed
+  //     CREATE TABLE messages_alice AS all_messages
+  //       ENGINE = Merge('<db>','^messages_');                          -- allowed
+  //
+  // `all_messages` is Merge(db,'^messages_'), so it then contains a Merge over its own
+  // namespace and every OTHER member's rows are counted twice in the team room: a house
+  // reading alice 6030 / bob 2401 / carol 12 became bob 4802 / carol 24, silently, no
+  // error. Confidentiality survives — the Merge still narrows by grants, so alice reads
+  // nothing new — but integrity does not, and a team-wide number is the whole point of
+  // the room. SCHEMA.md already records the same failure reached by accident; this is the
+  // same failure reachable on purpose by any member.
+  //
+  // So: the privileges the shipper actually uses, and nothing that lets a member define
+  // an object. ALTER UPDATE and ALTER DELETE both, because `DELETE FROM` is a lightweight
+  // delete implemented as `ALTER TABLE … UPDATE _row_exists = 0` and which of the two a
+  // server demands varies by version (25.11 wants UPDATE where 26.7 wanted DELETE).
+  // ALTER ADD COLUMN for ensureSchema's rollout. No CREATE TABLE, no DROP TABLE, no
+  // TRUNCATE: the admin who provisioned the room is the one who can replace it.
+  //
+  // SELECT is re-grantable so a share is READ-ONLY BY CONSTRUCTION rather than by
+  // convention — `GRANT SELECT … TO bob` succeeds, `GRANT DROP TABLE … TO bob` is 497.
   for (const t of ROOM_TYPES) {
     const room = `${cfg.database}.${t}_${member}`;
-    await client.command({ query: `GRANT ALL ON ${room} TO ${member}` });
+    await client.command({ query: `GRANT ${MEMBER_PRIVS} ON ${room} TO ${member}` });
     await client.command({ query: `GRANT SELECT ON ${room} TO ${member} WITH GRANT OPTION` });
   }
-  console.log(`[mem] granted ALL on 3 rooms to '${member}'; SELECT is the only re-grantable one`);
+  console.log(`[mem] granted ${MEMBER_PRIVS} on 3 rooms to '${member}'; SELECT is the only re-grantable one`);
 
   // 3. Merge rooms
   if (flag('merge')) {

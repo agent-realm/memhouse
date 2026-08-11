@@ -18,7 +18,12 @@ const PORT = parseInt(process.env.MEMHOUSE_PORT || '4640', 10);
 // with no auth. Remote access is an explicit opt-in (MEMHOUSE_HOST=0.0.0.0).
 const HOST = process.env.MEMHOUSE_HOST || '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
-const CONFIG_PATH = path.join(os.homedir(), '.memhouse', 'config.json');
+// MEMHOUSE_HOME, like every other component. childEnv() already passes it to this child;
+// this was the one place that ignored it and wrote to the real home instead. Anyone
+// running a second house under MEMHOUSE_HOME — the documented way to test, and what every
+// acceptance run is told to do — hid a project in their throwaway dashboard and had it
+// written into the PILOT'S ~/.memhouse/config.json.
+const CONFIG_PATH = path.join(process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse'), 'config.json');
 
 const app = express();
 app.use(express.json());
@@ -65,8 +70,12 @@ app.get('/api/chats', route(async (req, res) => {
     editor: req.query.editor || null,
     folder: req.query.folder || null,
     named: req.query.named !== 'false',
-    limit: req.query.limit ? parseInt(req.query.limit) : 200,
-    offset: req.query.offset ? parseInt(req.query.offset) : 0,
+    // Clamped, not passed through. `offset=-5` reached ClickHouse as a UInt64 parameter
+    // and came back as HTTP 500 carrying "Value -5 cannot be parsed as UInt64 … only 0 of
+    // 2 bytes was parsed" — a server error and a database internal for a client mistake.
+    // `limit=abc` was silently ignored and `limit=99999999999999999999` returned everything.
+    limit: clampInt(req.query.limit, 200, 1, 5000),
+    offset: clampInt(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER),
     ...parseDateOpts(req.query),
     hiddenFolders: hiddenFolders(),
   };
@@ -125,7 +134,7 @@ app.get('/api/deep-analytics', route(async (req, res) => {
   res.json(await qy.getDeepAnalytics({
     editor: req.query.editor || null,
     folder: req.query.folder || null,
-    limit: Math.min(parseInt(req.query.limit) || 500, 5000),
+    limit: clampInt(req.query.limit, 500, 1, 5000),
     ...parseDateOpts(req.query),
     hiddenFolders: hiddenFolders(),
   }));
@@ -150,7 +159,7 @@ app.get('/api/tool-calls', route(async (req, res) => {
   if (!name) return res.status(400).json({ error: 'name query param required' });
   // Same filter set as the analytics the drill-down is opened from.
   res.json(await qy.getToolCalls(name, {
-    limit: Math.min(parseInt(req.query.limit) || 200, 1000),
+    limit: clampInt(req.query.limit, 200, 1, 1000),
     folder: req.query.folder || null,
     editor: req.query.editor || null,
     ...parseDateOpts(req.query),
@@ -158,12 +167,63 @@ app.get('/api/tool-calls', route(async (req, res) => {
   }));
 }));
 
+function clampInt(v, dflt, min, max) {
+  if (v === undefined || v === null || v === '') return dflt;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(Math.max(Math.trunc(n), min), max);
+}
+
 app.post('/api/query', route(async (req, res) => {
   const { sql } = req.body;
   if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'sql string required' });
-  const first = sql.trim().replace(/^--.*$/gm, '').trim().split(/\s+/)[0].toUpperCase();
+  // Strip comments and string literals BEFORE inspecting anything.
+  //
+  // Both halves were measured. The old first-token check read `/* note */ SELECT 1` as the
+  // token `/*` and refused it; and the table-function check used `\s*\(`, which a comment
+  // is not — so `url/*x*/('http://…')` slipped straight through and FETCHED, returning the
+  // remote body. ClickHouse treats a comment as a token separator; a guard that does not
+  // is guarding a different language.
+  //
+  // Literals go too, in the other direction: without that,
+  // `WHERE text LIKE '%url(%'` was refused as an attempt to call url() — and this endpoint
+  // exists to search transcripts, which are full of code.
+  const bare = sql
+    .replace(/'(?:[^'\\]|\\.|'')*'/g, "''")   // string literals
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')     // quoted identifiers
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')       // block comments
+    .replace(/--[^\n]*/g, ' ');                // line comments
+  const first = bare.trim().split(/\s+/)[0].toUpperCase();
   if (!['SELECT', 'WITH', 'EXPLAIN', 'DESCRIBE', 'SHOW'].includes(first)) {
     return res.status(403).json({ error: 'Only SELECT queries are allowed' });
+  }
+  // Checking the FIRST TOKEN says nothing about the rest of the statement. ClickHouse's
+  // table functions live inside a SELECT, and `url()` makes an outbound HTTP request from
+  // the server — reachable here with no authentication at all. Measured: the response
+  // carried the TARGET's error, so the request went out. On a house provisioned per-member
+  // this is blocked by grants (READ ON URL is not granted), but `install --url … --user
+  // memhouse_root` is a documented path and that credential holds everything.
+  //
+  // `file()` is jailed by ClickHouse's user_files directory and `remote()`/`s3()` are the
+  // same shape as url(). Refuse the family by name rather than trusting least privilege to
+  // be configured.
+  // Allow-list the table functions instead of naming the dangerous ones. The deny-list
+  // missed gcs, sqlite, redis, hudi, fileCluster, azureBlobStorageCluster, icebergS3,
+  // deltaLakeS3 and fuzzJSON — three of which reached ClickHouse and failed only on URI
+  // parsing, meaning a well-formed URI would have made the request. ClickHouse ships more
+  // than anyone can enumerate, and it gains more every release; the set this endpoint
+  // legitimately needs is tiny and does not grow.
+  const ALLOWED_FN = new Set(['numbers', 'values', 'null', 'generateseries', 'format', 'view', 'merge']);
+  for (const m of bare.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+    const name = m[1].toLowerCase();
+    // Only FROM/JOIN positions can introduce a table function; everything else is an
+    // ordinary scalar or aggregate call.
+    const before = bare.slice(0, m.index).toUpperCase();
+    if (!/\b(FROM|JOIN)\s*$/.test(before.replace(/\s+/g, ' '))) continue;
+    if (!ALLOWED_FN.has(name)) {
+      return res.status(403).json({ error: `table function ${m[1]}() is not allowed here — this endpoint reads only this house` });
+    }
   }
   try { res.json(await qy.rawQuery(sql)); }
   catch (err) { res.status(400).json({ error: err.message }); }
@@ -172,15 +232,38 @@ app.post('/api/query', route(async (req, res) => {
 app.get('/api/schema', route(async (req, res) => res.json(await qy.schema())));
 
 app.get('/api/config', (req, res) => res.json(readConfig()));
+// Only the keys the dashboard actually owns. `Object.assign(config, req.body)` persisted
+// whatever was sent — `{"pwned":"yes"}` came back 200 and stayed in the file.
+const CONFIG_KEYS = { hiddenProjects: 'array', hiddenFolders: 'array' };
 app.put('/api/config', route(async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  // Own keys only. `{"__proto__":{…}}` has no OWN key, so `Object.keys` saw an empty body,
+  // the unknown-key check passed, and the config was rewritten to {} with a 200.
+  const unknown = Object.keys(body).filter((k) => !Object.prototype.hasOwnProperty.call(CONFIG_KEYS, k));
+  if (Object.getPrototypeOf(body) !== Object.prototype && Object.getPrototypeOf(body) !== null) {
+    return res.status(400).json({ error: 'unexpected body' });
+  }
+  if (!Object.keys(body).length) return res.status(400).json({ error: 'no config keys given' });
+  if (unknown.length) return res.status(400).json({ error: `unknown config keys: ${unknown.join(', ')}` });
   const config = readConfig();
-  Object.assign(config, req.body);
+  for (const [k, kind] of Object.entries(CONFIG_KEYS)) {
+    if (!(k in body)) continue;
+    if (kind === 'array') {
+      if (!Array.isArray(body[k]) || body[k].some((v) => typeof v !== 'string')) {
+        return res.status(400).json({ error: `${k} must be an array of strings` });
+      }
+      config[k] = body[k];
+    }
+  }
   writeConfig(config);
   res.json(config);
 }));
 
 // Real refetch: run one full shipper pass, streaming SSE like the root contract.
-app.get('/api/refetch', async (req, res) => {
+// POST, not GET. A full re-ship behind a GET is the easiest request on a machine to make
+// by accident — a prefetch, a link checker, a curl in a log. The dashboard calls it
+// explicitly, so nothing legitimate depended on the verb.
+app.post('/api/refetch', async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   try {
     const { runShip } = require('../shipper/ship');

@@ -1,4 +1,4 @@
--- mem — one member's rooms. Applied per member; {{MEMBER}} is the ClickHouse username.
+-- mem — one member's rooms. Applied per member — {{MEMBER}} is the ClickHouse username.
 --
 -- Room naming is TYPE-FIRST (sessions_<m>, not <m>_sessions) so the Merge rooms
 -- can anchor on a fixed room type and never match themselves.
@@ -7,7 +7,7 @@
 -- it keeps provenance across a share and keeps the Merge rooms meaningful. Writers must
 -- use async_insert=0 or the stamp does not happen.
 --
--- ClickHouse >= 26.2 natively; 25.11 works because the shipper passes
+-- ClickHouse >= 26.2 natively — 25.11 works because the shipper passes
 -- allow_experimental_full_text_index=1 per-query when applying this file.
 
 CREATE TABLE IF NOT EXISTS sessions_{{MEMBER}}
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS sessions_{{MEMBER}}
     -- still exists on disk. Nothing is lost -- a session the adapters no longer see is
     -- never cleared and never re-inserted, so its imported row stands untouched.
     --
-    -- messages and tool_calls are the opposite case and DO key on origin; see there.
+    -- messages and tool_calls are the opposite case and DO key on origin -- see there.
     origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)

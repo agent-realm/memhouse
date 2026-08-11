@@ -105,19 +105,35 @@ export async function fetchDeepAnalytics(params = {}) {
   return res.json();
 }
 
-export function refetchAgents(onProgress) {
-  return new Promise((resolve, reject) => {
-    const es = new EventSource(`${BASE}/api/refetch`);
-    es.onmessage = (evt) => {
-      try {
-        const data = JSON.parse(evt.data);
-        if (data.done) { es.close(); resolve(data); }
-        else if (data.error) { es.close(); reject(new Error(data.error)); }
-        else if (onProgress) onProgress(data);
-      } catch { /* ignore parse errors */ }
-    };
-    es.onerror = () => { es.close(); reject(new Error('SSE error')); };
-  });
+// POST, read as a stream. EventSource can only issue GET, and a full re-ship behind a GET
+// is the easiest request on a machine to make by accident — a prefetch, a link checker, a
+// curl in a log file. The wire format is unchanged (`data: {...}` frames); only the verb
+// and the reader are.
+export async function refetchAgents(onProgress) {
+  const res = await fetch(`${BASE}/api/refetch`, { method: 'POST' });
+  if (!res.ok || !res.body) throw new Error(`refetch failed (${res.status})`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let last = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split('\n\n');
+    buf = frames.pop() || '';
+    for (const frame of frames) {
+      const line = frame.split('\n').find((l) => l.startsWith('data:'));
+      if (!line) continue;
+      let data;
+      try { data = JSON.parse(line.slice(5).trim()); } catch { continue; }
+      if (data.error) throw new Error(data.error);
+      if (data.done) { last = data; }
+      else if (onProgress) onProgress(data);
+    }
+  }
+  if (!last) throw new Error('refetch ended without completing');
+  return last;
 }
 
 export async function fetchDashboardStats(params = {}) {

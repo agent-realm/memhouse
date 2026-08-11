@@ -29,13 +29,27 @@ the source.
 ## Ground rules
 
 1. **Never point at `localhost:8123` or `localhost:18999`.** Those are the pilot's
-   real houses. Use only the lab endpoint you create. If a memhouse command ever
-   connects to 8123, that is a finding — as of 0.4.5 nothing should fall back there.
+   real houses. Use only the lab endpoint you create.
+
+   If a memhouse command connects to 8123 **on its own**, that is a finding — with one
+   documented exception: `discover` probes it deliberately and reports
+   `• http://localhost:8123 — reachable, credentials needed`. That is an endpoint
+   *discovery*, and it is meant to be there. Everything else is not: a command that
+   *authenticates* against a guessed house is a defect even when it is only diagnosing
+   (that was `doctor`, found in round 4).
 2. **Always set `MEMHOUSE_HOME`** to a temp dir for every command. Without it you
    overwrite `~/.memhouse/env`. Put that dir under `/private/tmp/mh-acc-<you>/`, NOT in
    the shared scratchpad — parallel agents have deleted each other's config there.
 3. **Read output before deciding.** `herdr pane read` after every step. A command that
-   printed an error and exited 0 is still a failure.
+   printed an error and exited 0 is still a failure. Check `$?` explicitly — an exit code
+   nobody looked at is how `status` reported a dead house as healthy for three releases.
+
+   **Proving a command contacted nothing needs care.** `ship`, `stats`, `reset` and
+   `search` run their work in a CHILD process, so a `node -r spy.js bin/memhouse.js …`
+   recorder attached to the parent sees zero sockets whatever happens. Use
+   `NODE_OPTIONS="-r spy.js"` so the recorder is inherited, and establish a positive
+   control first — a command you KNOW connects, logging a connection — before trusting
+   any zero.
 4. **Record what you did not test.** A gap you name is worth more than a pass you
    assumed.
 5. **Clean up even if you fail** — `lab down`, `herdr workspace close`, temp dirs.
@@ -169,6 +183,12 @@ Then the same thing through the CLI, which the matrix does not cover:
 8. **Real timestamps.** Ship a Claude Code session whose JSONL has known per-message
    timestamps. The stored `ts` must match them, not be spread evenly between the
    session's first and last time.
+9. **A partial ship must be retried, not skipped.** Ship, let a session settle into
+   `skipped`, then delete that session's rows from `tool_calls_<m>` while leaving its
+   session row and messages intact — the state any failure during the last of the three
+   inserts leaves behind. The next ORDINARY pass must re-ship it. Before 0.4.6 the skip
+   predicate read only the messages room, so those tool calls were skipped forever and
+   only `ship --full` recovered them: silent loss, exit 0, `status` and `stats` green.
 
 ## Phase 6 — every other command
 
@@ -177,8 +197,10 @@ Drive each through the pane and read the result. Do not accept exit 0 as a pass.
 ```
 discover      names editors with sessions, and any adapter skipped for a missing
               native binding — install WITHOUT --allow-scripts=better-sqlite3 once
-              and confirm it names the six SQLite adapters rather than silently
-              reporting zero
+              and confirm it NAMES the skipped adapters rather than silently
+              reporting zero. It reports five (zed, opencode, antigravity, cursor,
+              goose); windsurf also requires the binding but is excluded upstream
+              in editors/index.js because its getChats() is RPC. Five is correct
 doctor        every line a check mark on a healthy house; on a broken one, the
               failing line must name the fix
 status        counts and freshness; --json parses

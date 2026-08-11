@@ -24,11 +24,34 @@
 
 const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
 
+/**
+ * What a member is granted on their own rooms. ONE definition, because there are two paths
+ * that provision a house — provision.js and `install --print-sql` — and when only the first
+ * was narrowed the second went on emitting `GRANT ALL` for a release. GRANT ALL includes
+ * CREATE TABLE **on the member's own room name**, so a member owns the name rather than the
+ * data and can replace the room with a Merge over everyone's, doubling other members' rows
+ * in the team room.
+ *
+ * ALTER UPDATE and ALTER DELETE both: `DELETE FROM` is a lightweight delete implemented as
+ * `ALTER TABLE … UPDATE _row_exists = 0`, and which of the two a server demands varies by
+ * version. ALTER ADD COLUMN for ensureSchema's rollout. Nothing that defines an object.
+ */
+const MEMBER_PRIVS = 'SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD COLUMN, OPTIMIZE';
+
 // ClickHouse usernames are permissive; room names are not. Refuse anything that would
 // need quoting or could change how a Merge regex or a name-splitter reads.
 function assertUsableMember(member) {
   if (typeof member !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/.test(member)) {
     throw new Error(`cannot build room names for user '${member}': expected [A-Za-z][A-Za-z0-9_]*`);
+  }
+  // The reservation lives HERE, not only in the CLI, because provision.js is the admin
+  // entry point INSTALL.md sends you to for a second member — and it went as far as
+  // creating sessions_root/messages_root/tool_calls_root before dying on the grant,
+  // leaving three orphan rooms nothing removes. Case-insensitive: Root and ROOT are the
+  // same account. `default` is deliberately NOT reserved — a poor member name, but a real
+  // one that existing houses are built on.
+  if (member.toLowerCase() === 'root') {
+    throw new Error("'root' cannot be a member: it is a container artefact, not a person");
   }
 }
 
@@ -139,6 +162,7 @@ function mergeRooms() {
 }
 
 module.exports = {
+  MEMBER_PRIVS,
   ROOM_TYPES, READ_SETTINGS, assertUsableMember,
   sessionsRollup, roomNames, currentUser, resolveRooms, mergeRooms,
 };

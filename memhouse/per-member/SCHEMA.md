@@ -71,3 +71,50 @@ which is what it was always supposed to mean.
 
 - the kernel capability that provisions a member
 - member removal: drop the three rooms, revoke, decide what happens to rooms shared outward
+
+## What a member can still learn about the others
+
+Isolation is a grant that is absent, so no member can read another's rows — verified by
+trying every read and write against another member's rooms, plus `system.parts`,
+`system.query_log`, `system.processes` and the rest, all of which refuse. Two things do
+leak, both structural rather than bugs in the code, and neither is fixed by tightening a
+grant:
+
+**The roster.** A member's handle is part of their table name, and ClickHouse distinguishes
+"forbidden" from "absent": `SELECT count() FROM messages_bob` returns `Code: 497
+ACCESS_DENIED` (HTTP 500) if bob exists and `Code: 60 UNKNOWN_TABLE` (HTTP 404) if he does
+not. So any member can enumerate the membership of the house by guessing handles.
+`system.tables` correctly hides the other rooms; this reopens it. `EXISTS TABLE` does not
+leak — it answers 497 either way — so it is specifically the natural probe that talks. If
+the membership of a house is itself sensitive, the per-member layout is the wrong shape for
+it.
+
+**Volume.** `system.tables.total_rows` and `total_bytes` are readable for the Merge rooms,
+and a Merge room spans every member:
+
+    name            total_rows   total_bytes
+    all_messages    87           42455        <- the whole house
+    messages_alice  33           25070        <- what alice can actually read
+
+So a member can see the house's combined row count and byte volume, and by polling it, when
+other members are shipping. Withholding `SELECT` on the Merge rooms is not the fix — it
+makes the team room deny rather than narrow, which is the property those rooms exist for.
+
+## Why members are not granted ALL on their own rooms
+
+`GRANT ALL ON <db>.messages_<m>` expands to 45 privileges on 26.7, and one of them is
+`CREATE TABLE` **on that name**. A member would then own the name rather than the data:
+
+    DROP TABLE messages_alice;
+    CREATE TABLE messages_alice AS all_messages ENGINE = Merge('<db>','^messages_');
+
+`all_messages` is `Merge(db,'^messages_')`, so it now contains a Merge over its own
+namespace and every other member's rows are counted twice in the team room — measured, a
+house reading alice 6030 / bob 2401 / carol 12 became bob 4802 / carol 24, with no error.
+Confidentiality survives (the Merge still narrows by grants) but integrity does not, and a
+team-wide number is what the room is for. It is the same failure recorded above under the
+`sessions_v` rename, reached on purpose instead of by accident.
+
+Members therefore get exactly what the shipper uses — `SELECT, INSERT, ALTER UPDATE, ALTER
+DELETE, ALTER ADD COLUMN, OPTIMIZE` — and nothing that defines an object. Replacing a room
+is the admin's job.
