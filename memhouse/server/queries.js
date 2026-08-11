@@ -154,7 +154,14 @@ const topN = (freq, n) => Object.entries(freq).sort((a, b) => b[1] - a[1]).slice
 // ── overview ────────────────────────────────────────────────────────────────────
 async function getOverview(opts = {}) {
   const f = filters(opts);
-  const totalChats = Number((await q1(`SELECT count() AS cnt FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params)).cnt);
+  // Same definition as getChats(). The nav bar read this and the Sessions page read
+  // getChats, so a house with one placeholder session showed "9 sessions" beside
+  // "8 sessions" in the same header, and the depth histogram summed to 7. A session row
+  // with no name and no messages is a placeholder the shipper keeps to absorb the
+  // incremental skip; it is not a conversation, and only one of the two counters knew.
+  const totalChats = Number((await q1(
+    `SELECT count() AS cnt FROM {{sessions_v}} AS c WHERE 1=1${f.and} AND (c.name != '' OR c.total_msgs > 0)`,
+    f.params)).cnt);
 
   // Root parity: without a folder filter the editor breakdown is global.
   const editors = opts.folder
@@ -256,6 +263,7 @@ async function getDashboardStats(opts = {}) {
     SELECT COALESCE(sum(input_tokens), 0) AS input, COALESCE(sum(output_tokens), 0) AS output,
            COALESCE(sum(cache_read_tokens), 0) AS cacheRead, COALESCE(sum(cache_write_tokens), 0) AS cacheWrite,
            COALESCE(sum(user_chars), 0) AS userChars, COALESCE(sum(assistant_chars), 0) AS assistantChars,
+           COALESCE(sum(total_msgs), 0) AS messages,
            count() AS sessions
     FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
 
@@ -326,7 +334,7 @@ async function getDashboardStats(opts = {}) {
     tokens: {
       input: inputTokens, output: outputTokens, cacheRead: Number(tokenRow.cacheRead), cacheWrite: Number(tokenRow.cacheWrite),
       userChars: Number(tokenRow.userChars), assistantChars: Number(tokenRow.assistantChars),
-      sessions: Number(tokenRow.sessions), estimated: tokensEstimated,
+      sessions: Number(tokenRow.sessions), messages: Number(tokenRow.messages), estimated: tokensEstimated,
     },
     streaks: { current: currentStreak, longest: longestStreak, totalDays: streakRows.length },
     monthlyTrend: { months: Object.keys(monthEditors).sort(), sources: [...allSources], data: monthEditors },
@@ -386,7 +394,9 @@ async function getChats(opts = {}) {
   for (const r of tmRows) {
     const k = `${r.session_id}::${r.user_id}`;
     const cnt = Number(r.cnt) || 0;
-    if (cnt > (bestCnt[k] || 0)) { bestCnt[k] = cnt; topModelBySession[k] = r.model; }
+    if (cnt > (bestCnt[k] || 0)) { bestCnt[k] = cnt; topModelBySession[k] = normalizeModelName(r.model) || r.model; }
+    // calculateCost normalizes internally, so the raw name is correct here — only the
+    // DISPLAY name above is canonicalised.
     const c = calculateCost(r.model, Number(r.in_tok) || 0, Number(r.out_tok) || 0,
       Number(r.cache_r) || 0, Number(r.cache_w) || 0);
     // null = unpriced model. Keep it distinguishable from a real zero so the row can say

@@ -172,11 +172,14 @@ export default function Dashboard({ overview }) {
   const totalInputAll = tk ? tk.input + tk.cacheRead + (tk.cacheWrite || 0) : 0
   const cacheHitRate = totalInputAll > 0 ? ((tk.cacheRead / totalInputAll) * 100).toFixed(1) : 0
   const outputInputRatio = totalInputAll > 0 ? (tk.output / totalInputAll).toFixed(3) : 0
-  const avgMsgsPerSession = tk && tk.sessions > 0 ? (depthData ? (Object.values(stats.depthBuckets).reduce((s, v, i) => {
-    const labels = Object.keys(stats.depthBuckets)
-    const midpoints = [1, 3.5, 8, 15.5, 35.5, 75.5, 150]
-    return s + v * midpoints[i]
-  }, 0) / tk.sessions).toFixed(1) : '—') : '—'
+  // Messages divided by sessions. This used to sum the depth HISTOGRAM against hardcoded
+  // bucket midpoints — reading 4.2 where the truth was 26/8 = 3.25, +29% — and it mixed
+  // denominators too: the numerator came from depthBuckets, whose query excludes sessions
+  // with no messages, while the divisor counted all of them. The exact value is one
+  // division away and both numbers were already on the page.
+  const avgMsgsPerSession = tk && tk.sessions > 0 && tk.messages != null
+    ? (tk.messages / tk.sessions).toFixed(1)
+    : '—'
 
 
   return (

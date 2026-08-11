@@ -13,6 +13,10 @@ ClickHouse user — `messages_<you>`, `sessions_<you>` — see **Room names** be
 
 ## Connection
 
+**Never print this file or the variables in it.** No `cat "$MH_ENV"`, no `env | grep
+MEMHOUSE`, no `set -x` around these commands. Anything you print becomes part of a
+transcript that memhouse itself ships into the house.
+
 Credentials resolve as **flags > exported `MEMHOUSE_*` > `$MEMHOUSE_HOME/env`**
 (default `~/.memhouse/env`) — the same order the `memhouse` CLI uses. Every query
 runs over ClickHouse HTTP with `final=1` and `join_use_nulls=1` (ReplacingMergeTree
@@ -34,8 +38,14 @@ set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
 : "${MEMHOUSE_URL:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_URL set. Run: memhouse install}"
 : "${MEMHOUSE_USER:?no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_USER set. Run: memhouse install}"
 
-curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
+# The credential goes in on STDIN via -K, never in argv. `--user pw` puts the password
+# in the process list, in any `set -x` trace, and in whatever the agent's tool output
+# captures — and memhouse SHIPS agent transcripts into ClickHouse, where SELECT is the one
+# re-grantable privilege. Keep it off the command line.
+curl -sS --fail-with-body -K /dev/fd/3 3<<CURLCFG \
   --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
+user = "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD"
+CURLCFG
 <the query>
 FORMAT PrettyCompact
 SQL
