@@ -285,6 +285,41 @@ function templateColumns(tpl) {
   return out;
 }
 
+/**
+ * Say so, every pass, when a room is missing a column.
+ *
+ * `ship` does not call ensureSchema — only `--ensure-schema` and `install` do — so a room
+ * that has drifted keeps accepting inserts and keeps discarding that field, silently, for
+ * as long as nobody thinks to run the healer. Measured: 85 rows shipped with the value
+ * thrown away and four surfaces reporting success.
+ *
+ * A WARNING rather than a refusal: the rows that do fit are still worth having, and
+ * refusing would stop all shipping over one column. One extra query per room per pass.
+ */
+async function warnMissingColumns(client, rooms) {
+  let tpl;
+  try { tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8'); }
+  catch { return; }
+  const want = templateColumns(tpl);
+  const missing = [];
+  for (const t of ROOM_TYPES) {
+    try {
+      const rs = await client.query({
+        query: 'SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {n:String}',
+        query_params: { n: rooms[t] }, format: 'JSONEachRow',
+      });
+      const have = new Set((await rs.json()).map((r) => r.name));
+      if (!have.size) continue;
+      for (const c of (want[t] || [])) if (!have.has(c.name)) missing.push(`${rooms[t]}.${c.name}`);
+    } catch { /* unreadable rooms are assertRoomsExist's problem */ }
+  }
+  if (missing.length) {
+    console.error(`[memhouse] WARNING: ${missing.length} column(s) missing from your rooms — those fields are being DISCARDED on every pass:`);
+    console.error(`[memhouse]   ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? ` … and ${missing.length - 8} more` : ''}`);
+    console.error('[memhouse]   heal them with: memhouse ship --ensure-schema');
+  }
+}
+
 async function assertRoomsExist(client, rooms) {
   const rs = await client.query({
     query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ({n:Array(String)})`,
@@ -427,6 +462,7 @@ async function ensureSchema(client) {
 
   await assertRoomsExist(client, rooms);
   await assertOriginKeyed(client, rooms);
+  await warnMissingColumns(client, rooms);
   return stmts.length;
 }
 
@@ -617,6 +653,7 @@ async function runShip(client, opts = {}) {
   const rooms = await resolveRooms(client);
   await assertRoomsExist(client, rooms);
   await assertOriginKeyed(client, rooms);
+  await warnMissingColumns(client, rooms);
   const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
 
