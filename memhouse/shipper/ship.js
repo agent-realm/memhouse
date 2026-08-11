@@ -250,6 +250,41 @@ function makeClient() {
  * `doctor` both handle the identical situation properly; ship was the one that did not.
  * It is also the documented 0.3.x-upgrade symptom, which INSTALL.md claims is named.
  */
+/**
+ * The columns each room type declares in the template, as {name, type} — the source of
+ * truth for what a room must have. Parsed from the same file that creates them, so a
+ * column added there is rolled out without anyone remembering to write a migration.
+ *
+ * MATERIALIZED and DEFAULT clauses are kept: `user_id String MATERIALIZED currentUser()`
+ * has to be added exactly that way or the identity stamp does not happen.
+ */
+function templateColumns(tpl) {
+  const out = {};
+  for (const t of ROOM_TYPES) {
+    const re = new RegExp(`CREATE TABLE IF NOT EXISTS ${t}_\\{\\{MEMBER\\}\\}\\s*\\(([\\s\\S]*?)\\n\\)`, 'm');
+    const m = tpl.match(re);
+    if (!m) continue;
+    const cols = [];
+    let depth = 0, buf = '';
+    for (const raw of m[1].split('\n')) {
+      const line = raw.replace(/--.*$/, '').trim();
+      if (!line) continue;
+      buf += (buf ? ' ' : '') + line;
+      depth += (line.match(/\(/g) || []).length - (line.match(/\)/g) || []).length;
+      if (depth > 0 || !buf.endsWith(',')) { if (depth > 0) continue; }
+      const decl = buf.replace(/,$/, '').trim();
+      buf = '';
+      // Skip index/constraint declarations — only column definitions here.
+      if (/^(INDEX|CONSTRAINT|PROJECTION|PRIMARY\s+KEY)\b/i.test(decl)) continue;
+      const sp = decl.indexOf(' ');
+      if (sp < 1) continue;
+      cols.push({ name: decl.slice(0, sp), type: decl.slice(sp + 1).trim() });
+    }
+    out[t] = cols;
+  }
+  return out;
+}
+
 async function assertRoomsExist(client, rooms) {
   const rs = await client.query({
     query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ({n:Array(String)})`,
@@ -330,7 +365,42 @@ async function ensureSchema(client) {
   // Deliberately NOT applied to the Merge rooms: they take their structure from a member
   // room at CREATE time and reject ALTER. A Merge room simply will not expose `origin`
   // until it is recreated, which costs nothing — nothing reads origin through it.
+  // EVERY column the template declares, not just `origin`.
+  //
+  // This used to add exactly one column, which meant any OTHER column missing from a room
+  // was invisible and lossy: `ship` writes the row, ClickHouse discards the field it has
+  // no column for, and the pass reports success. Measured — a room with `is_subagent`
+  // dropped shipped 85 rows with the value silently thrown away, while `ship`, `install`,
+  // `--ensure-schema` AND `doctor` all reported green. doctor's schema check counts ROOMS,
+  // not columns, so nothing anywhere noticed.
+  //
+  // It also made the grant a lie: rooms.js and INSTALL.md both say ALTER ADD COLUMN is
+  // granted "for ensureSchema's rollout", and no rollout of anything but `origin` existed.
+  const wantCols = templateColumns(tpl);
   for (const t of ROOM_TYPES) {
+    let have = new Set();
+    try {
+      const rs = await client.query({
+        query: 'SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {n:String}',
+        query_params: { n: rooms[t] }, format: 'JSONEachRow',
+      });
+      have = new Set((await rs.json()).map((r) => r.name));
+    } catch { /* unreadable: the checks above already reported why */ }
+    for (const col of (wantCols[t] || [])) {
+      if (have.size && have.has(col.name)) continue;
+      try {
+        await client.command({
+          query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
+          clickhouse_settings: { allow_experimental_full_text_index: 1 },
+        });
+        if (have.size) console.log(`[memhouse] added missing column ${rooms[t]}.${col.name}`);
+      } catch (e) {
+        const m = e && e.message ? e.message : String(e);
+        if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
+          console.error(`[memhouse] could not add ${rooms[t]}.${col.name}: ${m}`);
+        }
+      }
+    }
     try {
       await client.command({
         query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
@@ -786,8 +856,17 @@ async function main() {
   }
 }
 
-module.exports = { runShip, ensureSchema };
+module.exports = { runShip, ensureSchema, templateColumns };
 
 if (require.main === module) {
-  main().catch((e) => { console.error(`[memhouse] fatal: ${e.message}`); process.exit(1); });
+  main().catch((e) => {
+    // A permissions failure here is not a crash — the CALLER (install, doctor) catches the
+    // same condition and prints a refusal naming both routes. Printing "[memhouse] fatal:"
+    // first put a raw driver sentence above that refusal and made a handled case read like
+    // an unhandled one.
+    const m = e && e.message ? e.message : String(e);
+    if (/Not enough privileges|ACCESS_DENIED/i.test(m)) process.exit(1);
+    console.error(`[memhouse] fatal: ${m}`);
+    process.exit(1);
+  });
 }

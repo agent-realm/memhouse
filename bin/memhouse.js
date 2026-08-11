@@ -1316,7 +1316,9 @@ async function cmdDoctor() {
   try { rooms = await roomsFor(cfg); } catch (e) {
     add(false, 'room resolution', `${e.message} — fix the connection above first (memhouse install --url … --user … --password …)`);
   }
-  if (rooms) add(true, `rooms for '${rooms.member}'`);
+  // "rooms for X" means the NAMES resolved, not that the rooms exist — and it printed a
+  // green tick immediately above `✗ schema: 0/3 rooms`, contradicting the next line.
+  if (rooms) add(true, `member is '${rooms.member}' — rooms would be ${ROOM_TYPES.map((ty) => rooms[ty]).join(', ')}`);
   // Every check below reads a room NAME, so none of them can run without `rooms`.
   // Reaching into a null here is how doctor used to print a raw
   // "Cannot read properties of null (reading 'sessions')" as its hint — a stack-trace
@@ -1343,6 +1345,26 @@ async function cmdDoctor() {
           ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
           : `run: memhouse install, or as the owner: node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${rooms.member}`);
     } catch (e) { add(false, 'schema check', `${e.message} — run: memhouse install`); }
+    // Columns, not just rooms. A room with a column missing accepts every insert and
+    // discards that field — measured, 85 rows shipped with the value thrown away while
+    // ship, install, --ensure-schema and doctor all reported success, because this check
+    // counted rooms.
+    try {
+      const { templateColumns } = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'));
+      const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+      const want = templateColumns(tpl);
+      const missing = [];
+      for (const ty of ROOM_TYPES) {
+        const have = new Set((await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${rooms[ty]}'`, { database: '' })).map((r) => r.name));
+        if (!have.size) continue;
+        for (const c of (want[ty] || [])) if (!have.has(c.name)) missing.push(`${rooms[ty]}.${c.name}`);
+      }
+      add(missing.length === 0,
+        missing.length === 0 ? 'columns: every room matches the schema template'
+          : `columns: ${missing.length} missing — ${missing.slice(0, 6).join(', ')}${missing.length > 6 ? ' …' : ''}`,
+        'those fields are being discarded on every ship; heal with: memhouse ship --ensure-schema');
+    } catch (e) { add(false, 'columns', `could not compare against the template: ${e.message}`); }
+
     // The sorting keys the shipper refuses to write into. doctor is where a house should
     // learn it needs rebuilding, not the middle of a ship pass.
     try {

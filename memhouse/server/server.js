@@ -198,15 +198,25 @@ app.post('/api/query', route(async (req, res) => {
     if (c === "'" || c === '"' || c === '`') {
       const quote = c;
       i++;
+      let inner = '';
       while (i < sql.length) {
-        if (sql[i] === '\\') { i += 2; continue; }
+        if (sql[i] === '\\') { inner += sql.slice(i, i + 2); i += 2; continue; }
         if (sql[i] === quote) {
-          if (quote === "'" && sql[i + 1] === "'") { i += 2; continue; }  // '' escape
+          if (quote === "'" && sql[i + 1] === "'") { inner += "''"; i += 2; continue; }  // '' escape
           i++; break;
         }
+        inner += sql[i];
         i++;
       }
-      bare += quote + quote;
+      // Single quotes are STRING LITERALS in ClickHouse — erase them, so a transcript
+      // containing the text `url(` is not mistaken for a call.
+      //
+      // Double quotes and backticks are IDENTIFIERS. Erasing those was a bypass: ClickHouse
+      // accepts `FROM "url"('http://…')` and `` FROM `url`(…) `` as table functions —
+      // verified, all three spellings attempt the outbound connection — while the scanner
+      // reduced them to `""(` and saw no function name at all. Keep the identifier text so
+      // the name is still there to be checked.
+      bare += quote === "'" ? "''" : inner;
     } else if (two === '/*') {
       const end = sql.indexOf('*/', i + 2);
       i = end === -1 ? sql.length : end + 2;
