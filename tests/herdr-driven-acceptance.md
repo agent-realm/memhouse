@@ -328,10 +328,16 @@ before 0.4.6 installed onto one, so the install path was only ever exercised whe
 developer's environment already existed.
 
 ```bash
-ssh testbed 'bin/refresh-synced.sh'     # start of a test day
-# … run the install …
-ssh testbed 'bin/rollback-synced.sh'    # fresh machine in seconds, between runs
+# These run on THIS machine, not over ssh — they drive Proxmox on arf.
+cd ~/agent-realm/testbed
+bin/rollback-synced.sh                  # fresh machine in seconds, between runs
 ```
+
+`refresh-synced.sh` DELETES `snap-synced` before rebuilding it and only re-snapshots
+after a live `claude -p` auth check. If the synced credentials have expired, that check
+fails and the shared golden image is gone. Use `rollback-synced.sh` unless you
+specifically intend to rebuild, and check the credential age first. Three-week-old
+session data is still real session data.
 
 Install from the **published tarball**, not a checkout — `npm pack`, then
 `npm install -g <tgz> --allow-scripts=better-sqlite3`. That is what a user gets, and it

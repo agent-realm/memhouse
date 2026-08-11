@@ -379,73 +379,30 @@ async function getChats(opts = {}) {
   const rows = await q(sql, params);
   if (rows.length === 0) return [];
 
-  // Top model per rollup = most frequent model across THAT WRITER's messages
-  // (session_id alone would blend colliding sessions across members). Used for DISPLAY.
+  // ONE cost implementation, shared with the Costs page.
   //
-  // Cost is a different question and used to reuse this answer: the whole session's tokens
-  // were priced at the top model's rate, so a session of five cheap messages and one
-  // expensive one was billed entirely as the cheap model. Measured — one session read
-  // $10.02 on the Sessions page and $150 on the Costs page, against a true $150.0175, both
-  // rendered in the same dashboard with nothing saying they disagreed. Cost is now summed
-  // PER MODEL from the same rows, which is what getCostAnalytics already did.
-  const ids = rows.map(r => r.id);
-  const tmRows = await q(`
-    SELECT session_id, user_id, model,
-           count() AS cnt,
-           sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,
-           sum(cache_read_tokens) AS cache_r, sum(cache_write_tokens) AS cache_w
-    FROM {{messages}}
-    WHERE session_id IN {ids:Array(String)}
-    GROUP BY session_id, user_id, model`, { ids });
-  const topModelBySession = {};
+  // getChats used to compute its own, and the two disagreed three times running: first the
+  // whole session priced at its dominant model ($10.02 against $150), then sessions whose
+  // rows carry no model at all ($0 against $10.50), then sessions with zero tokens but
+  // non-zero chars ($0 against $0.033). Each round fixed the case that had been measured
+  // and left the next one. computePerChatCosts already handles all of them — the orphan
+  // bucket, the source-dominant and global-dominant fallbacks, the char estimate — so call
+  // it instead of growing a second copy of the same logic.
+  const perChat = await computePerChatCosts(f);
   const costBySession = {};
-  const bestCnt = {};
-  // Tokens on rows with no model — or an excluded placeholder — belong to the session's
-  // dominant model, which is what computeCostAnalytics does. Excluding them here is why
-  // the two pages disagreed a second time after the first fix: $2.00 against $4.00.
-  const orphan = {};
-  for (const r of tmRows) {
-    const k = `${r.session_id}::${r.user_id}`;
-    const cnt = Number(r.cnt) || 0;
-    const excluded = !r.model || EXCLUDED_MODEL_SET.has(r.model);
-    if (excluded) {
-      const o = orphan[k] || (orphan[k] = { in: 0, out: 0, cr: 0, cw: 0 });
-      o.in += Number(r.in_tok) || 0; o.out += Number(r.out_tok) || 0;
-      o.cr += Number(r.cache_r) || 0; o.cw += Number(r.cache_w) || 0;
-      continue;
-    }
-    if (cnt > (bestCnt[k] || 0)) { bestCnt[k] = cnt; topModelBySession[k] = normalizeModelName(r.model) || r.model; }
-    // calculateCost normalizes internally, so the raw name is correct here — only the
-    // DISPLAY name above is canonicalised.
-    const c = calculateCost(r.model, Number(r.in_tok) || 0, Number(r.out_tok) || 0,
-      Number(r.cache_r) || 0, Number(r.cache_w) || 0);
-    // null = unpriced model. Keep it distinguishable from a real zero so the row can say
-    // "partly unpriced" rather than quietly under-reporting.
-    const e = costBySession[k] || (costBySession[k] = { total: 0, unpriced: false });
-    if (c === null) e.unpriced = true; else e.total += c;
+  const topModelBySession = {};
+  for (const r of perChat) {
+    // computePerChatCosts already emits the composite key as `id`.
+    const k = r.id;
+    costBySession[k] = { total: r.totalCost, unpriced: !!r.hasUnpriced };
+    if (r.byModel[0]) topModelBySession[k] = r.byModel[0].model;
   }
 
   return rows.map(r => {
-    const topModel = topModelBySession[`${r.id}::${r.user_id}`] || null;
-    let inTok = Number(r._inTok) || 0, outTok = Number(r._outTok) || 0;
-    if (inTok === 0 && outTok === 0 && ((r._uChars || 0) > 0 || (r._aChars || 0) > 0)) {
-      inTok = Math.round((r._uChars || 0) / 4);
-      outTok = Math.round((r._aChars || 0) / 4);
-    }
-    // Summed per model above. The char-estimate fallback below only applies when the row
-    // carries no token counts at all, in which case there is nothing per-model to sum.
     const k = `${r.id}::${r.user_id}`;
+    const topModel = topModelBySession[k] || null;
     const summed = costBySession[k];
-    // Orphan tokens priced at the dominant model, matching the Costs page.
-    const o = orphan[k];
-    const orphanCost = (o && topModel) ? (calculateCost(topModel, o.in, o.out, o.cr, o.cw) || 0) : 0;
-    // The char-estimate fallback applies when the row carries no REAL token counts, which a
-    // summed total of 0 does not rule out — gating on `summed` being absent meant a session
-    // whose only model rows had zero tokens got $0 here and a real number on the Costs page.
-    const hasTokens = (Number(r._inTok) || 0) > 0 || (Number(r._outTok) || 0) > 0;
-    const cost = (summed || o)
-      ? (summed ? summed.total : 0) + orphanCost
-      : (!hasTokens && topModel ? (calculateCost(topModel, inTok, outTok, Number(r._cacheR) || 0, Number(r._cacheW) || 0) || 0) : 0);
+    const cost = summed ? summed.total : 0;
     return {
       // Composite API id: rollups are keyed (session_id, user_id), so the id a
       // client clicks must pin BOTH — otherwise opening one of two colliding
@@ -891,15 +848,19 @@ async function computePerChatCosts(f) {
       if (srcDom) add(srcDom, c.ti, c.to_, c.cr, c.cw);
     }
     let totalCost = 0; const byModel = [];
+    // A model with no price contributes nothing to totalCost, so the number a session
+    // reports silently omits part of itself. Carry the fact alongside the number.
+    let hasUnpriced = false;
     for (const [model, tok] of Object.entries(tokenMap)) {
       const cost = calculateCost(model, tok.input, tok.output, tok.cacheRead, tok.cacheWrite);
       if (cost !== null) { totalCost += cost; byModel.push({ model, cost }); }
+      else hasUnpriced = true;
     }
     byModel.sort((a, b) => b.cost - a.cost);
     out.push({
       id: key, user: c.user_id, source: c.source, name: c.name, folder: c.folder,
       last_updated_at: c.last_updated_at, created_at: c.created_at,
-      msgs: Number(c.msgs), month: c.month, totalCost, byModel,
+      msgs: Number(c.msgs), month: c.month, totalCost, byModel, hasUnpriced,
     });
   }
   return out;
@@ -1007,4 +968,7 @@ module.exports = {
   getProjects, getDeepAnalytics, getToolCalls,
   estimateCosts, getCostAnalytics,
   rawQuery, schema,
+  // Used only by the server's own guard to learn which database names are real. Not
+  // reachable from any route.
+  rawQueryUnguarded: (sql) => q(sql),
 };

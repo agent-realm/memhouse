@@ -238,7 +238,11 @@ function install({ shipJs, envFile, logDir, interval = 300, home = null, force =
       execFileSync('systemctl', ['--user', 'restart', unit]);
     }
     const warn = lingerEnabled() ? null
-      : `systemd --user services stop at logout. Run: loginctl enable-linger ${os.userInfo().username}`;
+      // Hedged, like the deploy --local warning, and for the same measured reason: whether
+      // a --user unit survives logout depends on logind's KillUserProcesses, which Ubuntu
+      // 24.04 sets to no. Stating it as a certainty on a distro where it is false costs
+      // credibility on everything else the command says.
+      : `systemd --user services MAY stop at logout — it depends on your distro (Ubuntu 24.04 keeps them). To make it moot: loginctl enable-linger ${os.userInfo().username}`;
     return { ok: true, kind, path: p, warn };
   }
 

@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
+const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS, installCommand } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -149,6 +149,8 @@ function requireConfig(cfg, what) {
 function childEnv(cfg) {
   return {
     ...process.env,
+    // Set only by the install path, which prints its own refusal for this case.
+    ...(cfg._quietDenied ? { MEMHOUSE_QUIET_DENIED: '1' } : {}),
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
   };
@@ -432,7 +434,7 @@ function printAdapterErrors(errors) {
   if (blocked.length) {
     console.log(warn(`${blocked.length} adapter${blocked.length > 1 ? 's' : ''} skipped — better-sqlite3 has no native binding: ${blocked.map((e) => e.source).join(', ')}`));
     console.log('  their sessions are NOT being shipped. npm >= 12 blocks install scripts by default; rebuild with:');
-    console.log('    npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log('    ${installCommand()}');
     console.log('  (from a checkout: npm install --no-audit --no-fund, which package.json already allows)');
   }
   for (const e of other) console.log(warn(`${e.source.padEnd(16)} skipped: ${e.message}`));
@@ -551,9 +553,10 @@ endpoint does not answer. Do NOT reconfigure before finding out why.
   } else if (houseUp) {
     plan = `A ClickHouse is already reachable at \`${reachable[0].url}\`. Use it.
 
-1. \`npm install -g memhouse --allow-scripts=better-sqlite3\`
-   The flag is not optional — six adapters (cursor, zed, opencode, goose, windsurf,
-   antigravity) read SQLite stores and silently drop out without the native build.
+1. \`${installCommand()}\`
+   The flag is not optional — five adapters (cursor, zed, opencode, goose, antigravity)
+   read SQLite stores and silently drop out without the native build. (windsurf needs it
+   too but is excluded upstream, so discover names five; the two numbers agree.)
 2. Ask the user for the ClickHouse username and password for that endpoint.
 3. \`memhouse install --url ${reachable[0].url} --user <user> --password <pw>\`
    If they hold admin on it and want memhouse to create the user, database, rooms and
@@ -566,8 +569,8 @@ endpoint does not answer. Do NOT reconfigure before finding out why.
     plan = `There is no ClickHouse to point at, but **${engines.join(' and ')}** is available,
 so memhouse can run one:
 
-1. \`npm install -g memhouse --allow-scripts=better-sqlite3\`
-   The flag is not optional — six adapters read SQLite stores and silently drop out
+1. \`${installCommand()}\`
+   The flag is not optional — five adapters read SQLite stores and silently drop out
    without the native build.
 2. \`memhouse deploy --local\`
    This starts a loopback-only ClickHouse, generates a credential, installs, creates the
@@ -575,7 +578,7 @@ so memhouse can run one:
 3. \`memhouse start\`.
 
 ${process.platform === 'linux' && engines.includes('podman')
-    ? 'On Linux with rootless podman the container stops at logout unless lingering is on.\nIf memhouse warns about this, run what it prints (`loginctl enable-linger <user>`)\nand tell the user why it matters.' : ''}`;
+    ? 'On Linux with rootless podman the container MAY stop at logout — it depends on the\ndistro (Ubuntu 24.04 keeps it). If memhouse warns about this, run what it prints\n(`loginctl enable-linger <user>`) and tell the user why it matters.' : ''}`;
   } else {
     plan = `There is no ClickHouse reachable and no container engine to run one with. You
 cannot finish this install alone — say so rather than improvising.
@@ -584,7 +587,7 @@ Tell the user they need one of:
 - a ClickHouse they already run (Cloud, a server, a kernel house) plus its credentials;
 - docker or podman installed, after which \`memhouse deploy --local\` does everything.
 
-You can still do the harmless half now: \`npm install -g memhouse --allow-scripts=better-sqlite3\`,
+You can still do the harmless half now: \`${installCommand()}\`,
 then \`memhouse discover\` to show them what would be shipped once a house exists.`;
   }
 
@@ -721,7 +724,7 @@ function memberSql(db, member, password) {
 SET allow_experimental_full_text_index = 1;
 
 CREATE DATABASE IF NOT EXISTS ${db};
-CREATE USER ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
+CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
 
 ${rooms.trim()}
 
@@ -736,6 +739,15 @@ ${grants}
 ${merge.trim()}
 
 ${mergeGrants}
+
+-- Resource ceilings. Confidentiality isolation is a grant that is absent; this is the
+-- availability half, and it did not exist until 0.4.7 — a member could raise
+-- max_memory_usage, zero max_execution_time and take a shared server down for everyone.
+-- CONST, not MAX: a plain default is advisory, and MAX is not enough either because 0 means
+-- UNLIMITED in ClickHouse and 0 satisfies any MAX. Measured — with a MAX ceiling in force,
+-- SETTINGS max_memory_usage = 0 was accepted and the ceiling was gone.
+CREATE SETTINGS PROFILE OR REPLACE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
+ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}';
 `;
 }
 
@@ -949,7 +961,7 @@ async function cmdInstall({ interactive }) {
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
     console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
     console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
-    console.log('     node memhouse/per-member/provision.js --member <name> --merge');
+    console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member <name> --merge`);
     return 0;
   }
 
@@ -1052,8 +1064,10 @@ async function cmdInstall({ interactive }) {
     // clean explanation is how a clear message gets missed.
     const legacy = await looksLikePre040(cfg);
     if (legacy.length) { reportPre040(cfg, r.member, legacy); return 1; }
-    // Try to mint them as ourselves before asking anyone for anything.
-    run(SHIP_JS, ['--ensure-schema'], cfg);
+    // Try to mint them as ourselves before asking anyone for anything. This is the ONE
+    // call site where a permission refusal is expected and already explained below, so
+    // the child is told to stay quiet about it rather than print above our message.
+    run(SHIP_JS, ['--ensure-schema'], { ...cfg, _quietDenied: true });
     try { have = await present(); } catch { /* reported below */ }
   }
   const missing = want.filter((n) => !have.includes(n));
@@ -1091,6 +1105,7 @@ async function cmdInstall({ interactive }) {
 
 async function cmdOnboard() {
   ONBOARDING = true;
+  let deployed = false;
   console.log(`memhouse ${PKG.version} — onboarding\n`);
   const found = await cmdDiscover();
   console.log('');
@@ -1110,7 +1125,14 @@ async function cmdOnboard() {
         // process reading its own flags. Reaching into it with a synthesised flag object
         // is how one of them silently stops applying.
         const rc = spawnSync(process.execPath, [__filename, 'deploy', '--local'], { stdio: 'inherit' });
-        return rc.status === 0 ? 0 : (rc.status || 1);
+        if (rc.status !== 0) return rc.status || 1;
+        // Fall through to the daemon prompt below rather than returning. This branch —
+        // "no ClickHouse yet", the README's headline scenario — used to return here, so
+        // `onboard` skipped its own last step: HELP says onboard is
+        // discover → configure → ship → START, the README says it "ships, and starts the
+        // dashboard", and doctor then exited 1 on a fresh, entirely successful install
+        // because neither daemon was running. Measured on a clean machine.
+        deployed = true;
       }
     } else {
       console.log(warn('No reachable ClickHouse found, and neither docker nor podman is on PATH.'));
@@ -1118,8 +1140,12 @@ async function cmdOnboard() {
     }
     console.log('');
   }
-  const code = await cmdInstall({ interactive: true });
-  if (code !== 0) return code;
+  // `deploy --local` already installed and shipped, so asking the install questions again
+  // would prompt for a house it just built.
+  if (!deployed) {
+    const code = await cmdInstall({ interactive: true });
+    if (code !== 0) return code;
+  }
   const yn = (await ask('Start the daemons now? (Y/n)', 'Y')).toLowerCase();
   if (yn !== 'n' && yn !== 'no') await cmdStart();
   return 0;
@@ -1304,7 +1330,9 @@ async function cmdDoctor() {
   try { rooms = await roomsFor(cfg); } catch (e) {
     add(false, 'room resolution', `${e.message} — fix the connection above first (memhouse install --url … --user … --password …)`);
   }
-  if (rooms) add(true, `rooms for '${rooms.member}'`);
+  // "rooms for X" means the NAMES resolved, not that the rooms exist — and it printed a
+  // green tick immediately above `✗ schema: 0/3 rooms`, contradicting the next line.
+  if (rooms) add(true, `member is '${rooms.member}' — rooms would be ${ROOM_TYPES.map((ty) => rooms[ty]).join(', ')}`);
   // Every check below reads a room NAME, so none of them can run without `rooms`.
   // Reaching into a null here is how doctor used to print a raw
   // "Cannot read properties of null (reading 'sessions')" as its hint — a stack-trace
@@ -1331,6 +1359,49 @@ async function cmdDoctor() {
           ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
           : `run: memhouse install, or as the owner: node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${rooms.member}`);
     } catch (e) { add(false, 'schema check', `${e.message} — run: memhouse install`); }
+    // Columns, not just rooms. A room with a column missing accepts every insert and
+    // discards that field — measured, 85 rows shipped with the value thrown away while
+    // ship, install, --ensure-schema and doctor all reported success, because this check
+    // counted rooms.
+    try {
+      const { templateColumns } = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'));
+      const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+      const want = templateColumns(tpl);
+      // Names AND types AND the MATERIALIZED kind. Comparing names alone left every other
+      // kind of drift invisible, with measured consequences: a `UInt64` column narrowed to
+      // `Int8` stored 200 as **-56**, silently, so token counts and every cost derived
+      // from them were wrong; and `text_ngram` without its MATERIALIZED clause was empty
+      // on all 33 rows, so the FTS column the search skill queries had simply stopped
+      // being populated. Both read `✓ columns: every room matches the schema template`.
+      const missing = [];
+      const wrong = [];
+      let roomsSeen = 0;
+      for (const ty of ROOM_TYPES) {
+        const cols = await chRows(cfg, `SELECT name, type, default_kind FROM system.columns WHERE database = '${cfg.db}' AND table = '${rooms[ty]}'`, { database: '' });
+        if (!cols.length) continue;
+        roomsSeen++;
+        const byName = new Map(cols.map((r) => [r.name, r]));
+        for (const c of (want[ty] || [])) {
+          const got = byName.get(c.name);
+          if (!got) { missing.push(`${rooms[ty]}.${c.name}`); continue; }
+          // The template's declaration is `<type> [DEFAULT x | MATERIALIZED x]`; compare
+          // the type word and, when the template says MATERIALIZED, that the column still is.
+          const wantType = c.type.replace(/\s+(DEFAULT|MATERIALIZED|ALIAS|EPHEMERAL)\b[\s\S]*$/i, '').trim();
+          const wantKind = /\bMATERIALIZED\b/i.test(c.type) ? 'MATERIALIZED' : null;
+          if (wantType && got.type !== wantType) wrong.push(`${rooms[ty]}.${c.name} is ${got.type}, template says ${wantType}`);
+          else if (wantKind && got.default_kind !== 'MATERIALIZED') wrong.push(`${rooms[ty]}.${c.name} lost its MATERIALIZED clause`);
+        }
+      }
+      const bad2 = missing.length + wrong.length;
+      add(bad2 === 0 && roomsSeen === ROOM_TYPES.length,
+        roomsSeen !== ROOM_TYPES.length ? `columns: only ${roomsSeen}/${ROOM_TYPES.length} rooms exist, so the template comparison is incomplete`
+          : bad2 === 0 ? 'columns: every room matches the schema template (name, type and kind)'
+            : `columns: ${missing.length} missing, ${wrong.length} wrong — ${[...missing, ...wrong].slice(0, 4).join('; ')}${bad2 > 4 ? ' …' : ''}`,
+        missing.length && !wrong.length
+          ? 'those fields are being discarded on every ship; heal with: memhouse ship --ensure-schema'
+          : 'a changed type silently corrupts values and a lost MATERIALIZED clause stops a column being computed; the room has to be rebuilt by its owner');
+    } catch (e) { add(false, 'columns', `could not compare against the template: ${e.message}`); }
+
     // The sorting keys the shipper refuses to write into. doctor is where a house should
     // learn it needs rebuilding, not the middle of a ship pass.
     try {
@@ -1368,12 +1439,19 @@ async function cmdDoctor() {
       // instead, and say how many: a row with an empty user_id is invisible to every
       // identity-bound path at once (loadExisting's WHERE, the shipper's clear, reset's
       // DELETE), so its owner cannot even remove it.
-      const u = (await chRows(cfg, `SELECT count() AS c, countIf(user_id = '') AS blank FROM ${rooms.sessions} FINAL`))[0] || {};
-      const total = Number(u.c || 0); const blank = Number(u.blank || 0);
+      // All three rooms. This read only `sessions`, and the two it skipped are where the
+      // shipper writes almost everything — measured, a messages row with an empty user_id
+      // sat there while this printed "all attributed". An unattributed row is invisible to
+      // every identity-bound path at once, including its owner's own reset.
+      let total = 0; let blank = 0;
+      for (const ty of ROOM_TYPES) {
+        const r = (await chRows(cfg, `SELECT count() AS c, countIf(user_id = '') AS blank FROM ${rooms[ty]} FINAL`))[0] || {};
+        total += Number(r.c || 0); blank += Number(r.blank || 0);
+      }
       add(blank === 0,
         total === 0 ? 'identity stamping (no rows yet)'
-          : blank === 0 ? `identity stamping (${total} rows, all attributed)`
-            : `identity stamping: ${blank} of ${total} session rows have an empty user_id`,
+          : blank === 0 ? `identity stamping (${total} rows across all three rooms, all attributed)`
+            : `identity stamping: ${blank} of ${total} rows have an empty user_id`,
         'a writer used async_insert=1 — the MATERIALIZED currentUser() stamp does not run during an async flush');
     } catch { add(false, 'identity stamping', 'schema missing? run: memhouse install'); }
   }
@@ -1431,8 +1509,13 @@ async function cmdDoctor() {
     const blocked = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
     const failed = adapterErrors.map((e) => e.source);
     add(adapterErrors.length === 0,
-      `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''}`,
-      blocked.length ? 'npm install -g memhouse --allow-scripts=better-sqlite3'
+      // "visible locally" is what the ADAPTERS see; `stats` reports what the house HOLDS,
+      // and the two differ legitimately — a session that parses to zero messages is
+      // visible and not worth a row. Saying "visible locally" and leaving the reader to
+      // find the other number elsewhere (161 here, 156 there, on a real machine) gives
+      // them no way to tell "correctly skipped" from "silently dropped".
+      `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''} — compare with what the house holds: memhouse stats`,
+      blocked.length ? installCommand()
         : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
           : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
@@ -1653,11 +1736,18 @@ function cmdUninstall() {
 
 // ── dispatch ────────────────────────────────────────────────────────────────────
 (async () => {
+  // Single-dash flags are not parsed (only `--x`), so `-v` arrives as a positional. Both
+  // spellings are what people type for a version.
+  if (flags.version === true || process.argv.slice(2).some((a) => a === '-v' || a === '-V')) {
+    console.log(PKG.version); return;
+  }
   const cfg = resolveConfig();
   if (legacySoloGuard()) { process.exitCode = 2; return; }
 
   switch (cmd) {
     case null: case 'help': console.log(HELP); break;
+    // `--version` and `-v` land here as flags, not as the `version` verb, so they used to
+    // fall through to HELP: forty lines of help and exit 0 is not what --version means.
     case 'version': console.log(PKG.version); break;
     case 'discover': await cmdDiscover(); break;
     case 'onboard': process.exitCode = await cmdOnboard(); break;
@@ -1774,6 +1864,23 @@ function cmdUninstall() {
             process.exitCode = 2; break;
           }
           console.log(warn(`a shipper service is installed but points at ${svcCfg.url} — leaving it alone`));
+        }
+        // Ask. This removes the data VOLUME as well as the container — measured, 810 MB of
+        // a real house — and it was the only destructive command in the product that did
+        // not confirm, while `reset`, which merely re-ships, does. `prompt --install` had
+        // to tell agents in prose not to run it.
+        if (flags.yes !== true) {
+          const held = await (async () => {
+            try {
+              const c = resolveConfig();
+              const n = await chRows(c, `SELECT count() AS n FROM ${(await roomsFor(c)).messages} FINAL`);
+              return Number(n[0]?.n || 0);
+            } catch { return null; }
+          })();
+          console.log(warn('this removes the container AND its data volume — the house and everything in it.'));
+          if (held) console.log(`  ${held.toLocaleString()} messages are stored there. Re-shipping recovers only what the adapters can still see.`);
+          const a = (await ask('Remove it? (yes/no)', 'no')).toLowerCase();
+          if (a !== 'yes' && a !== 'y') { console.log('aborted'); process.exitCode = 1; break; }
         }
         const r = dep.down();
         console.log(r.ok ? ok(`local ClickHouse removed (${r.engine}${r.volumeRemoved ? ', volume included' : ''})`) : bad(r.msg));
@@ -1945,12 +2052,18 @@ function cmdUninstall() {
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));
-      // A ROOTLESS container lives in the user's systemd slice, and that slice is torn
-      // down at logout unless lingering is enabled — the container takes a SIGTERM and
-      // the house goes down with it. Measured on a testbed VM: `deploy --local` over ssh
-      // shipped 211 sessions, the ssh session ended, and the container was
-      // `Exited (143)` twenty seconds later with `Linger=no`. The volume survives, so
-      // nothing is lost, but the house is gone with no explanation anywhere.
+      // A ROOTLESS container lives in the user's systemd slice, which MAY be torn down at
+      // logout — if so the container takes a SIGTERM and the house goes with it. The
+      // volume survives, so nothing is lost, but the house is gone with no explanation.
+      //
+      // Whether it happens depends on logind's KillUserProcesses. Measured once on a
+      // testbed VM as `Exited (143)` twenty seconds after the ssh session ended; measured
+      // again later on Ubuntu 24.04, which ships KillUserProcesses=no, and the container
+      // and the user manager both survived 44 seconds with zero sessions and Linger=no.
+      // So the warning is conditional, and it is worded as a possibility rather than a
+      // certainty: enabling lingering is harmless and makes it moot either way, but
+      // telling a user to fix a problem their distro does not have costs credibility on
+      // every other thing this command says.
       //
       // `service install` already detects exactly this for its own unit. The container
       // needs the same check, and podman is the case that matters: it is rootless by
@@ -1960,11 +2073,25 @@ function cmdUninstall() {
         let lingering = true;
         try { lingering = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).lingerEnabled(); } catch { /* assume fine */ }
         if (!lingering) {
-          console.log(warn('rootless podman: this container stops when you log out (lingering is off).'));
-          console.log(`     loginctl enable-linger ${os.userInfo().username}`);
-          console.log('  Until then, after a logout: memhouse deploy --local   (the data volume persists)');
+          console.log(warn('rootless podman: this container MAY stop when you log out (lingering is off).'));
+          console.log('  Whether it does depends on your distro — Ubuntu 24.04 keeps it, others kill it.');
+          console.log(`  To make it moot:  loginctl enable-linger ${os.userInfo().username}`);
+          // Repeat the port that was actually used. cmdPlugins already knows to echo back
+          // the --target it was given; this line dropped --house-port, so following it
+          // would stand the house up somewhere else.
+          console.log(`  If it does stop: memhouse deploy --local${flags['house-port'] ? ` --house-port ${flags['house-port']}` : ''}   (the data volume persists)`);
         }
       }
+      // Say what this credential is. `deploy --local` stands up a house you own, so the
+      // member IS the superuser — SHOW GRANTS for it includes CREATE USER, FILE, URL,
+      // REMOTE and S3, all WITH GRANT OPTION, and `service install` inlines it into a
+      // systemd unit. That is a defensible position for a single-owner house (DESIGN.md
+      // anticipates it) and it is NOT the narrow set INSTALL.md's grant-set argument
+      // describes. A user who later adds a second member should know which house they
+      // have.
+      console.log(warn(`this house is yours alone: '${'memhouse_root'}' is its superuser, and that is the credential being saved`));
+      console.log('  Adding a second person later? Give them their own member instead:');
+      console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member <name> --merge`);
       flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
       flags.db = targetDb;
       flags.yes = true;

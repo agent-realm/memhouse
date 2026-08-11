@@ -15,6 +15,19 @@ That is the whole install. `onboard` finds your editors, sets up a house, ships,
 and starts the dashboard. **Don't drop `--allow-scripts`** — see
 [below](#the-allow-scripts-flag).
 
+**On most Linux distros that first line needs `sudo`.** A distro-packaged Node puts
+its global prefix under `/usr`, which you do not own, so npm stops with `EACCES`.
+That is the single most likely place a first install stalls — measured on a clean
+Ubuntu machine:
+
+```bash
+ls -ld "$(npm prefix -g)"     # root-owned? use sudo. Owned by you? do NOT — see EACCES below
+sudo npm install -g memhouse --allow-scripts=better-sqlite3
+```
+
+If the prefix is yours (Homebrew, fnm, nvm, volta), `sudo` is the wrong fix and
+makes it worse — [EACCES on install](#eacces-on-install) tells them apart.
+
 ## No ClickHouse yet?
 
 `onboard` offers to run one for you if docker or podman is present:

@@ -12,8 +12,9 @@ If the user gives SQL, run it (append `FORMAT PrettyCompact` if no FORMAT
 given). If they give a question, write the SQL yourself from the schema below.
 
 **Read-only rule:** the shipper (`ship.js`) is the only writer. Never INSERT/ALTER/DROP
-from here. A member credential normally holds `ALL` on its **own three rooms** — enough
-to destroy that memory — and nothing at all on anyone else's. Reads need no scoping
+from here. A member credential holds `SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD
+COLUMN, OPTIMIZE` on its **own three rooms** — enough to destroy the rows, though not
+the rooms — and nothing at all on anyone else's. Reads need no scoping
 clause: the rooms you can name are already only yours, and there is no policy to work
 around.
 

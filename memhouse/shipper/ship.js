@@ -43,7 +43,7 @@ try { ({ createClient, ClickHouseLogLevel } = require('@clickhouse/client')); }
 catch {
   console.error("[memhouse] dependency '@clickhouse/client' is not installed.");
   console.error(`[memhouse] from a checkout:     npm install --prefix ${require('path').join(__dirname, '..', '..')}`);
-  console.error('[memhouse] from an npm install: npm install -g memhouse --allow-scripts=better-sqlite3');
+  console.error(`[memhouse] from an npm install: ${require('../per-member/rooms').installCommand()}`);
   process.exit(2);
 }
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
@@ -250,6 +250,76 @@ function makeClient() {
  * `doctor` both handle the identical situation properly; ship was the one that did not.
  * It is also the documented 0.3.x-upgrade symptom, which INSTALL.md claims is named.
  */
+/**
+ * The columns each room type declares in the template, as {name, type} — the source of
+ * truth for what a room must have. Parsed from the same file that creates them, so a
+ * column added there is rolled out without anyone remembering to write a migration.
+ *
+ * MATERIALIZED and DEFAULT clauses are kept: `user_id String MATERIALIZED currentUser()`
+ * has to be added exactly that way or the identity stamp does not happen.
+ */
+function templateColumns(tpl) {
+  const out = {};
+  for (const t of ROOM_TYPES) {
+    const re = new RegExp(`CREATE TABLE IF NOT EXISTS ${t}_\\{\\{MEMBER\\}\\}\\s*\\(([\\s\\S]*?)\\n\\)`, 'm');
+    const m = tpl.match(re);
+    if (!m) continue;
+    const cols = [];
+    let depth = 0, buf = '';
+    for (const raw of m[1].split('\n')) {
+      const line = raw.replace(/--.*$/, '').trim();
+      if (!line) continue;
+      buf += (buf ? ' ' : '') + line;
+      depth += (line.match(/\(/g) || []).length - (line.match(/\)/g) || []).length;
+      if (depth > 0 || !buf.endsWith(',')) { if (depth > 0) continue; }
+      const decl = buf.replace(/,$/, '').trim();
+      buf = '';
+      // Skip index/constraint declarations — only column definitions here.
+      if (/^(INDEX|CONSTRAINT|PROJECTION|PRIMARY\s+KEY)\b/i.test(decl)) continue;
+      const sp = decl.indexOf(' ');
+      if (sp < 1) continue;
+      cols.push({ name: decl.slice(0, sp), type: decl.slice(sp + 1).trim() });
+    }
+    out[t] = cols;
+  }
+  return out;
+}
+
+/**
+ * Say so, every pass, when a room is missing a column.
+ *
+ * `ship` does not call ensureSchema — only `--ensure-schema` and `install` do — so a room
+ * that has drifted keeps accepting inserts and keeps discarding that field, silently, for
+ * as long as nobody thinks to run the healer. Measured: 85 rows shipped with the value
+ * thrown away and four surfaces reporting success.
+ *
+ * A WARNING rather than a refusal: the rows that do fit are still worth having, and
+ * refusing would stop all shipping over one column. One extra query per room per pass.
+ */
+async function warnMissingColumns(client, rooms) {
+  let tpl;
+  try { tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8'); }
+  catch { return; }
+  const want = templateColumns(tpl);
+  const missing = [];
+  for (const t of ROOM_TYPES) {
+    try {
+      const rs = await client.query({
+        query: 'SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {n:String}',
+        query_params: { n: rooms[t] }, format: 'JSONEachRow',
+      });
+      const have = new Set((await rs.json()).map((r) => r.name));
+      if (!have.size) continue;
+      for (const c of (want[t] || [])) if (!have.has(c.name)) missing.push(`${rooms[t]}.${c.name}`);
+    } catch { /* unreadable rooms are assertRoomsExist's problem */ }
+  }
+  if (missing.length) {
+    console.error(`[memhouse] WARNING: ${missing.length} column(s) missing from your rooms — those fields are being DISCARDED on every pass:`);
+    console.error(`[memhouse]   ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? ` … and ${missing.length - 8} more` : ''}`);
+    console.error('[memhouse]   heal them with: memhouse ship --ensure-schema');
+  }
+}
+
 async function assertRoomsExist(client, rooms) {
   const rs = await client.query({
     query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ({n:Array(String)})`,
@@ -298,7 +368,7 @@ async function assertOriginKeyed(client, rooms) {
       + wrong.map((s) => `    ${s}`).join('\n')
       + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
       + '\n    RENAME TABLE <room> TO <room>_old;'
-      + '\n    -- recreate from memhouse/per-member/schema-member.sql.tpl'
+      + `\n    -- recreate from ${path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl')}`
       + '\n    INSERT INTO <room> SELECT * FROM <room>_old;'
       + '\n  (add `, \'ship\' AS origin` to the SELECT only if <room>_old has no origin column)'
       + '\n  A house with no imported rows can also just be re-shipped from scratch.');
@@ -312,25 +382,82 @@ async function ensureSchema(client) {
   const sql = tpl.replaceAll('{{MEMBER}}', member);
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
+  // A MEMBER holds no CREATE TABLE — that is the point of the narrowed grant set — and
+  // ClickHouse checks the grant BEFORE it checks existence, so `IF NOT EXISTS` does not
+  // save these. Running the CREATEs in a bare loop meant `--ensure-schema` died on the
+  // FIRST statement for the very user who is told to run it, and never reached the ADD
+  // COLUMN rollout that is the whole reason to run it. Skip what we may not do and carry
+  // on; the rooms either already exist (assertRoomsExist says so) or an owner has to
+  // create them, which install already explains.
+  let denied = 0;
   for (const q of stmts) {
-    await client.command({
-      query: q,
-      // allow_experimental_full_text_index: on 25.x the messages text indexes
-      // are gated behind this flag (SUPPORT_IS_DISABLED without it); 26.x+
-      // accepts it as a no-op. Query-scoped, so no server config or admin
-      // rights are needed. Verified on 25.11 and 26.7.
-      clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
-    });
+    try {
+      await client.command({
+        query: q,
+        // allow_experimental_full_text_index: on 25.x the messages text indexes
+        // are gated behind this flag (SUPPORT_IS_DISABLED without it); 26.x+
+        // accepts it as a no-op. Query-scoped, so no server config or admin
+        // rights are needed. Verified on 25.11 and 26.7.
+        clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
+      });
+    } catch (e) {
+      const m = e && e.message ? e.message : String(e);
+      if (/Not enough privileges|ACCESS_DENIED/i.test(m)) { denied++; continue; }
+      throw e;
+    }
+  }
+  if (denied) {
+    console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);
+    console.error('[memhouse] creating or replacing a ROOM is the house owner\'s job; adding a missing COLUMN is not.');
   }
   // A house created before origin existed has no such column, and the clear binds it —
   // an unguarded DELETE there would be the old destructive behaviour, and a guarded one
   // would error. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
   // pre-existing row reads as 'ship', which is what it was.
   //
-  // Deliberately NOT applied to the Merge rooms: they take their structure from a member
-  // room at CREATE time and reject ALTER. A Merge room simply will not expose `origin`
-  // until it is recreated, which costs nothing — nothing reads origin through it.
+  // Deliberately NOT applied to the Merge rooms — but not for the reason this comment used
+  // to give. It claimed they "reject ALTER"; they do not, on either 26.7 or 25.11, where
+  // `ALTER TABLE all_messages ADD COLUMN …` succeeds. The real reason is that a Merge room
+  // is a VIEW over whatever `^messages_` matches: a column added to it is cosmetic, is not
+  // backed by the underlying rooms, and drifts from them the moment a member is added. It
+  // takes its structure from a member room at CREATE time, so recreating it is the only
+  // correct way to change it — and nothing reads `origin` through it anyway.
+  // EVERY column the template declares, not just `origin`.
+  //
+  // This used to add exactly one column, which meant any OTHER column missing from a room
+  // was invisible and lossy: `ship` writes the row, ClickHouse discards the field it has
+  // no column for, and the pass reports success. Measured — a room with `is_subagent`
+  // dropped shipped 85 rows with the value silently thrown away, while `ship`, `install`,
+  // `--ensure-schema` AND `doctor` all reported green. doctor's schema check counts ROOMS,
+  // not columns, so nothing anywhere noticed.
+  //
+  // It also made the grant a lie: rooms.js and INSTALL.md both say ALTER ADD COLUMN is
+  // granted "for ensureSchema's rollout", and no rollout of anything but `origin` existed.
+  const wantCols = templateColumns(tpl);
   for (const t of ROOM_TYPES) {
+    let have = new Set();
+    try {
+      const rs = await client.query({
+        query: 'SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {n:String}',
+        query_params: { n: rooms[t] }, format: 'JSONEachRow',
+      });
+      have = new Set((await rs.json()).map((r) => r.name));
+    } catch { /* unreadable: the checks above already reported why */ }
+    for (const col of (wantCols[t] || [])) {
+      if (have.size && have.has(col.name)) continue;
+      try {
+        await client.command({
+          query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
+          clickhouse_settings: { allow_experimental_full_text_index: 1 },
+        });
+        if (have.size) console.log(`[memhouse] added missing column ${rooms[t]}.${col.name}`);
+      } catch (e) {
+        const m = e && e.message ? e.message : String(e);
+        if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
+          console.error(`[memhouse] could not add ${rooms[t]}.${col.name}: ${m}`);
+        }
+      }
+    }
     try {
       await client.command({
         query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
@@ -357,6 +484,7 @@ async function ensureSchema(client) {
 
   await assertRoomsExist(client, rooms);
   await assertOriginKeyed(client, rooms);
+  await warnMissingColumns(client, rooms);
   return stmts.length;
 }
 
@@ -547,6 +675,7 @@ async function runShip(client, opts = {}) {
   const rooms = await resolveRooms(client);
   await assertRoomsExist(client, rooms);
   await assertOriginKeyed(client, rooms);
+  await warnMissingColumns(client, rooms);
   const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
 
@@ -671,7 +800,7 @@ function reportAdapterErrors(warned) {
   const noBinding = errors.filter((e) => e.missingBinding).map((e) => e.source);
   if (noBinding.length) {
     console.log(`[memhouse] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
-    console.log('[memhouse]          fix: npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log(`[memhouse]          fix: ${require('../per-member/rooms').installCommand()}`);
   }
   for (const e of errors.filter((x) => !x.missingBinding)) {
     console.log(`[memhouse] WARNING: ${e.source} skipped — ${e.message}`);
@@ -786,8 +915,22 @@ async function main() {
   }
 }
 
-module.exports = { runShip, ensureSchema };
+module.exports = { runShip, ensureSchema, templateColumns };
 
 if (require.main === module) {
-  main().catch((e) => { console.error(`[memhouse] fatal: ${e.message}`); process.exit(1); });
+  main().catch((e) => {
+    // A permissions failure here is not a crash — the CALLER (install, doctor) catches the
+    // same condition and prints a refusal naming both routes. Printing "[memhouse] fatal:"
+    // first put a raw driver sentence above that refusal and made a handled case read like
+    // an unhandled one.
+    // Exit quietly ONLY where a caller is known to print the refusal itself: install and
+    // doctor both catch this condition and name both routes. Everywhere else — and
+    // `memhouse ship` is everywhere else — silence plus exit 1 is the worst possible
+    // output, and this suppression produced exactly that for a member following the
+    // advice to run `ship --ensure-schema`.
+    const m = e && e.message ? e.message : String(e);
+    if (/Not enough privileges|ACCESS_DENIED/i.test(m) && process.env.MEMHOUSE_QUIET_DENIED === '1') process.exit(1);
+    console.error(`[memhouse] ${/Not enough privileges|ACCESS_DENIED/i.test(m) ? 'refused' : 'fatal'}: ${m}`);
+    process.exit(1);
+  });
 }

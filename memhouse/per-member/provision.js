@@ -5,11 +5,13 @@
 //
 // Run as the OWNER. Steps, all IF NOT EXISTS / re-runnable:
 //   1. create the member's three rooms from schema-member.sql.tpl
-//   2. grant the member their own three rooms, TWO statements each: `ALL` (not
+//   2. grant the member their own three rooms, TWO statements each: MEMBER_PRIVS (not
 //      re-grantable), then `SELECT WITH GRANT OPTION`. The split is the point —
-//      `ALL` covers the mutation privileges the shipper's clear-then-insert needs
-//      without naming them, and attaching grant-option to `SELECT` alone makes a share
-//      read-only by construction. See the notes at the grants themselves.
+//      MEMBER_PRIVS is exactly what the shipper uses and nothing that DEFINES an object,
+//      and attaching grant-option to `SELECT` alone makes a share read-only by
+//      construction. It is deliberately NOT `ALL`: that includes CREATE TABLE on the
+//      member's own room name, which lets them replace the room with a Merge over every
+//      member's and double the others' rows in the team room. See rooms.js.
 //
 //      THREE ROOMS, not four objects: the session rollup is a saved query over these
 //      same rooms, not a stored view, so it needs no object and no grant of its own.
@@ -39,10 +41,10 @@ try { ({ createClient, ClickHouseLogLevel } = require('@clickhouse/client')); }
 catch {
   console.error("provision.js: dependency '@clickhouse/client' is not installed.");
   console.error(`  From a checkout:      npm install --prefix ${path.join(__dirname, '..', '..')}`);
-  console.error('  From an npm install:  npm install -g memhouse --allow-scripts=better-sqlite3');
+  console.error(`  From an npm install:  ${require('./rooms').installCommand()}`);
   process.exit(2);
 }
-const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS } = require('./rooms');
+const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -140,6 +142,30 @@ async function main() {
     // messages text indexes.
     await client.command({ query: q, clickhouse_settings: { allow_experimental_full_text_index: 1 } });
   }
+  // CREATE TABLE IF NOT EXISTS is a no-op on an existing room, so re-running provision.js
+  // over a room that has DRIFTED left it lossy while printing "rooms ready". The owner's
+  // route has to heal as well as create — it is the one route that always holds the rights.
+  {
+    const { templateColumns } = require('../shipper/ship');
+    const want = templateColumns(tpl);
+    for (const ty of ROOM_TYPES) {
+      const room = `${ty}_${member}`;
+      const rs = await client.query({
+        query: 'SELECT name FROM system.columns WHERE database = {d:String} AND table = {n:String}',
+        query_params: { d: cfg.database, n: room }, format: 'JSONEachRow',
+      });
+      const have = new Set((await rs.json()).map((r) => r.name));
+      if (!have.size) continue;
+      for (const c of (want[ty] || [])) {
+        if (have.has(c.name)) continue;
+        await client.command({
+          query: `ALTER TABLE ${cfg.database}.${room} ADD COLUMN IF NOT EXISTS ${c.name} ${c.type}`,
+          clickhouse_settings: { allow_experimental_full_text_index: 1 },
+        });
+        console.log(`[mem] added missing column ${room}.${c.name}`);
+      }
+    }
+  }
   console.log(`[mem] rooms ready for '${member}': ${ROOM_TYPES.map((t) => `${t}_${member}`).join(', ')}`);
 
   // 2. grants — two statements per room, and the split is the point.
@@ -189,6 +215,27 @@ async function main() {
     await client.command({ query: `GRANT SELECT ON ${room} TO ${member} WITH GRANT OPTION` });
   }
   console.log(`[mem] granted ${MEMBER_PRIVS} on 3 rooms to '${member}'; SELECT is the only re-grantable one`);
+
+  // 2b. A settings profile with CEILINGS, not just defaults.
+  //
+  // Every isolation test passed on confidentiality and none existed for availability: a
+  // member could `SETTINGS max_memory_usage=100000000000`, `max_execution_time=0` and
+  // `max_threads=64` on a shared house, and take the server down for everyone. The
+  // constraint form (`MAX`) is what makes it a ceiling — a plain default is advisory and a
+  // member simply overrides it, which is what they were doing.
+  //
+  // Generous on purpose: a full re-ship of a large house is a big INSERT, and the point is
+  // to stop one member exhausting the box, not to make honest work fail.
+  try {
+    await client.command({ query: `CREATE SETTINGS PROFILE OR REPLACE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
+    await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}'` });
+    console.log(`[mem] settings profile '${MEMBER_PROFILE}' applied to '${member}' (memory, time and thread ceilings)`);
+  } catch (e) {
+    // A server where the admin cannot create profiles still gets a working member; say so
+    // rather than failing the provision.
+    console.log(`[mem] note: could not apply the '${MEMBER_PROFILE}' settings profile — ${e.message}`);
+    console.log('[mem] the member works, but nothing bounds their query resources on this server');
+  }
 
   // 3. Merge rooms
   if (flag('merge')) {
