@@ -43,7 +43,7 @@ try { ({ createClient, ClickHouseLogLevel } = require('@clickhouse/client')); }
 catch {
   console.error("[memhouse] dependency '@clickhouse/client' is not installed.");
   console.error(`[memhouse] from a checkout:     npm install --prefix ${require('path').join(__dirname, '..', '..')}`);
-  console.error('[memhouse] from an npm install: npm install -g memhouse --allow-scripts=better-sqlite3');
+  console.error(`[memhouse] from an npm install: ${require('../per-member/rooms').installCommand()}`);
   process.exit(2);
 }
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
@@ -368,7 +368,7 @@ async function assertOriginKeyed(client, rooms) {
       + wrong.map((s) => `    ${s}`).join('\n')
       + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
       + '\n    RENAME TABLE <room> TO <room>_old;'
-      + '\n    -- recreate from memhouse/per-member/schema-member.sql.tpl'
+      + `\n    -- recreate from ${path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl')}`
       + '\n    INSERT INTO <room> SELECT * FROM <room>_old;'
       + '\n  (add `, \'ship\' AS origin` to the SELECT only if <room>_old has no origin column)'
       + '\n  A house with no imported rows can also just be re-shipped from scratch.');
@@ -382,15 +382,33 @@ async function ensureSchema(client) {
   const sql = tpl.replaceAll('{{MEMBER}}', member);
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
+  // A MEMBER holds no CREATE TABLE — that is the point of the narrowed grant set — and
+  // ClickHouse checks the grant BEFORE it checks existence, so `IF NOT EXISTS` does not
+  // save these. Running the CREATEs in a bare loop meant `--ensure-schema` died on the
+  // FIRST statement for the very user who is told to run it, and never reached the ADD
+  // COLUMN rollout that is the whole reason to run it. Skip what we may not do and carry
+  // on; the rooms either already exist (assertRoomsExist says so) or an owner has to
+  // create them, which install already explains.
+  let denied = 0;
   for (const q of stmts) {
-    await client.command({
-      query: q,
-      // allow_experimental_full_text_index: on 25.x the messages text indexes
-      // are gated behind this flag (SUPPORT_IS_DISABLED without it); 26.x+
-      // accepts it as a no-op. Query-scoped, so no server config or admin
-      // rights are needed. Verified on 25.11 and 26.7.
-      clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
-    });
+    try {
+      await client.command({
+        query: q,
+        // allow_experimental_full_text_index: on 25.x the messages text indexes
+        // are gated behind this flag (SUPPORT_IS_DISABLED without it); 26.x+
+        // accepts it as a no-op. Query-scoped, so no server config or admin
+        // rights are needed. Verified on 25.11 and 26.7.
+        clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
+      });
+    } catch (e) {
+      const m = e && e.message ? e.message : String(e);
+      if (/Not enough privileges|ACCESS_DENIED/i.test(m)) { denied++; continue; }
+      throw e;
+    }
+  }
+  if (denied) {
+    console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);
+    console.error('[memhouse] creating or replacing a ROOM is the house owner\'s job; adding a missing COLUMN is not.');
   }
   // A house created before origin existed has no such column, and the clear binds it —
   // an unguarded DELETE there would be the old destructive behaviour, and a guarded one
@@ -778,7 +796,7 @@ function reportAdapterErrors(warned) {
   const noBinding = errors.filter((e) => e.missingBinding).map((e) => e.source);
   if (noBinding.length) {
     console.log(`[memhouse] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
-    console.log('[memhouse]          fix: npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log(`[memhouse]          fix: ${require('../per-member/rooms').installCommand()}`);
   }
   for (const e of errors.filter((x) => !x.missingBinding)) {
     console.log(`[memhouse] WARNING: ${e.source} skipped — ${e.message}`);
@@ -901,9 +919,14 @@ if (require.main === module) {
     // same condition and prints a refusal naming both routes. Printing "[memhouse] fatal:"
     // first put a raw driver sentence above that refusal and made a handled case read like
     // an unhandled one.
+    // Exit quietly ONLY where a caller is known to print the refusal itself: install and
+    // doctor both catch this condition and name both routes. Everywhere else — and
+    // `memhouse ship` is everywhere else — silence plus exit 1 is the worst possible
+    // output, and this suppression produced exactly that for a member following the
+    // advice to run `ship --ensure-schema`.
     const m = e && e.message ? e.message : String(e);
-    if (/Not enough privileges|ACCESS_DENIED/i.test(m)) process.exit(1);
-    console.error(`[memhouse] fatal: ${m}`);
+    if (/Not enough privileges|ACCESS_DENIED/i.test(m) && process.env.MEMHOUSE_QUIET_DENIED === '1') process.exit(1);
+    console.error(`[memhouse] ${/Not enough privileges|ACCESS_DENIED/i.test(m) ? 'refused' : 'fatal'}: ${m}`);
     process.exit(1);
   });
 }

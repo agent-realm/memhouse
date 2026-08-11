@@ -46,25 +46,63 @@ const MEMBER_PRIVS = 'SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD COLU
  * not the other has now happened eight times. Anything a member is GIVEN belongs in this
  * file, so both paths read the same definition.
  *
- * CONST, not MAX. A plain default is advisory — a member writes
- * `SETTINGS max_memory_usage = …` on their query and overrides it, which is what they were
- * doing. But `MAX` is not enough either, and this is the trap: in ClickHouse **0 means
- * unlimited** for all of these, and 0 satisfies any MAX constraint. Measured — with
- * `max_memory_usage = 8000000000 MAX 8000000000` in force, `SETTINGS max_memory_usage = 0`
- * was accepted and the ceiling was gone. Same for max_execution_time and max_result_rows.
- * CONST refuses any change at all, including to 0.
+ * MIN..MAX, not CONST and not MAX alone.
  *
- * The cost is that a member cannot LOWER these either. That is a courtesy, not a right,
- * and the ceiling is the thing worth having. Limits are generous on purpose: the point is
- * to stop one member exhausting a shared server, not to make an honest full re-ship fail —
- * verified that a 20M-row scan still runs under them.
+ * A plain default is advisory — a member writes `SETTINGS max_memory_usage = …` on their
+ * query and overrides it. MAX alone is not enough either: in ClickHouse **0 means
+ * unlimited** for these, and 0 satisfies any MAX, so `SETTINGS max_memory_usage = 0`
+ * removed the ceiling entirely. MIN 1 closes that.
+ *
+ * CONST closes it too and was tried first — but CONST refuses EVERY change, including the
+ * server's own. `rawQuery` in memhouse/server/queries.js pins max_result_rows and
+ * max_execution_time to protect the dashboard from an unbounded query, and under CONST
+ * those pins were refused with Code 452, so /api/query returned an error for every input
+ * on any house provisioned after that change. A ceiling has to stop a member RAISING the
+ * limit while still letting anyone LOWER it.
+ *
+ * max_memory_usage is per QUERY; max_memory_usage_for_user bounds the member across
+ * concurrent queries, without which N parallel queries x the per-query ceiling is
+ * unbounded.
+ *
+ * Limits are generous on purpose: the point is to stop one member exhausting a shared
+ * server, not to make an honest full re-ship fail — a 20M-row scan runs inside them.
+ *
+ * KNOWN GAP, deliberately not closed here: ALTER UPDATE, ALTER DELETE and OPTIMIZE are in
+ * MEMBER_PRIVS and execute in the background merge pool, where these per-query settings do
+ * not apply. A member looping `OPTIMIZE … FINAL` on a large room can still load the box.
+ * Bounding that needs server-level merge-pool configuration, which is the operator's, not
+ * something a per-member profile can express.
  */
+/**
+ * The global-install command that will actually work HERE.
+ *
+ * Every site that printed `npm install -g memhouse --allow-scripts=better-sqlite3` printed
+ * a line that fails with EACCES on any distro-packaged Node, because the global prefix is
+ * root-owned — measured on a clean Ubuntu machine, exit 243, including as step 1 of
+ * `prompt --install`, which advertises itself as rendered for this machine. The README
+ * learned this; eight code sites had not.
+ *
+ * `sudo` is right for exactly one of the two causes and makes the other worse, and what
+ * tells them apart is who owns the prefix — so look, rather than guess.
+ */
+function installCommand() {
+  const base = 'npm install -g memhouse --allow-scripts=better-sqlite3';
+  try {
+    const { execFileSync } = require('child_process');
+    const prefix = execFileSync('npm', ['prefix', '-g'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const st = require('fs').statSync(prefix);
+    if (st.uid !== process.getuid()) return `sudo ${base}`;
+  } catch { /* npm not on PATH, or an unreadable prefix: fall through to the plain form */ }
+  return base;
+}
+
 const MEMBER_PROFILE = 'memhouse_member';
 const MEMBER_PROFILE_SETTINGS = [
-  'max_memory_usage = 8000000000 CONST',
-  'max_execution_time = 600 CONST',
-  'max_threads = 16 CONST',
-  'max_result_rows = 10000000 CONST',
+  'max_memory_usage = 8000000000 MIN 1 MAX 8000000000',
+  'max_memory_usage_for_user = 16000000000 MIN 1 MAX 16000000000',
+  'max_execution_time = 600 MIN 1 MAX 600',
+  'max_threads = 16 MIN 1 MAX 16',
+  'max_result_rows = 10000000 MIN 1 MAX 10000000',
 ].join(', ');
 
 // ClickHouse usernames are permissive; room names are not. Refuse anything that would
@@ -191,7 +229,7 @@ function mergeRooms() {
 }
 
 module.exports = {
-  MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS,
+  MEMBER_PRIVS, installCommand, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS,
   ROOM_TYPES, READ_SETTINGS, assertUsableMember,
   sessionsRollup, roomNames, currentUser, resolveRooms, mergeRooms,
 };

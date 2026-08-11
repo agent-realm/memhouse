@@ -41,7 +41,7 @@ try { ({ createClient, ClickHouseLogLevel } = require('@clickhouse/client')); }
 catch {
   console.error("provision.js: dependency '@clickhouse/client' is not installed.");
   console.error(`  From a checkout:      npm install --prefix ${path.join(__dirname, '..', '..')}`);
-  console.error('  From an npm install:  npm install -g memhouse --allow-scripts=better-sqlite3');
+  console.error(`  From an npm install:  ${require('./rooms').installCommand()}`);
   process.exit(2);
 }
 const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS } = require('./rooms');
@@ -203,7 +203,7 @@ async function main() {
   // Generous on purpose: a full re-ship of a large house is a big INSERT, and the point is
   // to stop one member exhausting the box, not to make honest work fail.
   try {
-    await client.command({ query: `CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
+    await client.command({ query: `CREATE OR REPLACE SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
     await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}'` });
     console.log(`[mem] settings profile '${MEMBER_PROFILE}' applied to '${member}' (memory, time and thread ceilings)`);
   } catch (e) {

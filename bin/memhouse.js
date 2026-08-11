@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
+const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS, installCommand } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -149,6 +149,8 @@ function requireConfig(cfg, what) {
 function childEnv(cfg) {
   return {
     ...process.env,
+    // Set only by the install path, which prints its own refusal for this case.
+    ...(cfg._quietDenied ? { MEMHOUSE_QUIET_DENIED: '1' } : {}),
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
   };
@@ -432,7 +434,7 @@ function printAdapterErrors(errors) {
   if (blocked.length) {
     console.log(warn(`${blocked.length} adapter${blocked.length > 1 ? 's' : ''} skipped — better-sqlite3 has no native binding: ${blocked.map((e) => e.source).join(', ')}`));
     console.log('  their sessions are NOT being shipped. npm >= 12 blocks install scripts by default; rebuild with:');
-    console.log('    npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log('    ${installCommand()}');
     console.log('  (from a checkout: npm install --no-audit --no-fund, which package.json already allows)');
   }
   for (const e of other) console.log(warn(`${e.source.padEnd(16)} skipped: ${e.message}`));
@@ -551,9 +553,10 @@ endpoint does not answer. Do NOT reconfigure before finding out why.
   } else if (houseUp) {
     plan = `A ClickHouse is already reachable at \`${reachable[0].url}\`. Use it.
 
-1. \`npm install -g memhouse --allow-scripts=better-sqlite3\`
-   The flag is not optional — six adapters (cursor, zed, opencode, goose, windsurf,
-   antigravity) read SQLite stores and silently drop out without the native build.
+1. \`${installCommand()}\`
+   The flag is not optional — five adapters (cursor, zed, opencode, goose, antigravity)
+   read SQLite stores and silently drop out without the native build. (windsurf needs it
+   too but is excluded upstream, so discover names five; the two numbers agree.)
 2. Ask the user for the ClickHouse username and password for that endpoint.
 3. \`memhouse install --url ${reachable[0].url} --user <user> --password <pw>\`
    If they hold admin on it and want memhouse to create the user, database, rooms and
@@ -566,8 +569,8 @@ endpoint does not answer. Do NOT reconfigure before finding out why.
     plan = `There is no ClickHouse to point at, but **${engines.join(' and ')}** is available,
 so memhouse can run one:
 
-1. \`npm install -g memhouse --allow-scripts=better-sqlite3\`
-   The flag is not optional — six adapters read SQLite stores and silently drop out
+1. \`${installCommand()}\`
+   The flag is not optional — five adapters read SQLite stores and silently drop out
    without the native build.
 2. \`memhouse deploy --local\`
    This starts a loopback-only ClickHouse, generates a credential, installs, creates the
@@ -575,7 +578,7 @@ so memhouse can run one:
 3. \`memhouse start\`.
 
 ${process.platform === 'linux' && engines.includes('podman')
-    ? 'On Linux with rootless podman the container stops at logout unless lingering is on.\nIf memhouse warns about this, run what it prints (`loginctl enable-linger <user>`)\nand tell the user why it matters.' : ''}`;
+    ? 'On Linux with rootless podman the container MAY stop at logout — it depends on the\ndistro (Ubuntu 24.04 keeps it). If memhouse warns about this, run what it prints\n(`loginctl enable-linger <user>`) and tell the user why it matters.' : ''}`;
   } else {
     plan = `There is no ClickHouse reachable and no container engine to run one with. You
 cannot finish this install alone — say so rather than improvising.
@@ -584,7 +587,7 @@ Tell the user they need one of:
 - a ClickHouse they already run (Cloud, a server, a kernel house) plus its credentials;
 - docker or podman installed, after which \`memhouse deploy --local\` does everything.
 
-You can still do the harmless half now: \`npm install -g memhouse --allow-scripts=better-sqlite3\`,
+You can still do the harmless half now: \`${installCommand()}\`,
 then \`memhouse discover\` to show them what would be shipped once a house exists.`;
   }
 
@@ -743,7 +746,7 @@ ${mergeGrants}
 -- CONST, not MAX: a plain default is advisory, and MAX is not enough either because 0 means
 -- UNLIMITED in ClickHouse and 0 satisfies any MAX. Measured — with a MAX ceiling in force,
 -- SETTINGS max_memory_usage = 0 was accepted and the ceiling was gone.
-CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
+CREATE OR REPLACE SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
 ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}';
 `;
 }
@@ -1061,8 +1064,10 @@ async function cmdInstall({ interactive }) {
     // clean explanation is how a clear message gets missed.
     const legacy = await looksLikePre040(cfg);
     if (legacy.length) { reportPre040(cfg, r.member, legacy); return 1; }
-    // Try to mint them as ourselves before asking anyone for anything.
-    run(SHIP_JS, ['--ensure-schema'], cfg);
+    // Try to mint them as ourselves before asking anyone for anything. This is the ONE
+    // call site where a permission refusal is expected and already explained below, so
+    // the child is told to stay quiet about it rather than print above our message.
+    run(SHIP_JS, ['--ensure-schema'], { ...cfg, _quietDenied: true });
     try { have = await present(); } catch { /* reported below */ }
   }
   const missing = want.filter((n) => !have.includes(n));
@@ -1480,7 +1485,7 @@ async function cmdDoctor() {
       // find the other number elsewhere (161 here, 156 there, on a real machine) gives
       // them no way to tell "correctly skipped" from "silently dropped".
       `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''} — compare with what the house holds: memhouse stats`,
-      blocked.length ? 'npm install -g memhouse --allow-scripts=better-sqlite3'
+      blocked.length ? installCommand()
         : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
           : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
@@ -1701,11 +1706,18 @@ function cmdUninstall() {
 
 // ── dispatch ────────────────────────────────────────────────────────────────────
 (async () => {
+  // Single-dash flags are not parsed (only `--x`), so `-v` arrives as a positional. Both
+  // spellings are what people type for a version.
+  if (flags.version === true || process.argv.slice(2).some((a) => a === '-v' || a === '-V')) {
+    console.log(PKG.version); return;
+  }
   const cfg = resolveConfig();
   if (legacySoloGuard()) { process.exitCode = 2; return; }
 
   switch (cmd) {
     case null: case 'help': console.log(HELP); break;
+    // `--version` and `-v` land here as flags, not as the `version` verb, so they used to
+    // fall through to HELP: forty lines of help and exit 0 is not what --version means.
     case 'version': console.log(PKG.version); break;
     case 'discover': await cmdDiscover(); break;
     case 'onboard': process.exitCode = await cmdOnboard(); break;
@@ -1822,6 +1834,23 @@ function cmdUninstall() {
             process.exitCode = 2; break;
           }
           console.log(warn(`a shipper service is installed but points at ${svcCfg.url} — leaving it alone`));
+        }
+        // Ask. This removes the data VOLUME as well as the container — measured, 810 MB of
+        // a real house — and it was the only destructive command in the product that did
+        // not confirm, while `reset`, which merely re-ships, does. `prompt --install` had
+        // to tell agents in prose not to run it.
+        if (flags.yes !== true) {
+          const held = await (async () => {
+            try {
+              const c = resolveConfig();
+              const n = await chRows(c, `SELECT count() AS n FROM ${(await roomsFor(c)).messages} FINAL`);
+              return Number(n[0]?.n || 0);
+            } catch { return null; }
+          })();
+          console.log(warn('this removes the container AND its data volume — the house and everything in it.'));
+          if (held) console.log(`  ${held.toLocaleString()} messages are stored there. Re-shipping recovers only what the adapters can still see.`);
+          const a = (await ask('Remove it? (yes/no)', 'no')).toLowerCase();
+          if (a !== 'yes' && a !== 'y') { console.log('aborted'); process.exitCode = 1; break; }
         }
         const r = dep.down();
         console.log(r.ok ? ok(`local ClickHouse removed (${r.engine}${r.volumeRemoved ? ', volume included' : ''})`) : bad(r.msg));

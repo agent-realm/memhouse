@@ -179,22 +179,25 @@ function clampInt(v, dflt, min, max) {
 app.post('/api/query', route(async (req, res) => {
   const { sql } = req.body;
   if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'sql string required' });
-  // ONE pass. Strings and comments have to be recognised in the order they actually
-  // appear, because each can contain the other's opening marker:
+  // ONE pass, and it has to know every construct ClickHouse does, because each one can
+  // contain another's opening marker:
   //
-  //   SELECT * FROM /* ' */ url('http://…')   -- a quote inside a comment
-  //   SELECT '--', url('http://…')            -- a comment marker inside a string
+  //   SELECT * FROM /* ' */ url('http://…')      a quote inside a comment
+  //   SELECT '--', url('http://…')               a comment marker inside a string
+  //   SELECT $d$'$d$ AS x, * FROM url('http://…') a quote inside a heredoc literal
+  //   SELECT * FROM # '⏎ url('http://…') --'     a quote inside a # comment
   //
-  // Stripping literals first lets the first one through: the `'` inside the comment opens
-  // a "literal" that swallows `' */ url('`, so the function scan sees nothing and the
-  // query runs. Stripping comments first lets the second one through for the mirror
-  // reason. Both were reachable; the first was demonstrated fetching a remote URL. A
-  // regex pipeline cannot do this — the two constructs are mutually nesting, so it takes
-  // a scanner.
+  // Every one of those desyncs a scanner that does not model the construct it appears in.
+  // ClickHouse supports `$tag$…$tag$` heredocs and treats `#` and `#!` as line comments as
+  // well as `--`; the first two forms above were bypasses of the previous version.
+  const CLICKHOUSE_SQL = /* for the reader: single quotes are literals, double quotes and
+     backticks are IDENTIFIERS — the identifier text must survive, or `FROM "url"(…)` hides
+     the function name. */ null;
   let bare = '';
   for (let i = 0; i < sql.length;) {
     const c = sql[i];
     const two = sql.slice(i, i + 2);
+    const heredoc = /^\$[A-Za-z0-9_]*\$/.exec(sql.slice(i));
     if (c === "'" || c === '"' || c === '`') {
       const quote = c;
       i++;
@@ -202,26 +205,23 @@ app.post('/api/query', route(async (req, res) => {
       while (i < sql.length) {
         if (sql[i] === '\\') { inner += sql.slice(i, i + 2); i += 2; continue; }
         if (sql[i] === quote) {
-          if (quote === "'" && sql[i + 1] === "'") { inner += "''"; i += 2; continue; }  // '' escape
+          if (quote === "'" && sql[i + 1] === "'") { inner += "''"; i += 2; continue; }
           i++; break;
         }
         inner += sql[i];
         i++;
       }
-      // Single quotes are STRING LITERALS in ClickHouse — erase them, so a transcript
-      // containing the text `url(` is not mistaken for a call.
-      //
-      // Double quotes and backticks are IDENTIFIERS. Erasing those was a bypass: ClickHouse
-      // accepts `FROM "url"('http://…')` and `` FROM `url`(…) `` as table functions —
-      // verified, all three spellings attempt the outbound connection — while the scanner
-      // reduced them to `""(` and saw no function name at all. Keep the identifier text so
-      // the name is still there to be checked.
       bare += quote === "'" ? "''" : inner;
+    } else if (heredoc) {
+      const tag = heredoc[0];
+      const end = sql.indexOf(tag, i + tag.length);
+      i = end === -1 ? sql.length : end + tag.length;
+      bare += "''";
     } else if (two === '/*') {
       const end = sql.indexOf('*/', i + 2);
       i = end === -1 ? sql.length : end + 2;
       bare += ' ';
-    } else if (two === '--') {
+    } else if (two === '--' || c === '#') {
       const nl = sql.indexOf('\n', i);
       i = nl === -1 ? sql.length : nl;
       bare += ' ';
@@ -232,43 +232,82 @@ app.post('/api/query', route(async (req, res) => {
   }
 
   const first = bare.trim().split(/\s+/)[0].toUpperCase();
-  if (!['SELECT', 'WITH', 'EXPLAIN', 'DESCRIBE', 'SHOW'].includes(first)) {
+  if (!['SELECT', 'WITH', 'EXPLAIN', 'DESCRIBE', 'DESC', 'SHOW'].includes(first)) {
     return res.status(403).json({ error: 'Only SELECT queries are allowed' });
   }
-  // Checking the FIRST TOKEN says nothing about the rest of the statement. ClickHouse's
-  // table functions live inside a SELECT, and `url()` makes an outbound HTTP request from
-  // the server — reachable here with no authentication at all. Measured: the response
-  // carried the TARGET's error, so the request went out. On a house provisioned per-member
-  // this is blocked by grants (READ ON URL is not granted), but `install --url … --user
-  // memhouse_root` is a documented path and that credential holds everything.
+
+  // Which identifiers are in TABLE position — the only place a table function can appear.
   //
-  // `file()` is jailed by ClickHouse's user_files directory and `remote()`/`s3()` are the
-  // same shape as url(). Refuse the family by name rather than trusting least privilege to
-  // be configured.
-  // Allow-list the table functions instead of naming the dangerous ones. The deny-list
-  // missed gcs, sqlite, redis, hudi, fileCluster, azureBlobStorageCluster, icebergS3,
-  // deltaLakeS3 and fuzzJSON — three of which reached ClickHouse and failed only on URI
-  // parsing, meaning a well-formed URI would have made the request. ClickHouse ships more
-  // than anyone can enumerate, and it gains more every release; the set this endpoint
-  // legitimately needs is tiny and does not grow.
+  // Checking every call inside a FROM clause refused ordinary read SQL: `count()` and
+  // `any()` in a derived table, `USING (…)`, `toString()` in an ON condition,
+  // `splitByChar()` in an ARRAY JOIN. That is the shape of this endpoint's own session
+  // rollup, on the endpoint whose job is querying transcripts. A table expression follows
+  // FROM, JOIN or a comma DIRECTLY, at the same paren depth — anything nested inside
+  // parentheses is a subquery or an argument, not a table function introduced here.
+  //
+  // DESCRIBE takes a table expression too, with no FROM at all: `DESCRIBE url('http://…')`
+  // performs schema inference, which dials out.
   const ALLOWED_FN = new Set(['numbers', 'values', 'null', 'generateseries', 'format', 'view', 'merge']);
-  // A table function can appear anywhere in a FROM clause, not only straight after the
-  // FROM or JOIN keyword. Checking only those two positions missed the comma join:
-  //   SELECT * FROM numbers(1) AS n, /* ' */ url('http://…')
-  // which reached ClickHouse and was parsed as a table function. So: find each FROM
-  // clause and check every call inside it. Outside a FROM clause a call is an ordinary
-  // scalar or aggregate — flagging those would refuse `SELECT count(), sum(x)`.
-  const CLAUSE_END = /\b(WHERE|PREWHERE|GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING|SETTINGS|UNION|INTO|FORMAT|WINDOW|QUALIFY)\b/i;
-  const upper = bare.toUpperCase();
-  for (const kw of upper.matchAll(/\bFROM\b/g)) {
-    const rest = bare.slice(kw.index + 4);
-    const stop = rest.match(CLAUSE_END);
-    const clause = rest.slice(0, stop ? stop.index : rest.length);
-    for (const m of clause.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
-      const name = m[1].toLowerCase();
-      if (!ALLOWED_FN.has(name)) {
-        return res.status(403).json({ error: `table function ${m[1]}() is not allowed here — this endpoint reads only this house` });
+
+  // Walk the normalised text once, tracking paren depth and whether the current depth is
+  // inside a FROM clause. A table function is an identifier-call that appears where a
+  // TABLE EXPRESSION goes: directly after FROM, after JOIN, or after a comma that
+  // separates table expressions in a FROM clause AT THE SAME DEPTH.
+  //
+  // Both qualifiers are load-bearing. Without the depth rule, `FROM (SELECT session_id,
+  // count() AS c FROM …)` reads the comma in the SELECT list as a table separator and
+  // refuses `count()`. Without excluding ARRAY JOIN, `ARRAY JOIN splitByChar(',', text)`
+  // matches on JOIN and refuses `splitByChar()`. Both are ordinary read SQL on the
+  // endpoint whose purpose is reading transcripts — and `any()` in a derived table is the
+  // shape of this product's own session rollup.
+  const CLAUSE_END = /^(WHERE|PREWHERE|GROUP|ORDER|LIMIT|HAVING|SETTINGS|UNION|INTO|FORMAT|WINDOW|QUALIFY|ON|USING)$/i;
+  const tableFns = [];
+  const inFrom = [];
+  let depth = 0;
+  // Three tokens of history: at the '(' we need the identifier (prev), what introduced it
+  // (prevPrev), and what preceded THAT (prev3) — because distinguishing `JOIN f(` from
+  // `ARRAY JOIN f(` needs the token before the JOIN.
+  let prev = '';        // previous significant token, upper-cased
+  let prevPrev = '';
+  let prev3 = '';
+  const tok = /[A-Za-z_][A-Za-z0-9_]*|[(),]|[^\s(),]+/g;
+  let m;
+  while ((m = tok.exec(bare)) !== null) {
+    const raw = m[0];
+    const up = raw.toUpperCase();
+    if (raw === '(') {
+      // An identifier immediately before '(' is a call; decide it here, where we still
+      // know what preceded the identifier.
+      const isCall = /^[A-Za-z_][A-Za-z0-9_]*$/.test(prev === '' ? '' : bare.slice(0, m.index).match(/[A-Za-z_][A-Za-z0-9_]*\s*$/)?.[0]?.trim() || '');
+      if (isCall) {
+        const name = bare.slice(0, m.index).match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/)[1];
+        const introducer = prevPrev;
+        const tablePos = (introducer === 'FROM')
+          || (introducer === 'JOIN' && prev3 !== 'ARRAY')
+          || (introducer === ',' && inFrom[depth]);
+        if (tablePos) tableFns.push(name);
       }
+      depth++;
+      prev3 = prevPrev; prevPrev = prev; prev = raw;
+      continue;
+    }
+    if (raw === ')') { depth = Math.max(0, depth - 1); prev3 = prevPrev; prevPrev = prev; prev = raw; continue; }
+    if (up === 'FROM') inFrom[depth] = true;
+    else if (CLAUSE_END.test(up)) inFrom[depth] = false;
+    prev3 = prevPrev; prevPrev = prev; prev = (raw === ',') ? ',' : up;
+  }
+
+  // DESCRIBE takes a table expression with no FROM at all, and schema inference on
+  // `DESCRIBE url('http://…')` dials out.
+  if (['DESCRIBE', 'DESC'].includes(first)) {
+    const after = bare.trim().replace(/^\w+\s+/, '').replace(/^TABLE\s+/i, '');
+    const d = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(after);
+    if (d) tableFns.push(d[1]);
+  }
+
+  for (const name of tableFns) {
+    if (!ALLOWED_FN.has(name.toLowerCase())) {
+      return res.status(403).json({ error: `table function ${name}() is not allowed here — this endpoint reads only this house` });
     }
   }
 
