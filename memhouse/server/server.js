@@ -134,7 +134,7 @@ app.get('/api/deep-analytics', route(async (req, res) => {
   res.json(await qy.getDeepAnalytics({
     editor: req.query.editor || null,
     folder: req.query.folder || null,
-    limit: Math.min(parseInt(req.query.limit) || 500, 5000),
+    limit: clampInt(req.query.limit, 500, 1, 5000),
     ...parseDateOpts(req.query),
     hiddenFolders: hiddenFolders(),
   }));
@@ -159,7 +159,7 @@ app.get('/api/tool-calls', route(async (req, res) => {
   if (!name) return res.status(400).json({ error: 'name query param required' });
   // Same filter set as the analytics the drill-down is opened from.
   res.json(await qy.getToolCalls(name, {
-    limit: Math.min(parseInt(req.query.limit) || 200, 1000),
+    limit: clampInt(req.query.limit, 200, 1, 1000),
     folder: req.query.folder || null,
     editor: req.query.editor || null,
     ...parseDateOpts(req.query),
@@ -177,7 +177,24 @@ function clampInt(v, dflt, min, max) {
 app.post('/api/query', route(async (req, res) => {
   const { sql } = req.body;
   if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'sql string required' });
-  const first = sql.trim().replace(/^--.*$/gm, '').trim().split(/\s+/)[0].toUpperCase();
+  // Strip comments and string literals BEFORE inspecting anything.
+  //
+  // Both halves were measured. The old first-token check read `/* note */ SELECT 1` as the
+  // token `/*` and refused it; and the table-function check used `\s*\(`, which a comment
+  // is not — so `url/*x*/('http://…')` slipped straight through and FETCHED, returning the
+  // remote body. ClickHouse treats a comment as a token separator; a guard that does not
+  // is guarding a different language.
+  //
+  // Literals go too, in the other direction: without that,
+  // `WHERE text LIKE '%url(%'` was refused as an attempt to call url() — and this endpoint
+  // exists to search transcripts, which are full of code.
+  const bare = sql
+    .replace(/'(?:[^'\\]|\\.|'')*'/g, "''")   // string literals
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')     // quoted identifiers
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')       // block comments
+    .replace(/--[^\n]*/g, ' ');                // line comments
+  const first = bare.trim().split(/\s+/)[0].toUpperCase();
   if (!['SELECT', 'WITH', 'EXPLAIN', 'DESCRIBE', 'SHOW'].includes(first)) {
     return res.status(403).json({ error: 'Only SELECT queries are allowed' });
   }
@@ -191,10 +208,22 @@ app.post('/api/query', route(async (req, res) => {
   // `file()` is jailed by ClickHouse's user_files directory and `remote()`/`s3()` are the
   // same shape as url(). Refuse the family by name rather than trusting least privilege to
   // be configured.
-  const FORBIDDEN = /\b(url|urlCluster|remote|remoteSecure|s3|s3Cluster|file|hdfs|mysql|postgresql|mongodb|jdbc|odbc|azureBlobStorage|deltaLake|iceberg)\s*\(/i;
-  const m = sql.match(FORBIDDEN);
-  if (m) {
-    return res.status(403).json({ error: `table function ${m[1]}() is not allowed here — it reads from outside this house` });
+  // Allow-list the table functions instead of naming the dangerous ones. The deny-list
+  // missed gcs, sqlite, redis, hudi, fileCluster, azureBlobStorageCluster, icebergS3,
+  // deltaLakeS3 and fuzzJSON — three of which reached ClickHouse and failed only on URI
+  // parsing, meaning a well-formed URI would have made the request. ClickHouse ships more
+  // than anyone can enumerate, and it gains more every release; the set this endpoint
+  // legitimately needs is tiny and does not grow.
+  const ALLOWED_FN = new Set(['numbers', 'values', 'null', 'generateseries', 'format', 'view', 'merge']);
+  for (const m of bare.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+    const name = m[1].toLowerCase();
+    // Only FROM/JOIN positions can introduce a table function; everything else is an
+    // ordinary scalar or aggregate call.
+    const before = bare.slice(0, m.index).toUpperCase();
+    if (!/\b(FROM|JOIN)\s*$/.test(before.replace(/\s+/g, ' '))) continue;
+    if (!ALLOWED_FN.has(name)) {
+      return res.status(403).json({ error: `table function ${m[1]}() is not allowed here — this endpoint reads only this house` });
+    }
   }
   try { res.json(await qy.rawQuery(sql)); }
   catch (err) { res.status(400).json({ error: err.message }); }
@@ -208,7 +237,13 @@ app.get('/api/config', (req, res) => res.json(readConfig()));
 const CONFIG_KEYS = { hiddenProjects: 'array', hiddenFolders: 'array' };
 app.put('/api/config', route(async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const unknown = Object.keys(body).filter((k) => !(k in CONFIG_KEYS));
+  // Own keys only. `{"__proto__":{…}}` has no OWN key, so `Object.keys` saw an empty body,
+  // the unknown-key check passed, and the config was rewritten to {} with a 200.
+  const unknown = Object.keys(body).filter((k) => !Object.prototype.hasOwnProperty.call(CONFIG_KEYS, k));
+  if (Object.getPrototypeOf(body) !== Object.prototype && Object.getPrototypeOf(body) !== null) {
+    return res.status(400).json({ error: 'unexpected body' });
+  }
+  if (!Object.keys(body).length) return res.status(400).json({ error: 'no config keys given' });
   if (unknown.length) return res.status(400).json({ error: `unknown config keys: ${unknown.join(', ')}` });
   const config = readConfig();
   for (const [k, kind] of Object.entries(CONFIG_KEYS)) {

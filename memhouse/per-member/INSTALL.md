@@ -80,30 +80,50 @@ who plays admin and how the handle is chosen.
 ## The grant set — two statements per room, and the split is the point
 
 ```sql
-GRANT ALL    ON mem.sessions_polat TO polat;
+GRANT SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD COLUMN, OPTIMIZE
+             ON mem.sessions_polat TO polat;
 GRANT SELECT ON mem.sessions_polat TO polat WITH GRANT OPTION;
 ```
 
-**`ALL`, not re-grantable.** The member owns their room outright — `DROP` and `TRUNCATE`
-included, because it is their memory to destroy. It also covers the mutation privileges
-the shipper needs without naming them, which matters: the shipper clears a session's rows
-before re-inserting, and which of `ALTER UPDATE` / `ALTER DELETE` a server demands varies
-by version (`DELETE FROM` is a lightweight delete implemented as
-`ALTER TABLE … UPDATE _row_exists = 0`, so 25.11 wants one where 26.7 wanted the other).
+**Exactly what the shipper uses, not `ALL`.** `ALL` expands to 45 privileges on 26.7 and
+one of them is `CREATE TABLE` **on the member's own room name** — so the member owns the
+NAME, not just the data, and can do this:
 
-**`SELECT`, re-grantable.** A share is read-only **by construction**, not by convention.
-`GRANT ALL … WITH GRANT OPTION` expands to 45 privileges on 26.7 — `DROP TABLE`,
-`TRUNCATE`, `CREATE ROW POLICY`, `SYSTEM DROP REPLICA` among them — every one of which a
-member could then hand to a colleague while meaning "let them read my sessions".
+```sql
+DROP TABLE messages_polat;
+CREATE TABLE messages_polat AS all_messages ENGINE = Merge('mem','^messages_');
+```
 
-Measured on 26.7.2:
+`all_messages` is `Merge(mem,'^messages_')`, so it then contains a Merge over its own
+namespace and **every other member's rows are counted twice in the team room**. Measured:
+a house reading alice 6030 / bob 2401 / carol 12 became bob 4802 / carol 24, with no error
+on either ClickHouse version. Confidentiality survives — the Merge still narrows by grants,
+so nothing new becomes readable — but a team-wide number is what that room is for.
+
+`ALTER UPDATE` and `ALTER DELETE` are both named because `DELETE FROM` is a lightweight
+delete implemented as `ALTER TABLE … UPDATE _row_exists = 0`, and which of the two a server
+demands varies by version (25.11 wants one where 26.7 wanted the other). `ALTER ADD COLUMN`
+is for `ensureSchema`'s rollout. Replacing a room is the admin's job, not the member's.
+
+**`SELECT`, re-grantable.** A share is read-only **by construction**, not by convention:
+the member can hand a colleague `SELECT` and nothing else, because they hold nothing else
+to hand over.
+
+Measured on 26.7.2 and 25.11.9:
 
 ```
 polat grants SELECT to bob      ok
 polat grants DROP TABLE to bob  497 Not enough privileges
-polat drops their own room      ok
+polat drops their own room      497 Not enough privileges
+polat creates any table         497 Not enough privileges
+polat installs, ships, resets   ok
 bob ends up with                GRANT SELECT ON mem.sessions_polat
 ```
+
+One definition, in `rooms.js` as `MEMBER_PRIVS`, used by both `provision.js` and
+`install --print-sql`. They drifted once — the first was narrowed and the second went on
+emitting `GRANT ALL` for a release, so the attack above stayed reachable through the path
+this document calls the common case.
 
 Never `ON mem.*`. A member who can read `mem.*` can read every other member's rooms, and
 then this is a shared house with longer table names.

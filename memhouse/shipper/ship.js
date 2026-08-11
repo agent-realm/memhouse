@@ -131,6 +131,41 @@ function truncate(s, max) {
   return (last >= 0xD800 && last <= 0xDBFF) ? cut.slice(0, -1) : cut;
 }
 
+/**
+ * Drop unpaired surrogates from every string on its way into an insert.
+ *
+ * truncate() above fixes the two places THIS file cuts a string, and that was not enough:
+ * the same failure arrives by two other routes.
+ *
+ *   1. Titles. `cleanPrompt` in editors/claude.js cuts the first prompt to 120 characters,
+ *      and 120 is a far more reachable boundary than 50,000. An emoji there produced
+ *      `(while reading the value of key name)` — same total outage, different column.
+ *   2. Source data. `{"content":"before \ud83d after"}` is valid JSON that JSON.parse
+ *      accepts, so a lone surrogate can arrive already in a transcript with no truncation
+ *      involved at all.
+ *
+ * Guarding cut sites one at a time is the wrong shape — every future string field is
+ * another instance. This runs over the finished row instead, so nothing reaches ClickHouse
+ * carrying an escape it will reject. The cost is one regex over fields that almost never
+ * match; the alternative is a member whose house stops accepting rows entirely, exit 1
+ * forever under --loop, while `doctor` reports everything green.
+ */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+function scrub(row) {
+  for (const k of Object.keys(row)) {
+    const v = row[k];
+    if (typeof v === 'string') {
+      if (LONE_SURROGATE.test(v)) { LONE_SURROGATE.lastIndex = 0; row[k] = v.replace(LONE_SURROGATE, ''); }
+      LONE_SURROGATE.lastIndex = 0;
+    } else if (v && typeof v === 'object') {
+      // `extra` is a JSON column; its values travel as strings too.
+      row[k] = JSON.parse(JSON.stringify(v).replace(LONE_SURROGATE, ''));
+      LONE_SURROGATE.lastIndex = 0;
+    }
+  }
+  return row;
+}
+
 // UInt64-bound coercion: integers only, never negative, garbage → 0.
 function toInt(v) {
   const n = Math.trunc(Number(v));
@@ -239,7 +274,15 @@ async function assertOriginKeyed(client, rooms) {
       query: `SELECT sorting_key FROM system.tables WHERE database = currentDatabase() AND name = {n:String}`,
       query_params: { n: rooms[t] }, format: 'JSONEachRow',
     });
-    const key = ((await rs.json())[0] || {}).sorting_key || '';
+    const row = (await rs.json())[0];
+    const key = (row || {}).sorting_key || '';
+    // A room that EXISTS but has no sorting key is not a MergeTree — a Merge, a View, a Log
+    // engine standing where the shipper expects to DELETE and INSERT. Skipping it here let
+    // the pass sail past its own guard and die later on
+    // `DELETE query is not supported for table …`, which is exactly what this refusal is
+    // meant to prevent. (A room that does not exist at all is assertRoomsExist's job and is
+    // reported there.)
+    if (row && !key) { wrong.push(`${rooms[t]} — not a MergeTree, so it cannot be shipped to`); continue; }
     if (!key) continue;
     const keyed = /\borigin\b/.test(key);
     // sessions is one row per session and must NOT key on origin; the transcript rooms
@@ -607,10 +650,10 @@ async function runShip(client, opts = {}) {
         });
       }
     }
-    await push('sessions', rows.session);
+    await push('sessions', scrub(rows.session));
     sessions++;
-    for (const r of rows.msgRows) { await push('messages', r); msgRows++; }
-    for (const r of rows.toolRows) { await push('tool_calls', r); toolRows++; }
+    for (const r of rows.msgRows) { await push('messages', scrub(r)); msgRows++; }
+    for (const r of rows.toolRows) { await push('tool_calls', scrub(r)); toolRows++; }
   }
   for (const table of Object.keys(batches)) await flush(table);
   // Anything that only failed while reading messages — the sink is reset by the

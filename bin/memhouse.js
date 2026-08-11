@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, mergeRooms } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
+const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -687,8 +687,14 @@ function memberSql(db, member, password) {
     .replaceAll('{{MEMBER}}', member));
   const merge = qualify(fs.readFileSync(path.join(here, 'schema-merge.sql.tpl'), 'utf-8')
     .replaceAll('{{TEMPLATE_MEMBER}}', member));
+  // The SAME grant set provision.js issues. These two paths build the same house, and when
+  // only one of them was narrowed, `install --print-sql` — the path INSTALL.md calls the
+  // common case — still emitted GRANT ALL, which includes CREATE TABLE on the member's own
+  // room name. A member provisioned that way could drop their room, recreate it as
+  // Merge('<db>','^messages_'), and double every other member's rows in the team room:
+  // exactly the attack the narrowing was for, fully reachable, one release later.
   const grants = ROOM_TYPES.flatMap((t) => [
-    `GRANT ALL ON ${db}.${t}_${member} TO ${member};`,
+    `GRANT ${MEMBER_PRIVS} ON ${db}.${t}_${member} TO ${member};`,
     `GRANT SELECT ON ${db}.${t}_${member} TO ${member} WITH GRANT OPTION;`,
   ]).join('\n');
   const mergeGrants = Object.values(mergeRooms())
@@ -719,8 +725,10 @@ CREATE USER ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
 
 ${rooms.trim()}
 
--- ALL is not re-grantable; SELECT is. The member owns their rooms outright — DROP
--- included, it is their memory — but a share can only ever be read-only.
+-- Exactly what the shipper uses, and nothing that defines an object: no CREATE TABLE, no
+-- DROP, no TRUNCATE. A member who owned the room NAME rather than its data could replace
+-- it with a Merge over every member's rooms and double their rows in the team room.
+-- Only SELECT is re-grantable, so a share can only ever be read-only.
 ${grants}
 
 -- Team-wide reads. A Merge room reduces to the rooms the CALLER holds grants for, so
@@ -968,7 +976,7 @@ async function cmdInstall({ interactive }) {
     console.log('  memhouse will not fall back to http://localhost:8123 as memhouse_root —');
     console.log('  on many machines that is a real house belonging to someone else.');
     console.log('  No ClickHouse yet?  memhouse deploy --local --house-port <port>');
-    return 1;
+    return 2;  // same code as every other no-config refusal
   }
   if (interactive || !haveAll) {
     // Offer a default only where one was actually STATED. Otherwise this prompt said
@@ -1230,6 +1238,7 @@ async function cmdStatus() {
     config: fs.existsSync(ENV_FILE) ? ENV_FILE : null,
     url: cfg.url, db: cfg.db, user: cfg.user,
     daemons: { shipper: pidOf('shipper'), dashboard: pidOf('dashboard') },
+    dashboard_url: pidOf('dashboard') ? `http://localhost:${runningPort(cfg)}` : null,
     shipper: shipperHealth(),
     connected: false,
   };
@@ -1559,8 +1568,13 @@ async function cmdReset() {
   const allOrigins = flags['all-origins'] === true;
   let imported = 0;
   try {
+    // Same predicate the DELETE uses. Counted without an owner filter, this warned
+    // "removing 2 imported row(s)" and then removed none of them — rows imported by an
+    // ADMIN during a migration carry the admin's user_id, so a member's DELETE cannot
+    // reach them. The prompt was wrong in the alarming direction.
+    const esc0 = (await chRows(cfg, 'SELECT currentUser() AS u'))[0]?.u?.replace(/\\/g, '\\\\').replace(/'/g, "\\'") || '';
     const counts = await Promise.all(targets.map(async (t) =>
-      Number((await chRows(cfg, `SELECT count() AS c FROM ${t} FINAL WHERE origin != 'ship'`))[0]?.c || 0)));
+      Number((await chRows(cfg, `SELECT count() AS c FROM ${t} FINAL WHERE origin != 'ship' AND (user_id = '${esc0}' OR user_id = '')`))[0]?.c || 0)));
     imported = counts.reduce((a, b) => a + b, 0);
   } catch { /* pre-origin house: nothing to protect, ensureSchema will add the column */ }
 
@@ -1653,7 +1667,9 @@ function cmdUninstall() {
       if (!cfg.stated && flags.yes === true) {
         console.log(bad('no house given: --url and --user are required with --yes'));
         console.log('  setup will not write http://localhost:8123 as memhouse_root into your config.');
-        process.exitCode = 1;
+        // 2, like every other no-config refusal. A script gating on the exit code got a
+        // different answer from these two commands than from the other eight.
+        process.exitCode = 2;
         break;
       }
       if (flags.yes !== true) {

@@ -42,7 +42,7 @@ catch {
   console.error('  From an npm install:  npm install -g memhouse --allow-scripts=better-sqlite3');
   process.exit(2);
 }
-const { ROOM_TYPES, mergeRooms, assertUsableMember } = require('./rooms');
+const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -183,7 +183,6 @@ async function main() {
   //
   // SELECT is re-grantable so a share is READ-ONLY BY CONSTRUCTION rather than by
   // convention — `GRANT SELECT … TO bob` succeeds, `GRANT DROP TABLE … TO bob` is 497.
-  const MEMBER_PRIVS = 'SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD COLUMN, OPTIMIZE';
   for (const t of ROOM_TYPES) {
     const room = `${cfg.database}.${t}_${member}`;
     await client.command({ query: `GRANT ${MEMBER_PRIVS} ON ${room} TO ${member}` });

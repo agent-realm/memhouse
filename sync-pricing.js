@@ -131,7 +131,16 @@ async function main() {
     }
   }
 
-  // Report
+  // Report — BEFORE any write, and in dry run too. This warning used to sit inside the
+  // --write branch after fs.writeFileSync, so the mode whose only purpose is to let you
+  // decide never showed you the thing you would decide on.
+  if (unknownRates.length) {
+    console.log(`\x1b[33m! ${unknownRates.length} new model(s) have no published cache rate — those tokens would cost $0:\x1b[0m`);
+    for (const u of unknownRates) console.log(`    ${u.key} — ${u.missing.join(', ')} unknown, recorded as 0`);
+    console.log("  That is the source's gap, not a price of zero. Set them by hand in pricing.json if you know them.");
+    console.log('');
+  }
+
   if (added.length > 0) {
     console.log(`\x1b[32m+ ${added.length} new models:\x1b[0m`);
     for (const { key, pricing } of added) {
@@ -185,11 +194,6 @@ async function main() {
   result._meta = { ...meta, lastVerified: new Date().toISOString().slice(0, 7) };
 
   fs.writeFileSync(PRICING_PATH, JSON.stringify(result, null, 2) + '\n');
-  if (unknownRates.length) {
-    console.log(`\n\x1b[33m! ${unknownRates.length} new model(s) have no published cache rate — those tokens will cost $0:\x1b[0m`);
-    for (const u of unknownRates) console.log(`    ${u.key} — ${u.missing.join(', ')} unknown, recorded as 0`);
-    console.log('  That is the source\'s gap, not a price of zero. Set them by hand in pricing.json if you know them.');
-  }
   console.log(`\n\x1b[32m✓ pricing.json updated (${added.length} added, ${updated.length} updated)\x1b[0m`);
 }
 

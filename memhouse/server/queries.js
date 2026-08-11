@@ -77,9 +77,10 @@ function applyRooms(sql, r) {
   });
 }
 
-async function q(query, params = {}) {
+async function q(query, params = {}, settings = undefined) {
   const rs = await getClient().query({
     query: applyRooms(query, await rooms()), query_params: params, format: 'JSONEachRow',
+    ...(settings ? { clickhouse_settings: settings } : {}),
   });
   return rs.json();
 }
@@ -148,6 +149,8 @@ function normalizedModelFreq(rows) {
   }
   return freq;
 }
+// The same exclusions as EXCLUDED_MODELS, usable in JS.
+const EXCLUDED_MODEL_SET = new Set(['', '<synthetic>']);
 const topN = (freq, n) => Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, n)
   .map(([name, count]) => ({ name, count }));
 
@@ -163,10 +166,13 @@ async function getOverview(opts = {}) {
     `SELECT count() AS cnt FROM {{sessions_v}} AS c WHERE 1=1${f.and} AND (c.name != '' OR c.total_msgs > 0)`,
     f.params)).cnt);
 
-  // Root parity: without a folder filter the editor breakdown is global.
-  const editors = opts.folder
-    ? await q(`SELECT source, count() AS count FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY source ORDER BY count DESC`, f.params)
-    : await q('SELECT source, count() AS count FROM {{sessions_v}} GROUP BY source ORDER BY count DESC');
+  // Root parity WAS: without a folder filter the editor breakdown is global — which put
+  // "34 + 3" chips under a header reading "3 sessions" when an editor filter was applied,
+  // and 12 under a header of 11 with no filter at all. Parity with a wrong number is not a
+  // feature.
+  const editors = await q(
+    `SELECT source, count() AS count FROM {{sessions_v}} AS c
+     WHERE (c.name != '' OR c.total_msgs > 0)${f.and} GROUP BY source ORDER BY count DESC`, f.params);
 
   const modes = await q(`SELECT mode, count() AS count FROM {{sessions_v}} AS c WHERE mode != ''${f.and} GROUP BY mode`, f.params);
   const byMode = {};
@@ -264,7 +270,10 @@ async function getDashboardStats(opts = {}) {
            COALESCE(sum(cache_read_tokens), 0) AS cacheRead, COALESCE(sum(cache_write_tokens), 0) AS cacheWrite,
            COALESCE(sum(user_chars), 0) AS userChars, COALESCE(sum(assistant_chars), 0) AS assistantChars,
            COALESCE(sum(total_msgs), 0) AS messages,
-           count() AS sessions
+           -- The SAME definition the KPI beside it uses. A plain count() here put a
+           -- fourth session number on a screen that already had three: nav 11, chips 12,
+           -- avg depth 40/12, histogram 10.
+           countIf(c.name != '' OR c.total_msgs > 0) AS sessions
     FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
 
   const streakRows = await q(`
@@ -386,14 +395,25 @@ async function getChats(opts = {}) {
            sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,
            sum(cache_read_tokens) AS cache_r, sum(cache_write_tokens) AS cache_w
     FROM {{messages}}
-    WHERE session_id IN {ids:Array(String)} AND model NOT IN ${EXCLUDED_MODELS}
+    WHERE session_id IN {ids:Array(String)}
     GROUP BY session_id, user_id, model`, { ids });
   const topModelBySession = {};
   const costBySession = {};
   const bestCnt = {};
+  // Tokens on rows with no model — or an excluded placeholder — belong to the session's
+  // dominant model, which is what computeCostAnalytics does. Excluding them here is why
+  // the two pages disagreed a second time after the first fix: $2.00 against $4.00.
+  const orphan = {};
   for (const r of tmRows) {
     const k = `${r.session_id}::${r.user_id}`;
     const cnt = Number(r.cnt) || 0;
+    const excluded = !r.model || EXCLUDED_MODEL_SET.has(r.model);
+    if (excluded) {
+      const o = orphan[k] || (orphan[k] = { in: 0, out: 0, cr: 0, cw: 0 });
+      o.in += Number(r.in_tok) || 0; o.out += Number(r.out_tok) || 0;
+      o.cr += Number(r.cache_r) || 0; o.cw += Number(r.cache_w) || 0;
+      continue;
+    }
     if (cnt > (bestCnt[k] || 0)) { bestCnt[k] = cnt; topModelBySession[k] = normalizeModelName(r.model) || r.model; }
     // calculateCost normalizes internally, so the raw name is correct here — only the
     // DISPLAY name above is canonicalised.
@@ -401,8 +421,8 @@ async function getChats(opts = {}) {
       Number(r.cache_r) || 0, Number(r.cache_w) || 0);
     // null = unpriced model. Keep it distinguishable from a real zero so the row can say
     // "partly unpriced" rather than quietly under-reporting.
-    if (c === null) costBySession[k] = costBySession[k] || { total: 0, unpriced: true };
-    else { costBySession[k] = costBySession[k] || { total: 0, unpriced: false }; costBySession[k].total += c; }
+    const e = costBySession[k] || (costBySession[k] = { total: 0, unpriced: false });
+    if (c === null) e.unpriced = true; else e.total += c;
   }
 
   return rows.map(r => {
@@ -414,9 +434,18 @@ async function getChats(opts = {}) {
     }
     // Summed per model above. The char-estimate fallback below only applies when the row
     // carries no token counts at all, in which case there is nothing per-model to sum.
-    const summed = costBySession[`${r.id}::${r.user_id}`];
-    const cost = summed ? summed.total
-      : (topModel ? (calculateCost(topModel, inTok, outTok, Number(r._cacheR) || 0, Number(r._cacheW) || 0) || 0) : 0);
+    const k = `${r.id}::${r.user_id}`;
+    const summed = costBySession[k];
+    // Orphan tokens priced at the dominant model, matching the Costs page.
+    const o = orphan[k];
+    const orphanCost = (o && topModel) ? (calculateCost(topModel, o.in, o.out, o.cr, o.cw) || 0) : 0;
+    // The char-estimate fallback applies when the row carries no REAL token counts, which a
+    // summed total of 0 does not rule out — gating on `summed` being absent meant a session
+    // whose only model rows had zero tokens got $0 here and a real number on the Costs page.
+    const hasTokens = (Number(r._inTok) || 0) > 0 || (Number(r._outTok) || 0) > 0;
+    const cost = (summed || o)
+      ? (summed ? summed.total : 0) + orphanCost
+      : (!hasTokens && topModel ? (calculateCost(topModel, inTok, outTok, Number(r._cacheR) || 0, Number(r._cacheW) || 0) || 0) : 0);
     return {
       // Composite API id: rollups are keyed (session_id, user_id), so the id a
       // client clicks must pin BOTH — otherwise opening one of two colliding
@@ -426,6 +455,9 @@ async function getChats(opts = {}) {
       source: r.source, name: r.name, mode: r.mode, folder: r.folder,
       createdAt: r.created_at, lastUpdatedAt: r.last_updated_at,
       encrypted: false, bubbleCount: Number(r.bubble_count), topModel, cost,
+      // Surfaced, not just computed. A session containing an unpriced model reports a cost
+      // that silently omits part of itself; the caller can now say so.
+      costPartial: !!(summed && summed.unpriced),
     };
   });
 }
@@ -919,10 +951,22 @@ async function getCostAnalytics(opts = {}) {
 }
 
 // ── raw SQL / schema (SqlViewer) ────────────────────────────────────────────────
+// Bounded at the SERVER, not in JS. `q()` buffers every row into memory, so
+// `SELECT number FROM numbers(2000000000)` killed the whole dashboard process —
+// "FATAL ERROR: Ineffective mark-compacts near heap limit", unauthenticated, on the bound
+// port. Capping after the rows arrive is too late; ClickHouse has to stop sending.
+const RAW_MAX_ROWS = 10000;
+const RAW_MAX_BYTES = 64 * 1024 * 1024;
 async function rawQuery(sql) {
-  const rows = await q(sql);
+  const rows = await q(sql, {}, {
+    max_result_rows: RAW_MAX_ROWS,
+    max_result_bytes: RAW_MAX_BYTES,
+    // Cut the result off rather than failing a query that was legitimately large.
+    result_overflow_mode: 'break',
+    max_execution_time: 30,
+  });
   const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-  return { columns, rows, count: rows.length };
+  return { columns, rows, count: rows.length, truncated: rows.length >= RAW_MAX_ROWS };
 }
 
 async function schema() {
