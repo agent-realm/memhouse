@@ -250,8 +250,12 @@ async function main() {
   // MEMBER_PROFILE_SETTINGS in a later version would otherwise stay enforced forever on
   // every upgraded house, and anything an operator had added to a profile of the same name
   // would survive too. Clearing then applying gives the same absolute state OR REPLACE had,
-  // without its detachment. (The gap between the two statements is admin-only and
-  // sub-second; a member's queries are unbounded for that instant.)
+  // without its detachment.
+  //
+  // The gap between the two statements is admin-only and sub-second — but it is not
+  // self-healing: a crash or a dropped connection between them leaves the profile EMPTY,
+  // so every member is unbounded until someone provisions again. Nothing here notices, and
+  // `doctor` does not check the profile. Re-run provision if one dies mid-way.
   try {
     await client.command({ query: `CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE}` });
     await client.command({ query: `ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS NONE` });
