@@ -26,13 +26,6 @@ const { execFileSync, spawnSync } = require('child_process');
 const envfile = require('./envfile');
 
 const LABEL = 'memhouse-shipper';
-// Units this build never writes, but earlier ones did. A machine that ran the solo tier
-// still has these enabled and possibly executing a script that no longer exists, so
-// uninstall has to reap them or it reports success over a live service. Cleanup outlives
-// the feature; nothing here ever installs them.
-const LEGACY_UNITS = [
-  { unit: 'memhouse-solo.service', label: 'com.memhouse.solo', file: 'memhouse-solo.service', plist: 'com.memhouse.solo.plist' },
-];
 // Environment an ADAPTER reads to find its sessions, as opposed to the connection
 // settings that live in the env file. Keep this in step with `editors/` — today
 // `editors/codex.js` is the only adapter with an override.
@@ -288,16 +281,9 @@ function uninstall() {
   const stillRunning = [];
   const indeterminate = [];
 
-  const home = os.homedir();
-  const legacy = LEGACY_UNITS.map((l) => (kind === 'systemd'
-    ? [l.unit, path.join(home, '.config', 'systemd', 'user', l.file), l.label]
-    : [l.label, path.join(home, 'Library', 'LaunchAgents', l.plist), l.label]));
-  const units = [
-    ...(kind === 'systemd'
-      ? [[`${LABEL}.service`, p, 'com.memhouse.shipper']]
-      : [['com.memhouse.shipper', p, 'com.memhouse.shipper']]),
-    ...legacy,
-  ];
+  const units = kind === 'systemd'
+    ? [[`${LABEL}.service`, p, 'com.memhouse.shipper']]
+    : [['com.memhouse.shipper', p, 'com.memhouse.shipper']];
 
   for (const [unit, file, label] of units) {
     if (!fs.existsSync(file)) continue;
@@ -416,21 +402,11 @@ function status() {
   const kind = platform();
   if (!kind) return { kind: null, installed: false, running: false };
   const p = unitPaths()[kind];
-  const home = os.homedir();
-  // Legacy units are reported separately: `installed` must stay "this build's unit is
-  // here", or every caller that asks it starts meaning something else. But uninstall has
-  // to know, or a machine with ONLY a stale solo unit skips the service step entirely.
-  const legacy = LEGACY_UNITS
-    .map((l) => (kind === 'systemd'
-      ? path.join(home, '.config', 'systemd', 'user', l.file)
-      : path.join(home, 'Library', 'LaunchAgents', l.plist)))
-    .filter((f) => fs.existsSync(f));
   return {
     kind,
     installed: fs.existsSync(p),
     running: isRunning(kind, `${LABEL}.service`, 'com.memhouse.shipper'),
     path: p,
-    legacy,
   };
 }
 

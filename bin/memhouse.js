@@ -48,48 +48,6 @@ for (let i = 0; i < rest.length; i++) {
 }
 const JSON_OUT = flags.json === true;
 
-// A config written by the solo tier points at a shim this build cannot start. Left
-// alone it reads as an ordinary external house that happens to be down, so `start`
-// launches a shipper and dashboard against a dead endpoint and `doctor` reports a
-// generic connection failure. Refuse, and say the two things that actually work.
-//
-// Commands that are the way OUT stay allowed — including, emphatically, the ones the
-// refusal message itself recommends. A guard that blocks its own advice leaves the user
-// editing the env file by hand.
-//
-//   deploy   — `--local` rewrites the config, which is what ENDS this state; `--down`
-//              only removes a container.
-//   service  — `status` is how the stale-unit warning is seen and `uninstall` is how it
-//              is removed; only `service install` is blocked, since installing a unit
-//              pointed at the dead shim is the one thing here that makes it worse.
-const LEGACY_SOLO_OK = new Set([
-  'setup', 'uninstall', 'discover', 'plugins', 'prompt', 'stop', 'deploy', 'help', 'version', null,
-]);
-
-function legacySoloGuard() {
-  let file = {};
-  try { file = envfile.parse(fs.readFileSync(ENV_FILE, 'utf-8')); } catch { return false; }
-  if (file.MEMHOUSE_SOLO !== '1') return false;
-  if (LEGACY_SOLO_OK.has(cmd)) return false;
-  if (cmd === 'service' && positional[0] !== 'install') return false;
-  console.log(bad(`${ENV_FILE.replace(os.homedir(), '~')} was written by the solo tier, which this version removed.`));
-  console.log(`  It points at ${file.MEMHOUSE_URL || 'an embedded shim'}, and nothing here can start that.`);
-  console.log('');
-  console.log('  Your transcripts are not lost — memhouse ships FROM your local session stores,');
-  console.log('  so a new house rebuilds them. Point at one and re-ship:');
-  console.log('     memhouse deploy --local          (a ClickHouse in docker or podman)');
-  console.log('     memhouse setup --url … --user … --password …   (one you already run)');
-  console.log('     memhouse ship --full');
-  console.log('');
-  console.log('  The old embedded data is chdb-format and only readable by chdb; keep');
-  console.log(`  ${path.join(HOME_DIR, 'solo-data').replace(os.homedir(), '~')} if you want it, or delete it.`);
-  console.log('  Then, for anything the old version left behind:');
-  console.log('     memhouse stop              (reaps a shim still running)');
-  console.log('     memhouse service status    (shows a stale unit, if there is one)');
-  console.log('     memhouse service uninstall (removes it)');
-  return true;
-}
-
 let ONBOARDING = false;
 
 // ── config ──────────────────────────────────────────────────────────────────────
@@ -193,47 +151,6 @@ async function ch(cfg, sql, { database = cfg.db } = {}) {
 async function chRows(cfg, sql, opts) {
   const text = await ch(cfg, sql + ' FORMAT JSONEachRow', opts);
   return text ? text.split('\n').map((l) => JSON.parse(l)) : [];
-}
-
-/**
- * Is this house a pre-0.4 one?
- *
- * 0.3.x kept three rooms named `sessions`/`messages`/`tool_calls` plus a stored
- * `sessions_v` view, shared by everyone and separated by row policies. 0.4.0 deleted that
- * layout. The database NAME survives an upgrade — explicit MEMHOUSE_DB outranks the new
- * `mem` default — but the TABLES do not, so every read and write fails with UNKNOWN_TABLE
- * naming a room the user has never heard of.
- *
- * Saying "run memhouse install" to someone in that state is useless: they did install, and
- * their memory is sitting right there in the house. Detect it and say so.
- */
-async function looksLikePre040(cfg) {
-  try {
-    const rows = await chRows(cfg,
-      `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN ('sessions','messages','tool_calls','sessions_v')`,
-      { database: '' });
-    return rows.map((r) => r.name);
-  } catch { return []; }
-}
-
-function reportPre040(cfg, member, found) {
-  console.log(bad(`'${cfg.db}' holds a pre-0.4 house — ${found.join(', ')} — and 0.4.0 cannot read it.`));
-  console.log('  0.4.0 replaced the shared rooms with one set per member. The database name');
-  console.log('  survived your upgrade; the table names did not.');
-  console.log('');
-  console.log('  Your transcripts are NOT lost. memhouse ships FROM your local session stores,');
-  console.log('  so the new rooms rebuild from disk. Build them in a NEW house and leave this');
-  console.log('  one untouched:');
-  console.log(`     memhouse install --force --db mem --admin-user <user> --admin-password <pw> --member ${member}`);
-  console.log('     memhouse ship --full');
-  console.log('');
-  console.log(`  A NEW house, not this one, and --force because the config still points here.`);
-  console.log(`  Rebuilding into '${cfg.db}' would put the member rooms beside the old`);
-  console.log("  `sessions_v`, which the `^sessions_` team-room selector matches — every");
-  console.log('  session would then be counted twice.');
-  console.log('');
-  console.log('  Sessions whose transcripts you have since deleted locally live only in the old');
-  console.log(`  tables. Read them there before dropping anything: SELECT * FROM ${cfg.db}.sessions`);
 }
 
 /** Is anything listening on this loopback port? */
@@ -1065,11 +982,6 @@ async function cmdInstall({ interactive }) {
   let have = [];
   try { have = await present(); } catch (e) { console.log(bad(`could not list rooms: ${e.message}`)); return 1; }
   if (have.length !== want.length) {
-    // Check for a pre-0.4 house BEFORE trying to mint anything. `--ensure-schema` on one
-    // of those dies with an UNKNOWN_TABLE stack trace, and a stack trace printed above a
-    // clean explanation is how a clear message gets missed.
-    const legacy = await looksLikePre040(cfg);
-    if (legacy.length) { reportPre040(cfg, r.member, legacy); return 1; }
     // Try to mint them as ourselves before asking anyone for anything. This is the ONE
     // call site where a permission refusal is expected and already explained below, so
     // the child is told to stay quiet about it rather than print above our message.
@@ -1259,15 +1171,9 @@ async function cmdStart() {
   }
 }
 
-// `solo` is here and NOT in the start list on purpose. The tier is gone, but a machine
-// that ran it before this upgrade can still have a detached shim alive with its pid in
-// run/solo.pid — and `uninstall` deletes MEMHOUSE_HOME, which is where its data directory
-// lives. Reaping has to outlive the feature; starting must not.
-const LEGACY_DAEMONS = ['solo'];
-
 function cmdStop() {
   let stopped = 0;
-  for (const name of ['shipper', 'dashboard', ...LEGACY_DAEMONS]) {
+  for (const name of ['shipper', 'dashboard']) {
     const pid = pidOf(name);
     if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`${name} stopped (pid ${pid})`)); stopped++; } catch { /* raced */ } }
     try { fs.unlinkSync(path.join(RUN_DIR, name + '.pid')); } catch { /* absent */ }
@@ -1368,7 +1274,6 @@ async function cmdDoctor() {
       const objects = ROOM_TYPES.map((t) => rooms[t]);
       const want = objects.map((n) => `'${n}'`).join(',');
       const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
-      const legacy = t === objects.length ? [] : await looksLikePre040(cfg);
       // Name what is MISSING. The parenthesised list used to be what should exist, so
       // "2/3" was the only signal and you could not tell which room to worry about.
       const present = new Set((await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).map((r) => r.name));
@@ -1376,9 +1281,7 @@ async function cmdDoctor() {
       add(t === objects.length, t === objects.length
         ? `schema: 3/3 rooms in '${cfg.db}' (${objects.join(', ')})`
         : `schema: ${t}/${objects.length} rooms in '${cfg.db}' — missing ${absent.join(', ')}`,
-        legacy.length
-          ? `pre-0.4 house (${legacy.join(', ')}) — 0.4 cannot read it; see: memhouse install --help, then ship --full`
-          : `run: memhouse install, or as the owner: node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${rooms.member}`);
+        `run: memhouse install, or as the owner: node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${rooms.member}`);
     } catch (e) { add(false, 'schema check', `${e.message} — run: memhouse install`); }
     // Columns, not just rooms. A room with a column missing accepts every insert and
     // discards that field — measured, 85 rows shipped with the value thrown away while
@@ -2016,9 +1919,7 @@ function cmdUninstall() {
   // shipping transcripts — with a credential in a file the user now believes is gone.
   const svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
   const st = svc.status();
-  // `legacy` too: a machine that ran the solo tier can have a stale unit and no current
-  // one, and skipping the service step there leaves it enabled over a deleted home.
-  if (st.kind && (st.installed || (st.legacy || []).length)) {
+  if (st.kind && st.installed) {
     const r = svc.uninstall();
     if (!r.ok) {
       // Removing the home now would delete the env file while a service keeps shipping
@@ -2043,7 +1944,6 @@ function cmdUninstall() {
     console.log(PKG.version); return;
   }
   const cfg = resolveConfig();
-  if (legacySoloGuard()) { process.exitCode = 2; return; }
 
   switch (cmd) {
     case null: case 'help': console.log(HELP); break;
@@ -2446,7 +2346,6 @@ function cmdUninstall() {
         if (!st.kind) { console.log(warn(`no service integration for '${process.platform}'`)); break; }
         console.log(st.installed ? ok(`service installed (${st.kind}): ${st.path}`) : warn('service not installed'));
         console.log(st.running ? ok('service running') : warn('service not running'));
-        for (const f of st.legacy || []) console.log(warn(`stale unit from an older version: ${f} — remove with: memhouse service uninstall`));
       }
       break;
     }

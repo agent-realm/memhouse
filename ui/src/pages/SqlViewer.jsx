@@ -33,16 +33,6 @@ const TYPED_EXAMPLES = [
   // arbitrary member's.
   { label: 'Full-text search', sql: `SELECT session_id, user_id, any(source) AS source, count() AS hits FROM {{messages}} WHERE text_ngram LIKE '%clickhouse%' GROUP BY session_id, user_id ORDER BY hits DESC LIMIT 10` },
 ]
-const LEGACY_EXAMPLES = [
-  { label: 'Sessions per editor', sql: `SELECT source, count() AS count FROM chats GROUP BY source ORDER BY count DESC` },
-  { label: 'Top 10 projects', sql: `SELECT folder, count() AS sessions, sum(bubble_count) AS messages FROM chats WHERE folder IS NOT NULL GROUP BY folder ORDER BY sessions DESC LIMIT 10` },
-  { label: 'Messages per day', sql: `SELECT toDate(toDateTime(intDiv(created_at, 1000))) AS day, count() AS count FROM chats WHERE created_at IS NOT NULL GROUP BY day ORDER BY day` },
-  { label: 'Top models', sql: `SELECT model, count() AS count FROM messages WHERE model IS NOT NULL GROUP BY model ORDER BY count DESC LIMIT 10` },
-  { label: 'Top tools', sql: `SELECT tool_name, count() AS count FROM tool_calls GROUP BY tool_name ORDER BY count DESC LIMIT 15` },
-  { label: 'Token usage by editor', sql: `SELECT c.source AS source, sum(cs.total_input_tokens) AS input_tokens, sum(cs.total_output_tokens) AS output_tokens FROM chat_stats AS cs JOIN chats AS c ON c.id = cs.chat_id GROUP BY c.source ORDER BY input_tokens DESC` },
-  { label: 'Sessions by mode', sql: `SELECT mode, count() AS count FROM chats WHERE mode IS NOT NULL GROUP BY mode ORDER BY count DESC` },
-  { label: 'Hourly distribution', sql: `SELECT toHour(toDateTime(intDiv(created_at, 1000))) AS hour, count() AS count FROM chats WHERE created_at IS NOT NULL GROUP BY hour ORDER BY hour` },
-]
 
 // `{{room}}` -> the resolved name (or, for the rollup on a per-member house, the whole
 // subquery). Same token shape the server's own query layer uses.
@@ -71,24 +61,17 @@ export default function SqlViewer() {
   useEffect(() => {
     fetchSchema().then(s => {
       setSchema(s)
-      // Three outcomes, not two. The typed house is whichever one /api/schema resolved
-      // rooms for; the legacy one has `chats`. Anything else — an error object with no
-      // `tables`, a half-applied schema with neither marker — is indeterminate, and
-      // offering either set would hand the user queries that error.
-      //
       // `rooms` is the authority, not a table name: a per-member house has no
       // `sessions_v` object, so the old `tables.includes('sessions_v')` test called a
-      // perfectly healthy typed house indeterminate.
-      const tables = s?.tables
+      // perfectly healthy typed house indeterminate. Anything without resolved rooms —
+      // an error object, a half-applied schema — stays indeterminate and offers nothing,
+      // because offering queries against tables that do not exist is worse than silence.
       const rooms = s?.rooms
-      const ex = rooms?.sessions ? TYPED_EXAMPLES.map(e => ({ ...e, sql: applyRooms(e.sql, rooms) }))
-        : !Array.isArray(tables) ? null
-          : tables.includes('chats') ? LEGACY_EXAMPLES
-            : null
+      const ex = rooms?.sessions ? TYPED_EXAMPLES.map(e => ({ ...e, sql: applyRooms(e.sql, rooms) })) : null
       setExamples(ex)
       if (!ex) return
       // Swap the prefilled query only if the user hasn't edited it yet.
-      setSql(prev => (prev === '' || prev === TYPED_EXAMPLES[0].sql || prev === LEGACY_EXAMPLES[0].sql) ? ex[0].sql : prev)
+      setSql(prev => (prev === '' || prev === TYPED_EXAMPLES[0].sql) ? ex[0].sql : prev)
     }).catch(() => setExamples(null))
   }, [])
 

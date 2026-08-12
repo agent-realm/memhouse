@@ -1,38 +1,41 @@
-# Contributing to Agentlytics
+# Contributing to memhouse
 
 ## Architecture
 
 ```
-Editor files/APIs → editors/*.js → cache.js (SQLite) → server.js (REST) → React SPA
+editor files/DBs → editors/*.js → memhouse/shipper/ship.js → ClickHouse rooms
+                                → memhouse/server/ (REST) → ui/ (React SPA)
 ```
 
-1. **Editor adapters** (`editors/*.js`) — read chat data from local files, databases, or running processes
-2. **Cache layer** (`cache.js`) — normalizes everything into `~/.agentlytics/cache.db`
-3. **Express server** (`server.js`) — read-only REST endpoints
-4. **React frontend** (`ui/`) — Chart.js-powered SPA
+1. **Editor adapters** (`editors/*.js`) — read sessions from local files, SQLite stores,
+   or a running language server. This is the layer worth contributing to.
+2. **Shipper** (`memhouse/shipper/ship.js`) — runs the adapters, normalizes to typed rows,
+   and writes them into the caller's own rooms. No LLM, no server component.
+3. **Rooms** (`memhouse/per-member/`) — `sessions_<member>`, `messages_<member>`,
+   `tool_calls_<member>` in the `mem` database. See
+   [`memhouse/per-member/SCHEMA.md`](memhouse/per-member/SCHEMA.md); there is no local
+   SQLite cache.
+4. **Server + SPA** (`memhouse/server/`, `ui/`) — the dashboard.
 
-## Development Setup
+## Development setup
 
 ```bash
-git clone https://github.com/f/agentlytics.git
-cd agentlytics && npm install
+git clone https://github.com/agent-realm/memhouse.git
+cd memhouse && npm install          # the allowScripts field covers better-sqlite3
 
-# Starts both frontend (port 5173) and backend (port 4637)
-cd ui && npm install && npm run dev
+node bin/memhouse.js discover       # read-only: what this machine has
+node bin/memhouse.js --help
+npm test                            # syntax gate + unit checks
+
+cd ui && npm run dev                # SPA on 5173, proxying /api to the server
 ```
 
-`npm run dev` from the `ui/` directory starts both the Vite dev server and the backend concurrently. The Vite dev server proxies `/api/*` requests to the backend via `vite.config.js`. Ctrl+C stops both processes.
-
-### CLI Options
-
-```bash
-agentlytics              # normal start (uses cache)
-agentlytics --no-cache   # wipe cache and full rescan
-```
+`npm install` without `--allow-scripts` from a checkout is fine — `package.json` already
+allows the one script that matters. A **published** install needs the flag; see the README.
 
 ---
 
-## Adding a New Editor
+## Adding a new editor
 
 1. Create `editors/<name>.js` with the adapter interface:
 
@@ -44,7 +47,7 @@ module.exports = {
 
   getChats() {
     return [{
-      source: 'my-editor',       // editor identifier
+      source: 'my-editor',       // editor identifier — see the note below
       composerId: '...',          // unique chat ID
       name: '...',                // chat title (nullable)
       createdAt: 1234567890,      // timestamp in ms (nullable)
@@ -74,22 +77,37 @@ module.exports = {
 };
 ```
 
-2. Register in `editors/index.js`:
+2. Register in `editors/index.js`.
+3. Add a colour and label in `ui/src/lib/constants.js`.
+4. **Put the `source` string in a bucket in [`memhouse/resume.js`](memhouse/resume.js)** —
+   resumable (with the flag read out of the CLI's own `--help`), no-CLI, or unverified.
+   `npm test` fails until you do; that is deliberate.
 
-```javascript
-const myEditor = require('./my-editor');
-const editors = [...existingEditors, myEditor];
-```
+### `name` is not `source`
 
-3. Add color and label in `ui/src/lib/constants.js`:
+The module's `name` and the `source` on each chat are **different strings**, and `source`
+is the one that lands in the database and in every `session_id`. `editors/claude.js` is
+`const name = 'claude'` and emits `source: 'claude-code'`. Getting this wrong is silent.
 
-```javascript
-export const EDITOR_COLORS = { ..., 'my-editor': '#hex' };
-export const EDITOR_LABELS = { ..., 'my-editor': 'My Editor' };
-```
+### A failed read must write nothing
+
+The hardest-won rule in this codebase, and the reason `editors/adapter-errors.js` exists.
+
+An adapter that cannot read a session must **record the failure and return nothing** — never
+an empty array, never a partial transcript. A partial read gets shipped, the stored
+`message_count` is written from the partial rows, and the incremental skip predicate then
+withholds that session on every later pass: the truncation becomes permanent *and* the
+warning stops. Report through `adapterErrors.record()` and let the shipper retry.
+
+The same applies to counts: a failed count is **not** a count of zero. Set `_countUnknown`
+so the skip predicate refuses to skip, or the session goes stale forever.
+
+Fix a defect of this shape across **all** adapters and **both** storage paths in one pass —
+four separate review rounds here caught the same bug fixed in one adapter and not its
+siblings. And check discovery-time omissions separately from read-time failures: a session
+dropped while listing never reaches `doctor`'s probes at all.
 
 ---
-
 ## Editor Adapter Details
 
 ### Cursor
@@ -167,58 +185,19 @@ Reads from `~/.local/share/opencode/opencode.db`:
 
 ---
 
-## Database Schema
+---
 
-Location: `~/.agentlytics/cache.db`
+## Where the data goes
 
-### `chats`
+There is no local cache database. Rows land in ClickHouse, one set of rooms per member —
+`sessions_<member>`, `messages_<member>`, `tool_calls_<member>` — with the column list,
+sort keys and the `origin` guarantees in
+[`memhouse/per-member/SCHEMA.md`](memhouse/per-member/SCHEMA.md).
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | TEXT PK | Unique chat ID |
-| `source` | TEXT | Editor identifier |
-| `name` | TEXT | Chat title |
-| `mode` | TEXT | Session mode |
-| `folder` | TEXT | Project directory |
-| `created_at` | INTEGER | Creation timestamp (ms) |
-| `last_updated_at` | INTEGER | Last update (ms) |
-| `bubble_count` | INTEGER | Message count |
-| `encrypted` | INTEGER | 1 if encrypted |
+Two properties to respect when touching the write path:
 
-### `messages`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `chat_id` | TEXT FK | → `chats.id` |
-| `seq` | INTEGER | Sequence number |
-| `role` | TEXT | `user` / `assistant` / `system` / `tool` |
-| `content` | TEXT | Message text (truncated at 50K chars) |
-| `model` | TEXT | Model name |
-| `input_tokens` | INTEGER | Input tokens |
-| `output_tokens` | INTEGER | Output tokens |
-
-### `chat_stats`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `chat_id` | TEXT PK | → `chats.id` |
-| `total_messages` | INTEGER | Total count |
-| `user_messages` | INTEGER | User messages |
-| `assistant_messages` | INTEGER | Assistant messages |
-| `tool_calls` | TEXT | JSON array of tool names |
-| `models` | TEXT | JSON array of model names |
-| `total_input_tokens` | INTEGER | Sum of input tokens |
-| `total_output_tokens` | INTEGER | Sum of output tokens |
-| `total_cache_read` | INTEGER | Cache read tokens |
-| `total_cache_write` | INTEGER | Cache write tokens |
-
-### `tool_calls`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `chat_id` | TEXT FK | → `chats.id` |
-| `tool_name` | TEXT | Function name |
-| `args_json` | TEXT | Full arguments as JSON |
-| `source` | TEXT | Editor |
-| `folder` | TEXT | Project directory |
-| `timestamp` | INTEGER | Timestamp (ms) |
+- **`origin`** separates rows the shipper wrote from rows imported from elsewhere. The
+  shipper's clear binds `origin='ship'`; without that bind a re-ship destroys imported
+  history it cannot reproduce.
+- **`user_id MATERIALIZED currentUser()`** is stamped by the server. Never send it, and
+  never trust a member-supplied identity.
