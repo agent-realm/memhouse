@@ -4,23 +4,12 @@
   "description": "memhouse \u2014 agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store with one set of rooms per member, kernel-agency install, and the agentlytics dashboard",
   "main": "bin/memhouse.js",
   "bin": {
-    "memhouse": "./bin/memhouse.js",
-    "agentlytics": "./index.js"
+    "memhouse": "./bin/memhouse.js"
   },
   "files": [
     "bin/",
     "memhouse/",
     "misc/syntax-check.js",
-    "index.js",
-    "cache.js",
-    "ch-schema.js",
-    "ch-ingest.js",
-    "clickhouse.js",
-    "server.js",
-    "share-image.js",
-    "relay-server.js",
-    "relay-client.js",
-    "mcp-server.js",
     "pricing.js",
     "pricing.json",
     "editors/",

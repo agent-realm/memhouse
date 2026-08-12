@@ -82,11 +82,13 @@ It **prints** the command instead of running it. A resume run from the wrong dir
 or with a stale id does not fail — it opens a *new* session, and the transcript you
 wanted is still gone while the tool reports success. You paste it, so you see it first.
 
-Verified for **claude, codex and opencode**. The GUI editors — cursor, zed, vscode,
-copilot, windsurf and the rest — have no CLI that takes a session id, so there is
-nothing to resume into and `resume` says so rather than opening a folder and calling
-it the same thing. Adding an editor means reading its real `--help`, not guessing:
-see `memhouse/resume.js`.
+Verified for **claude, codex and opencode**. Cursor, Zed, VS Code, Kiro, Copilot for
+JetBrains, Antigravity and Devin/Windsurf have no CLI that takes a session id, so
+there is nothing to resume into and `resume` says exactly that, rather than opening a
+folder and calling it the same thing. Everything else — goose, gemini-cli,
+cursor-agent, copilot-cli — is refused as *unverified*, which is a different sentence
+on purpose: nobody has read the flag out of its own `--help` yet, and guessing is how
+you print a command that quietly does the wrong thing. See `memhouse/resume.js`.
 
 ## Staying current
 
