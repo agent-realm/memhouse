@@ -58,12 +58,15 @@ const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
 const ARGS_MAX = 20000;    // tool_calls.args truncation
 
-// Stable host id: <shorthostname>-<8hex sha256(machine seed)> (memory-house convention).
+// Stable host id: <shorthostname>-<8hex>, where the hex half is a fingerprint written
+// ONCE into MEMHOUSE_HOME rather than hashed out of hostname/platform/arch.
+//
+// The derived version failed in both directions, and both matter here because every
+// machine belonging to one member ships into the SAME rooms — `host` is the only column
+// separating them. Two laptops answering to the same default hostname produced one id
+// between them; renaming a machine moved its id and split its own history. See ../host.js.
 function hostId() {
-  const short = (os.hostname() || 'host').split('.')[0];
-  const seed = `${os.hostname()}|${os.platform()}|${os.arch()}`;
-  const h = crypto.createHash('sha256').update(seed).digest('hex').slice(0, 8);
-  return `${short}-${h}`;
+  return require('../host').identity().id;
 }
 
 // UInt64 (as decimal string) = first 8 bytes big-endian of sha256 over the row's

@@ -315,7 +315,11 @@ Setup        onboard              interactive wizard: discover → configure →
                                   the member. The admin credential is never stored.
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
-             uninstall            stop daemons + remove ${HOME_DIR.replace(os.homedir(), '~')} (house data untouched)
+             uninstall            stop daemons + service, clear runtime state.
+                                  KEEPS the config and this machine's host identity
+                                  --credentials    also forget the house and its password
+                                  --full-removal   all of ${HOME_DIR.replace(os.homedir(), '~')}, identity included
+                                  no tier touches the house data
              update               upgrade, restart the daemons, and check the house schema
                                   (--check to compare versions and change nothing)
              reset                clear the shipper's rows and re-ship everything (--yes to skip confirm)
@@ -881,6 +885,12 @@ async function cmdInstall({ interactive }) {
   }
     writeEnvFile(cfg);
     console.log(ok(`config written: ${ENV_FILE}`));
+    // Same as the member path below: the identity is minted where the machine joins.
+    {
+      const me = require(path.join(REPO_ROOT, 'memhouse', 'host.js')).identity(HOME_DIR);
+      console.log(ok(`host identity: ${me.id}`));
+      console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
+    }
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
     console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
     console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
@@ -1014,6 +1024,15 @@ async function cmdInstall({ interactive }) {
   // config file behind every failed attempt, and the next command reads it as truth.
   writeEnvFile(cfg);
   console.log(ok(`config written: ${ENV_FILE}`));
+  // Mint this machine's identity here rather than leaving it to whatever runs first.
+  // Installing is the moment a machine joins the member's rooms, and the id is what every
+  // later `WHERE host = …` depends on — so it is worth naming once, out loud, at the point
+  // the pilot can still see it.
+  {
+    const me = require(path.join(REPO_ROOT, 'memhouse', 'host.js')).identity(HOME_DIR);
+    console.log(ok(`host identity: ${me.id}`));
+    console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
+  }
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
   }
@@ -1193,6 +1212,10 @@ async function cmdStatus() {
     daemons: { shipper: pidOf('shipper'), dashboard: pidOf('dashboard') },
     dashboard_url: pidOf('dashboard') ? `http://localhost:${runningPort(cfg)}` : null,
     shipper: shipperHealth(),
+    // Which machine this is, in the rooms' own terms. All of a member's machines write
+    // into one set of rooms, so `WHERE host = ...` is how the pilot separates this laptop
+    // from the other one — and they cannot type it if nothing ever prints it.
+    host: require(path.join(REPO_ROOT, 'memhouse', 'host.js')).identity(HOME_DIR),
     connected: false,
   };
   try {
@@ -1213,6 +1236,8 @@ async function cmdStatus() {
     : bad(`not connected: ${cfg.url} — ${out.error || 'no reason given'}`));
   if (!out.connected) console.log('  diagnose it with: memhouse doctor');
   if (out.member) console.log(ok(`rooms for '${out.member}'`));
+  // The member owns the rooms; the host says which of their machines wrote a row.
+  console.log(ok(`host: ${out.host.id}${out.host.renamed ? ` (this machine now answers to '${out.host.current_hostname}' — the id is kept so its history stays one machine)` : ''}`));
   if (out.connected && !out.messages) console.log(ok(`house: empty — ${out.sessions} sessions, 0 messages (nothing shipped yet)`));
   else if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
   console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
@@ -1378,6 +1403,25 @@ async function cmdDoctor() {
             : `identity stamping: ${blank} of ${total} rows have an empty user_id`,
         'a writer used async_insert=1 — the MATERIALIZED currentUser() stamp does not run during an async flush');
     } catch { add(false, 'identity stamping', 'schema missing? run: memhouse install'); }
+
+    // Which machines this member's rooms already hold, and whether THIS one is among
+    // them. All of a member's machines write into one set of rooms, so a host id that
+    // has quietly changed shows up here as a second machine that never existed — and
+    // nothing else in the pipeline would ever mention it.
+    try {
+      const me = require(path.join(REPO_ROOT, 'memhouse', 'host.js')).identity(HOME_DIR);
+      const hosts = await chRows(cfg, `SELECT host, count() AS c FROM ${rooms.sessions} FINAL GROUP BY host ORDER BY c DESC`);
+      const mine = hosts.find((h) => h.host === me.id);
+      const others = hosts.filter((h) => h.host !== me.id);
+      add(true,
+        hosts.length === 0
+          ? `host identity ${me.id} (nothing shipped from here yet)`
+          : `host identity ${me.id} — ${mine ? `${mine.c} sessions from this machine` : 'no sessions from this machine yet'}`
+            + (others.length ? `, ${others.length} other host${others.length > 1 ? 's' : ''} in these rooms: ${others.map((h) => `${h.host} (${h.c})`).join(', ')}` : ''));
+      if (me.renamed) {
+        add(true, `host renamed since install — id stays ${me.id}, machine now answers to '${me.current_hostname}'`);
+      }
+    } catch { /* the room read above already reported anything that would break this */ }
   }
   let adapterErrors = [];
   try {
@@ -1912,7 +1956,7 @@ async function cmdReset() {
   return run(SHIP_JS, ['--full'], cfg);
 }
 
-function cmdUninstall() {
+async function cmdUninstall() {
   // The OS service first, and this is not tidiness: it outlives the pidfile daemons by
   // design, it holds the credential inlined in its unit file, and it restarts itself. An
   // uninstall that stopped only the daemons would report success while a service kept
@@ -1932,8 +1976,75 @@ function cmdUninstall() {
     console.log(ok(`service removed (${r.kind})`));
   }
   cmdStop();
-  if (fs.existsSync(HOME_DIR)) fs.rmSync(HOME_DIR, { recursive: true });
-  console.log(ok(`removed ${HOME_DIR} (the house data in ClickHouse is untouched)`));
+
+  // Three tiers, and the default is the conservative one.
+  //
+  // This used to delete MEMHOUSE_HOME outright, which made "stop the daemons" and "forget
+  // the house I connect to, and who this machine is" the same command. They are not the
+  // same intent. Stopping the shipper is routine — before an upgrade, while debugging,
+  // when a laptop should go quiet for a week. Discarding the credential is a decision, and
+  // dropping the host fingerprint silently re-labels every row this machine ships after.
+  //
+  //   (default)         daemons, service, runtime state. Config and identity KEPT.
+  //   --credentials     also forget the house: the env file, with its password.
+  //   --full-removal    all of MEMHOUSE_HOME, fingerprint included. The next install is a
+  //                     NEW host whose rows do not join this machine's history.
+  //
+  // No tier touches the house: transcripts live in ClickHouse and re-ship from the local
+  // session stores regardless.
+  const hostjs = require(path.join(REPO_ROOT, 'memhouse', 'host.js'));
+  const full = flags['full-removal'] === true;
+  const creds = full || flags.credentials === true;
+  const hostFile = hostjs.filePath(HOME_DIR);
+
+  if (!fs.existsSync(HOME_DIR)) {
+    console.log(ok('daemons stopped — no state directory to remove'));
+    return;
+  }
+
+  if (full) {
+    // The only tier that discards the machine's identity, so the only one that asks.
+    // Re-installing afterwards starts a second host inside the same rooms, and nothing
+    // later can stitch the two halves together.
+    if (flags.yes !== true && process.stdin.isTTY) {
+      const id = hostjs.read(HOME_DIR);
+      console.log(warn(`--full-removal also discards this machine's host identity${id ? ` (${id.id})` : ''}.`));
+      console.log('  Rows already shipped keep that name, a future install gets a new one, and');
+      console.log("  this machine then reads as two. Your transcripts themselves are safe.");
+      const a = (await ask('Remove everything, including the host identity? (yes/no)', 'no')).toLowerCase();
+      if (a !== 'yes' && a !== 'y') { console.log('aborted — daemons are stopped, nothing was removed'); return; }
+    }
+    fs.rmSync(HOME_DIR, { recursive: true });
+    console.log(ok(`removed ${short(HOME_DIR)} entirely — config, credential and host identity`));
+    console.log('  the house data in ClickHouse is untouched');
+    return;
+  }
+
+  // Runtime state only: pidfiles and logs. The next `start` rebuilds both, and neither is
+  // worth keeping once nothing is running.
+  for (const d of ['run', 'logs']) {
+    const p = path.join(HOME_DIR, d);
+    if (fs.existsSync(p)) fs.rmSync(p, { recursive: true });
+  }
+  console.log(ok('removed runtime state (pidfiles, logs)'));
+
+  if (creds) {
+    if (fs.existsSync(ENV_FILE)) {
+      fs.rmSync(ENV_FILE);
+      console.log(ok(`removed ${short(ENV_FILE)} — the house connection and its credential`));
+    } else {
+      console.log(warn('no config file to remove'));
+    }
+  } else if (fs.existsSync(ENV_FILE)) {
+    console.log(ok(`kept ${short(ENV_FILE)} — the house connection and its credential`));
+    console.log('  forget it too with: memhouse uninstall --credentials');
+  }
+
+  if (fs.existsSync(hostFile)) {
+    console.log(ok(`kept ${short(hostFile)} — this machine's identity, so a reinstall continues its history`));
+    console.log('  remove everything with: memhouse uninstall --full-removal');
+  }
+  console.log('  the house data in ClickHouse is untouched');
 }
 
 // ── dispatch ────────────────────────────────────────────────────────────────────
@@ -2349,7 +2460,7 @@ function cmdUninstall() {
       }
       break;
     }
-    case 'uninstall': cmdUninstall(); break;
+    case 'uninstall': await cmdUninstall(); break;
     default:
       console.error(`unknown command: ${cmd}\n${HELP}`);
       process.exitCode = 2;
