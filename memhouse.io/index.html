@@ -40,7 +40,7 @@
       <img class="on-light" src="/mark.png" alt="MemHouse" width="37" height="28">
       <img class="on-dark" src="/mark-dark.png" alt="MemHouse" width="37" height="28" hidden>
       memhouse
-      <span class="ver">v0.4.4</span>
+      <span class="ver">v0.6.0</span>
     </a>
     <nav class="nav-links">
       <a class="hide-sm" href="#compare">Why</a>
@@ -60,7 +60,7 @@
 <!-- ============ HERO ============ -->
 <section class="hero">
   <div class="wrap">
-    <div class="status"><span class="dot"></span> <b>v0.4.4</b> &middot; 17 editor adapters &middot; MIT</div>
+    <div class="status"><span class="dot"></span> <b>v0.6.0</b> &middot; 17 editor adapters &middot; MIT</div>
 
     <h1 class="hero-title"><span class="dim">Your agents forget.</span><br><span class="mark">The house remembers.</span></h1>
 
@@ -447,6 +447,11 @@
         <p><code>memhouse search &lt;terms&gt;</code> across every session you have ever had, on any machine, in any editor — ClickHouse text indexes, not a grep over files that may already be rotated away.</p>
       </div>
       <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+        <h3>Go back into the session</h3>
+        <p><code>memhouse resume &lt;session-id&gt;</code> prints the command that reopens that conversation in the editor it came from, working directory included — Claude Code and Codex both scope their session lists by it. It <em>prints</em> rather than runs: a resume from the wrong directory does not fail, it quietly starts a <em>new</em> session, and the transcript you were after is still gone.</p>
+      </div>
+      <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
         <h3>An isolated room per agent</h3>
         <p>Give an agent its own credential and it gets its own three rooms — it can see its memory and nobody else's. Isolation is a grant that is simply <em>absent</em>, so it fails closed rather than depending on a filter being right everywhere.</p>
@@ -465,6 +470,11 @@
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10 12 3l9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 21v-8h6v8"/></svg>
         <h3>Survives a reboot</h3>
         <p><code>memhouse service install</code> writes a real user service — systemd <code>--user</code> on Linux, a launchd agent on macOS — and takes over from the pidfile daemons.</p>
+      </div>
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 18v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg>
+        <h3>Upgrades itself, and says so</h3>
+        <p><code>memhouse update</code> does the two thirds a bare <code>npm i -g</code> leaves undone: it re-passes the native-binding flag, restarts the daemons, and checks whether your house is missing a column the new shipper needs. The daemons also notice on their own — each compares the installed version against the one it booted with and hands over, exiting under systemd or launchd so the supervisor restarts it, re-executing itself when nothing is supervising. A shipper here once ran for a day and a half out of a directory that had been <em>moved</em>.</p>
       </div>
     </div>
   </div>
@@ -571,7 +581,7 @@
         <p class="quote">"Did we ever solve this before?" <span>— asked before the answer is re-derived, not after.</span></p>
         <ul class="list" style="margin-top:18px">
           <li><b>Skills.</b> <code>/memhouse:search</code>, <code>/memhouse:sessions</code>, <code>/memhouse:sql</code> — full text, session listing, free-form read-only SQL.</li>
-          <li><b>A plugin.</b> <code>memhouse plugins install claude</code> drops them into Claude Code.</li>
+          <li><b>A plugin.</b> <code>memhouse plugins install claude</code> drops them into <em>every</em> Claude Code config directory on the machine — <code>~/.claude</code>, whatever <code>CLAUDE_CONFIG_DIR</code> points at, and each playbook under <code>~/.claude-playbooks/</code> — all selected by default, because a skill installed into only one of them is missing from the instance you actually work in, and a missing skill never announces itself. <code>onboard</code> offers this at the end.</li>
           <li><b>A prompt snippet.</b> <code>memhouse prompt</code> prints the system-prompt block that tells an agent to search memory <em>before</em> claiming ignorance.</li>
           <li><b>An install prompt, rendered for this machine.</b> <code>memhouse prompt --install</code> probes for a house, a container engine and an existing config, then states the <em>one</em> route that applies — including "already installed, do not reinstall" and "configured but the house does not answer, diagnose before repointing". An agent gets an instruction, not a decision tree to walk and a branch to pick wrong.</li>
           <li><b>Read-only by construction.</b> Agents query; only the shipper writes. Other members' sessions stay invisible unless they granted you their rooms.</li>
@@ -644,8 +654,9 @@
       </details>
 
       <details>
-        <summary>I already have a memhouse house — is upgrading to 0.4.4 safe?</summary>
-        <p>Upgrade, and read the refusal it prints. 0.4.4 fixes a data-loss bug that matters if you ever
+        <summary>I already have a memhouse house — is upgrading safe?</summary>
+        <p>Upgrade with <code>memhouse update</code>, and read the refusal it prints. 0.4.4 fixed a
+        data-loss bug that matters if you ever
         <em>imported</em> history into your house: a ship pass clears and re-inserts a session's rows so a
         shorter re-parse cannot leave a stale tail, and that clear was scoped to the session alone — so it
         removed rows the adapters never wrote and cannot rewrite. Measured on a real house of 135,307
