@@ -446,5 +446,68 @@ test('playbook config dirs are discovered, used ones only', () => {
   }
 });
 
+// ── host identity ───────────────────────────────────────────────────────────────
+// `host` is the only column separating one member's machines from each other, since all
+// of them write into the same rooms. These are about the two ways the old derived id
+// (sha256 of hostname|platform|arch) got that wrong.
+const hostjs = require('../memhouse/host');
+
+function tmpHome() { return fsx.mkdtempSync(pathx.join(os.tmpdir(), 'mh-host-')); }
+
+test('the identity is written once and then never moves', () => {
+  const home = tmpHome();
+  try {
+    const a = hostjs.identity(home);
+    const b = hostjs.identity(home);
+    assert.strictEqual(a.id, b.id, 'a second call must not mint a new identity');
+    assert.match(a.id, /^[A-Za-z0-9_-]+-[0-9a-f]{8}$/, `unexpected id shape: ${a.id}`);
+    assert.ok(fsx.existsSync(hostjs.filePath(home)), 'the fingerprint must be persisted');
+    // 0600: not a secret, but anything that can read it can write rows as this host.
+    assert.strictEqual(fsx.statSync(hostjs.filePath(home)).mode & 0o777, 0o600);
+  } finally { fsx.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('two machines that look identical still get different ids', () => {
+  // THE bug in the derived scheme: two laptops with the same default hostname on the same
+  // platform and arch hashed to one id, so their sessions merged into a single apparent
+  // host and neither could be told from the other.
+  const a = tmpHome(), b = tmpHome();
+  try {
+    assert.notStrictEqual(hostjs.identity(a).id, hostjs.identity(b).id,
+      'identical machines must not collide — the fingerprint is random, not derived');
+  } finally { for (const h of [a, b]) fsx.rmSync(h, { recursive: true, force: true }); }
+});
+
+test('renaming the machine does not split its history', () => {
+  // The other direction: a derived id moved when the hostname changed, so the machine's
+  // own rows appeared to stop and a stranger's to start. The id is frozen at creation and
+  // the new name is reported separately.
+  const home = tmpHome();
+  try {
+    const first = hostjs.identity(home);
+    const rec = JSON.parse(fsx.readFileSync(hostjs.filePath(home), 'utf-8'));
+    rec.hostname = 'some-old-name';       // as if the machine had been renamed since
+    fsx.writeFileSync(hostjs.filePath(home), JSON.stringify(rec));
+    const after = hostjs.identity(home);
+    assert.strictEqual(after.id, first.id, 'the id must survive a rename');
+    assert.strictEqual(after.hostname, 'some-old-name', 'the name it was created under is kept');
+    assert.strictEqual(after.renamed, true, 'a rename must be visible to callers');
+    assert.strictEqual(after.current_hostname, os.hostname());
+  } finally { fsx.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a corrupt fingerprint file is replaced, not obeyed', () => {
+  // An unreadable identity must not become a crash in the shipper's hot path, and must
+  // not silently produce a different id on every pass either.
+  const home = tmpHome();
+  try {
+    fsx.mkdirSync(home, { recursive: true });
+    fsx.writeFileSync(hostjs.filePath(home), '{ not json');
+    const a = hostjs.identity(home);
+    assert.match(a.id, /-[0-9a-f]{8}$/);
+    assert.strictEqual(a.id, hostjs.identity(home).id, 'the replacement must then be stable');
+  } finally { fsx.rmSync(home, { recursive: true, force: true }); }
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

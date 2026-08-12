@@ -99,6 +99,42 @@ cursor-agent, copilot-cli — is refused as *unverified*, which is a different s
 on purpose: nobody has read the flag out of its own `--help` yet, and guessing is how
 you print a command that quietly does the wrong thing. See `memhouse/resume.js`.
 
+## Which machine is which
+
+All of *your* machines ship into *your* rooms, and the `host` column is what tells them
+apart. So each install writes `~/.memhouse/host.json` — a random fingerprint, minted once
+— and every row that machine ships carries `<hostname>-<8 hex>` built from it.
+
+Random, not derived, because deriving it fails in both directions: two laptops that both
+answer to the default `MacBook-Pro` on the same platform hash to the **same** id and merge
+into one apparent machine, and renaming a machine **moves** a derived id so its own history
+appears to stop and a stranger's to begin. A stored fingerprint cannot collide and does not
+move — rename the machine and `status` says so while the id stays put.
+
+```bash
+memhouse status     # ✓ host: macminim-4127a95b
+memhouse doctor     # names every host in your rooms, and whether this one is among them
+```
+
+Then query one machine with `WHERE host = 'macminim-4127a95b'`.
+
+## Uninstalling, in three tiers
+
+```bash
+memhouse uninstall                   # stop everything; KEEP the config and this host's identity
+memhouse uninstall --credentials     # also forget the house and its password
+memhouse uninstall --full-removal    # all of ~/.memhouse, identity included
+```
+
+The default is deliberately the conservative one. Stopping the shipper is routine — before
+an upgrade, while debugging, when a laptop should go quiet for a week — and it should not
+also mean "forget which house I use and who this machine is". `--full-removal` asks first,
+because a later reinstall mints a **new** identity and this machine then reads as two
+machines in your history.
+
+**No tier touches your memory.** Transcripts live in ClickHouse, and everything the shipper
+wrote rebuilds from the local session stores with `ship --full`.
+
 ## Staying current
 
 ```bash
