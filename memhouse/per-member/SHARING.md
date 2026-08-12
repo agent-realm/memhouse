@@ -37,6 +37,53 @@ unforgeable **by members**, since `EXECUTE AS` is a grantable privilege they do 
 and forgeable by the owner or anyone granted it. Trust boundary is the owner, not the
 engine.
 
+The stamp is also pinned **server-side**: the member settings profile carries
+`async_insert = 0 CONST`. A MATERIALIZED column is computed during the insert, and an
+async insert flushes outside that context — measured on 25.11.9.34, `async_insert=1`
+stores `user_id` as the empty string while a sync insert on the same table stamps
+correctly. The shipper always passed `async_insert=0`, so memhouse was never the risk;
+anything else holding a member credential was. With the constraint in force a client that
+*asks* for `async_insert=1` is refused (`SETTING_CONSTRAINT_VIOLATION`), and one that
+simply does not mention the setting is held at 0 — so the insert still succeeds, stamped,
+rather than landing unowned. It is the override that is refused, not the write.
+
+Two limits worth stating plainly. The constraint binds the **ClickHouse user**, not the
+database — if you reuse a member's credential for unrelated high-throughput ingestion
+elsewhere on that server, async inserts are refused there too. And it only takes effect
+once the profile is applied: a house provisioned by an older memhouse keeps the old
+profile until any member is provisioned again, which now updates the shared profile for
+everyone at once. `doctor`'s blank-`user_id` check remains as the detector for rows
+written before that.
+
+## What the boundary does NOT hide: the roster
+
+**Members can discover which other members exist, and this is not fixable here.** A
+handle is a table name, and ClickHouse answers differently for a table you may not read
+than for one that is not there:
+
+```
+SELECT count() FROM mem.messages_alice    -- exists, not granted → Code 497, Not enough privileges
+SELECT count() FROM mem.messages_nobody   -- does not exist      → Code 60,  Unknown table
+```
+
+So probing names enumerates the membership. Measured on 26.7.3.19 that this is
+**ClickHouse's behaviour and not a consequence of our grant set**: a user holding *zero*
+grants anywhere in the database gets exactly the same 497/60 split. No grant, revoke or
+role arrangement changes it.
+
+It *is* closable, and the price is the reason it stays open. Suffixing rooms with a random
+token (`messages_alice_8f9b2a`) would still match the `^messages_` Merge selectors, and
+would still leave the share in this document working — alice grants on the room she owns
+and knows, and bob never needs its name. What it costs is that a room name stops being
+**derivable**: `roomNames(member)` is pure today, and every client — the shipper, the
+skills, `sessions-query`, a person typing SQL — would instead have to look its own name up
+first. A real trade, deliberately not taken; not an impossibility.
+
+What leaks is **membership, not content**: names and the fact of existence, never rows,
+counts or sizes. In the setting this is built for — a team who already know they are a
+team — that is not a secret. Say so out loud rather than implying the boundary is
+tighter than it is.
+
 Bob's Merge-room reads widen automatically once alice grants him a room — `Merge` reduces
 to the caller's actual grants, so nothing else needs changing. Measured end to end on
 25.11: alice's `GRANT` took what bob sees of her rows through `all_messages` from 0 to
