@@ -399,12 +399,15 @@ Setup        onboard              interactive wizard: discover → configure →
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
              uninstall            stop daemons + remove ${HOME_DIR.replace(os.homedir(), '~')} (house data untouched)
+             update               upgrade, restart the daemons, and check the house schema
+                                  (--check to compare versions and change nothing)
              reset                clear the shipper's rows and re-ship everything (--yes to skip confirm)
                                   imported rows are kept; --all-origins removes those too
 
 Data         ship                 one incremental pass (--full | --loop [sec])
              stats                per-source session/message/token counts
              search <terms…>      full-text search across all sessions
+             resume <session-id>  print the command that reopens that session in its editor
              sessions-query       print the session rollup SQL for this credential
              start | stop |       shipper loop + dashboard as background daemons
              status               daemons, connection, counts, freshness (--json)
@@ -1598,6 +1601,194 @@ async function cmdSearch() {
   }
 }
 
+// `search` finds the session; this hands the pilot back into it. memhouse has been a
+// read-only archive — you could find the conversation that solved this before and not
+// return to it.
+//
+// It PRINTS the command and does not run it, and that is the whole design. Running it would
+// have to guess a terminal, inherit this process's cwd, and hope the id is still live; when
+// any of that is wrong the CLI does not fail, it opens a NEW session — the pilot loses the
+// transcript they asked for while the tool reports success. Printed, the pilot reads it,
+// pastes it, and owns the result.
+async function cmdResume() {
+  if (!positional.length) {
+    console.log('usage: memhouse resume <session-id>    (the id search and the dashboard print)');
+    return 2;
+  }
+  const cfg = requireConfig(resolveConfig(), 'resume');
+  const { resumeFor } = require(path.join(REPO_ROOT, 'memhouse', 'resume'));
+  // Same escaping as search: this value is interpolated into SQL, and a session id is not
+  // guaranteed to be tame — it comes from whatever the editor wrote on disk.
+  const want = positional[0].replace(/[\\']/g, '\\$&');
+  const r = await roomsFor(cfg);
+  // Two ways to name a session, because there are two ways it gets in front of the pilot:
+  // the canonical `<source>:<id>` that search and the prompt print, and the bare native id
+  // that the editor's own UI shows. FINAL because sessions is a ReplacingMergeTree and a
+  // re-shipped session has an older row underneath — without it a moved project resolves to
+  // the folder it used to live in.
+  const rows = await chRows(cfg, `
+    SELECT session_id, source, folder, name, origin,
+           formatDateTime(last_updated_at, '%Y-%m-%d %H:%i') AS at
+    FROM ${r.sessions} FINAL
+    WHERE session_id = '${want}' OR session_id LIKE '%:${want}'
+    ORDER BY last_updated_at DESC LIMIT 5`);
+
+  if (!rows.length) {
+    if (JSON_OUT) return console.log(JSON.stringify({ error: 'no such session', session_id: positional[0] }, null, 2));
+    console.log(bad(`no session '${positional[0]}' in ${r.sessions}`));
+    console.log('  find one with: memhouse search <terms>');
+    return 1;
+  }
+  // A bare native id can match more than one source. Say so instead of picking — resuming
+  // the wrong editor's session of the same name is exactly the silent-wrong-answer this
+  // command exists to avoid.
+  if (rows.length > 1) {
+    if (JSON_OUT) return console.log(JSON.stringify({ error: 'ambiguous', matches: rows }, null, 2));
+    console.log(warn(`'${positional[0]}' matches ${rows.length} sessions — name one exactly:`));
+    for (const s of rows) console.log(`  ${s.session_id}  ${s.at}  ${s.name || '-'}`);
+    return 1;
+  }
+
+  const row = rows[0];
+  const res = resumeFor(row);
+  if (JSON_OUT) return console.log(JSON.stringify({ ...row, ...res }, null, 2));
+  // `last_updated_at` is Nullable and some imported rows carry no timestamp, which
+  // formatDateTime returns as JSON null — printed raw it reads as the literal word 'null'
+  // sitting where a date belongs.
+  console.log(`\x1b[1m${row.session_id}\x1b[0m  ${row.at || '-'}  ${row.name || '-'}`);
+  if (!res.ok) {
+    console.log(bad(res.reason));
+    // The folder is still worth printing: for a GUI editor it is the one actionable thing
+    // memhouse knows, and opening it is what the pilot would do next anyway.
+    if (res.folder) console.log(`  the session ran in: ${res.folder}`);
+    return 1;
+  }
+  console.log('');
+  console.log(`  ${res.command}`);
+  console.log('');
+  if (!res.folder) console.log(warn('no folder was recorded for this session — run it from the right directory yourself'));
+  return 0;
+}
+
+// Which kind of installation is this process running out of? Every upgrade path below
+// depends on the answer, and getting it wrong is not a no-op: running `git pull` in a
+// global install does nothing visible, and `npm i -g` from a checkout installs the
+// PUBLISHED version over the branch the pilot was testing.
+function installKind() {
+  const root = fs.realpathSync(REPO_ROOT);
+  // npx unpacks into a cache directory keyed by a hash. Nothing there is upgradable — the
+  // next `npx memhouse` resolves the registry again — and re-execing daemons out of a cache
+  // entry that npm may evict is how a daemon ends up running from a directory that no
+  // longer exists.
+  if (/[/\\]_npx[/\\]/.test(root)) return { kind: 'npx', root };
+  if (fs.existsSync(path.join(root, '.git'))) return { kind: 'checkout', root };
+  if (/[/\\]node_modules[/\\]memhouse$/.test(root)) {
+    // Global vs a project dependency. `npm prefix -g` is the only thing that tells them
+    // apart, and it is worth the spawn: `npm i -g` from inside someone's project
+    // dependency upgrades a different copy than the one they just ran.
+    try {
+      const p = spawnSync('npm', ['prefix', '-g'], { encoding: 'utf-8' });
+      const prefix = (p.stdout || '').trim();
+      if (prefix && root.startsWith(fs.realpathSync(prefix))) return { kind: 'global', root };
+    } catch { /* fall through */ }
+    return { kind: 'local-dep', root };
+  }
+  return { kind: 'unknown', root };
+}
+
+// `npm i -g memhouse@latest` upgrades the files and nothing else: the flag that keeps five
+// adapters alive has to be repeated, the daemons keep executing the version they booted
+// with, and a house provisioned by an older shipper can be missing a room this one needs.
+// Each of those has cost a real machine real sessions. This command owns all three.
+async function cmdUpdate() {
+  const { kind, root } = installKind();
+  const latest = await (async () => {
+    try {
+      const res = await fetch('https://registry.npmjs.org/memhouse/latest', { signal: AbortSignal.timeout(8000) });
+      return res.ok ? (await res.json()).version : null;
+    } catch { return null; }
+  })();
+
+  if (JSON_OUT && flags.check) return console.log(JSON.stringify({ kind, root, current: PKG.version, latest }, null, 2));
+  console.log(`  installed  ${PKG.version}  (${kind}: ${root})`);
+  console.log(`  latest     ${latest || 'unknown — the registry did not answer'}`);
+  if (latest && latest === PKG.version && kind !== 'checkout') console.log(ok('already current'));
+  if (flags.check) return 0;
+
+  if (kind === 'npx') {
+    console.log(warn('nothing to update — npx resolves the registry on every run'));
+    console.log('  to keep a version around: npm install -g memhouse --allow-scripts=better-sqlite3');
+    return 1;
+  }
+  if (kind === 'local-dep') {
+    console.log(warn('this is a project dependency, not a global install'));
+    console.log(`  upgrade it where it lives: npm install memhouse@latest --allow-scripts=better-sqlite3`);
+    return 1;
+  }
+
+  // Whether the daemons were OURS matters after the upgrade, not before: a service-managed
+  // shipper must be restarted through its supervisor, and pidfile daemons only come back if
+  // something restarts them. Read it first — `stop` erases the evidence.
+  let svc = { installed: false, running: false };
+  try { svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { /* unsupported platform */ }
+  const wasRunning = { shipper: !!pidOf('shipper'), dashboard: !!pidOf('dashboard') };
+
+  if (kind === 'checkout') {
+    // The stale-UI case, and it is checkout-only: a published tarball ships public/ built by
+    // prepack, but `git pull` updates ui/src and leaves the old bundle in public/ — so the
+    // dashboard serves the previous release however many times it is restarted.
+    const steps = [
+      ['git', ['pull', '--ff-only']],
+      ['npm', ['install', '--no-audit', '--no-fund']],
+      ['npm', ['run', 'build']],
+    ];
+    for (const [bin, args] of steps) {
+      const r = spawnSync(bin, args, { cwd: root, stdio: 'inherit' });
+      if (r.status !== 0) {
+        console.log(bad(`${bin} ${args.join(' ')} failed — stopping here, nothing was restarted`));
+        return 1;
+      }
+    }
+  } else {
+    // --allow-scripts is not optional and not remembered: npm >= 12 blocks install scripts
+    // by default, so an upgrade without it leaves better-sqlite3 with no binding and the
+    // five SQLite-backed adapters read zero sessions on every pass afterwards.
+    const r = spawnSync('npm', ['install', '-g', 'memhouse@latest', '--allow-scripts=better-sqlite3'], { stdio: 'inherit' });
+    if (r.status !== 0) {
+      console.log(bad('npm install failed — nothing was restarted, the running version is unchanged'));
+      console.log('  if it was EACCES: ls -ld "$(npm prefix -g)" — root-owned needs sudo, yours needs a chown');
+      return 1;
+    }
+  }
+  console.log(ok('files updated'));
+
+  // Restarting is the half a bare `npm i -g` leaves undone. The daemons notice on their own
+  // within a loop interval (memhouse/self-update.js), but a pilot who typed `update` should
+  // not have to wait for it, and the dashboard's stale bundle is visible immediately.
+  if (svc.installed) {
+    console.log(warn(`the shipper is service-managed (${svc.kind}) — restart it to pick this up:`));
+    console.log(svc.kind === 'systemd'
+      ? '  systemctl --user restart memhouse-shipper'
+      : '  launchctl kickstart -k gui/$(id -u)/com.memhouse.shipper');
+  }
+  if (wasRunning.shipper || wasRunning.dashboard) {
+    cmdStop();
+    await cmdStart();
+  } else if (!svc.installed) {
+    console.log(warn('no daemons were running — start them with: memhouse start'));
+  }
+
+  // A shipper from a newer release can need a column an older house does not have. The
+  // shipper reports the drift and prints the rebuild; running it here means the pilot
+  // learns at upgrade time rather than from a warning in a log nobody reads.
+  const cfg = resolveConfig();
+  if (cfg.url && cfg.user) {
+    const code = run(SHIP_JS, ['--ensure-schema'], cfg);
+    if (code !== 0) { console.log(warn('the house schema needs attention — memhouse doctor')); return code; }
+  }
+  return 0;
+}
+
 // Install the skills as a PLUGIN, not as three loose skill directories.
 //
 // Claude Code gives a skill a namespace only when it arrives inside a plugin: a directory
@@ -1807,6 +1998,8 @@ function cmdUninstall() {
     case 'status': process.exitCode = await cmdStatus(); break;
     case 'doctor': process.exitCode = await cmdDoctor(); break;
     case 'search': process.exitCode = await cmdSearch(); break;
+    case 'resume': process.exitCode = await cmdResume(); break;
+    case 'update': process.exitCode = await cmdUpdate(); break;
     // The session rollup is a saved query, not an object, so there is no name an agent
     // or a skill can put in a FROM clause. This prints it, resolved for whoever the
     // configured credential is — the substitute for that name.
