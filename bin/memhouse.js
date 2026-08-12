@@ -677,6 +677,7 @@ ${mergeGrants}
 -- provisioning a second member silently stripped the first member's ceilings. IF NOT
 -- EXISTS + ALTER edits the same object in place and keeps every assignment.
 CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE};
+ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS NONE;
 ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
 ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}';
 `;

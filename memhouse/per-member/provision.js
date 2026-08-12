@@ -137,7 +137,11 @@ async function main() {
     // warning in the middle of a successful first install.
     console.log(`[mem] using the ClickHouse user '${member}' just created — provisioning rooms`);
   } else {
-    console.log(`[mem] ClickHouse user '${member}' already exists — provisioning rooms only`);
+    // NOT "already exists". That phrase is what the identity-takeover REFUSAL says, so
+    // reading it here — during a successful provision, and especially while resuming a
+    // first install that failed after CREATE USER — reads as a warning that someone else
+    // owns the handle. Both branches of this if now describe a success, in plain words.
+    console.log(`[mem] using the existing ClickHouse user '${member}' — provisioning rooms`);
   }
 
   // 1. rooms
@@ -242,8 +246,15 @@ async function main() {
   // CREATE IF NOT EXISTS + ALTER updates the same object in place and keeps every existing
   // assignment, so one provision now brings ALL members up to the current settings —
   // which is also what makes the async_insert pin reach members provisioned earlier.
+  // SETTINGS NONE first, because ALTER only upserts what it lists: a setting dropped from
+  // MEMBER_PROFILE_SETTINGS in a later version would otherwise stay enforced forever on
+  // every upgraded house, and anything an operator had added to a profile of the same name
+  // would survive too. Clearing then applying gives the same absolute state OR REPLACE had,
+  // without its detachment. (The gap between the two statements is admin-only and
+  // sub-second; a member's queries are unbounded for that instant.)
   try {
     await client.command({ query: `CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE}` });
+    await client.command({ query: `ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS NONE` });
     await client.command({ query: `ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
     await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}'` });
     console.log(`[mem] settings profile '${MEMBER_PROFILE}' applied to '${member}' (memory, time and thread ceilings)`);

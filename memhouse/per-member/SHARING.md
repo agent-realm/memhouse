@@ -42,8 +42,10 @@ The stamp is also pinned **server-side**: the member settings profile carries
 async insert flushes outside that context — measured on 25.11.9.34, `async_insert=1`
 stores `user_id` as the empty string while a sync insert on the same table stamps
 correctly. The shipper always passed `async_insert=0`, so memhouse was never the risk;
-anything else holding a member credential was. With the constraint in force the house
-refuses (`SETTING_CONSTRAINT_VIOLATION`) instead of accepting rows nobody owns.
+anything else holding a member credential was. With the constraint in force a client that
+*asks* for `async_insert=1` is refused (`SETTING_CONSTRAINT_VIOLATION`), and one that
+simply does not mention the setting is held at 0 — so the insert still succeeds, stamped,
+rather than landing unowned. It is the override that is refused, not the write.
 
 Two limits worth stating plainly. The constraint binds the **ClickHouse user**, not the
 database — if you reuse a member's credential for unrelated high-throughput ingestion
@@ -69,13 +71,13 @@ So probing names enumerates the membership. Measured on 26.7.3.19 that this is
 grants anywhere in the database gets exactly the same 497/60 split. No grant, revoke or
 role arrangement changes it.
 
-It *is* closable, and the price is the reason it stays open. Suffixing rooms with a
-random token (`messages_alice_8f9b2a`) would still match the `^messages_` Merge selectors
-— that much is fine — but it breaks the things the naming exists for: a member could no
-longer derive or type their own room name, `roomNames(member)` would need a lookup the
-member is not granted to read, and the three-`GRANT` self-serve share in this document
-would need an operator to tell alice what bob's room is even called. That is a real
-trade, deliberately not taken, not an impossibility.
+It *is* closable, and the price is the reason it stays open. Suffixing rooms with a random
+token (`messages_alice_8f9b2a`) would still match the `^messages_` Merge selectors, and
+would still leave the share in this document working — alice grants on the room she owns
+and knows, and bob never needs its name. What it costs is that a room name stops being
+**derivable**: `roomNames(member)` is pure today, and every client — the shipper, the
+skills, `sessions-query`, a person typing SQL — would instead have to look its own name up
+first. A real trade, deliberately not taken; not an impossibility.
 
 What leaks is **membership, not content**: names and the fact of existence, never rows,
 counts or sizes. In the setting this is built for — a team who already know they are a
