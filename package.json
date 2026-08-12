@@ -1,7 +1,7 @@
 {
   "name": "memhouse",
   "version": "0.5.0",
-  "description": "memhouse \u2014 agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store with one set of rooms per member, kernel-agency install, and the agentlytics dashboard",
+  "description": "memhouse — agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store with one set of rooms per member, kernel-agency install, and the agentlytics dashboard",
   "main": "bin/memhouse.js",
   "bin": {
     "memhouse": "./bin/memhouse.js"
@@ -54,11 +54,7 @@
   },
   "dependencies": {
     "@clickhouse/client": "^1.23.1",
-    "@modelcontextprotocol/sdk": "^1.27.1",
     "better-sqlite3": "^12.6.2",
-    "chalk": "^4.1.2",
-    "express": "^4.22.1",
-    "log-update": "^4.0.0",
-    "open": "^8.4.2"
+    "express": "^4.22.1"
   }
 }
