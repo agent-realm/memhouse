@@ -414,4 +414,8 @@ function getMCPServers() {
   return results;
 }
 
-module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers };
+// discoverClaudeRoots is exported for the CLI's plugin installer, which needs the same
+// answer to a different question: where this pilot's Claude Code instances live. Two
+// implementations of "find every CLAUDE_CONFIG_DIR" would drift the first time a playbook
+// layout changes, and this is the copy exercised on every single ship.
+module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers, discoverClaudeRoots };

@@ -414,6 +414,9 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              doctor               diagnose the whole pipeline
 
 Agents       plugins              list | install claude [--target DIR] | remove claude
+                                  acts on EVERY Claude config dir found (~/.claude,
+                                  CLAUDE_CONFIG_DIR, ~/.claude-playbooks/*), all
+                                  selected by default; --yes takes them all unasked
              prompt               print the memory system-prompt snippet
              prompt --install     print an install prompt for an agent, with this
                                   machine's state and the one route that applies
@@ -1151,6 +1154,21 @@ async function cmdOnboard() {
   }
   const yn = (await ask('Start the daemons now? (Y/n)', 'Y')).toLowerCase();
   if (yn !== 'n' && yn !== 'no') await cmdStart();
+
+  // The skills were the one delivered thing onboarding never mentioned. They shipped,
+  // they were packaged as a plugin, and the only way to find them was to already know
+  // `memhouse plugins install claude` — so a pilot completed the whole wizard and ended up
+  // with a house their agent could not query. Offer them here, across every Claude instance
+  // found, all selected.
+  const targets = claudeTargets();
+  if (targets.length) {
+    console.log('');
+    console.log(`Claude Code skills: ${fs.readdirSync(path.join(DELIVERY, 'plugin', 'skills')).map((n) => `/memhouse:${n}`).join(', ')}`);
+    const chosen = await chooseTargets(targets, 'Install into');
+    for (const t of chosen) console.log(ok(`installed skills into ${short(installPluginInto(t.dir))}`));
+    if (chosen.length) console.log('  they load next time that Claude Code starts');
+    else console.log(warn('skipped — install later with: memhouse plugins install claude'));
+  }
   return 0;
 }
 
@@ -1789,6 +1807,76 @@ async function cmdUpdate() {
   return 0;
 }
 
+// Every Claude Code instance on this machine, not just the default one.
+//
+// A pilot rarely has one. `~/.claude` is the stock install, `CLAUDE_CONFIG_DIR` points at
+// whichever they are running right now, and Kommander-style playbooks live under
+// `~/.claude-playbooks/<name>[/playbook]`, each a complete config directory with its own
+// skills/. Installing into one and calling it done leaves /memhouse:search missing from
+// every other instance the pilot uses — silently, because a missing skill does not announce
+// itself, it just never appears.
+//
+// The discovery is the ADAPTER's (editors/claude.js discoverClaudeRoots), reused rather
+// than reimplemented: it already ports memory-house's discover_roots and runs on every
+// ship. A second copy here would drift the first time a playbook layout changes — which is
+// the same defect this repo just retired in install.sh.
+function claudeTargets() {
+  const seen = new Map(); // realpath -> { dir, why }
+  const add = (dir, why) => {
+    if (!dir) return;
+    let isDir = false;
+    try { isDir = fs.statSync(dir).isDirectory(); } catch { /* missing */ }
+    if (!isDir) return;
+    let rp; try { rp = fs.realpathSync(dir); } catch { rp = dir; }
+    if (!seen.has(rp)) seen.set(rp, { dir, why });
+  };
+  // The instance the caller is running under comes first, and is NOT subject to the
+  // adapter's "has this been used?" test — a fresh config dir has no projects/ yet, and it
+  // is exactly where the pilot wants the skills.
+  add(process.env.CLAUDE_CONFIG_DIR, 'CLAUDE_CONFIG_DIR');
+  add(path.join(os.homedir(), '.claude'), 'default');
+  try {
+    const { discoverClaudeRoots } = require(path.join(REPO_ROOT, 'editors', 'claude'));
+    for (const r of discoverClaudeRoots()) add(r, 'playbook');
+  } catch { /* adapter unavailable — the two above still stand */ }
+  return [...seen.values()];
+}
+
+const short = (p) => p.replace(os.homedir(), '~');
+const PLUGIN_MARK = path.join('skills', 'memhouse', '.claude-plugin', 'plugin.json');
+const isPluginInstalled = (dir) => fs.existsSync(path.join(dir, PLUGIN_MARK));
+
+function installPluginInto(dir) {
+  const dst = path.join(dir, 'skills', 'memhouse');
+  fs.mkdirSync(dst, { recursive: true });
+  fs.cpSync(path.join(DELIVERY, 'plugin'), dst, { recursive: true });
+  return dst;
+}
+
+// Which instances to act on. EVERYTHING IS SELECTED BY DEFAULT: with several Claude
+// installs the answer is almost always "all of them", and a pilot who wanted one would have
+// passed --target. Numbers narrow it, 'n' skips.
+//
+// No prompt at all when there is nothing to choose (one target), when an agent is driving
+// (--yes / --json), or when there is no terminal to answer with — a blocked prompt in a
+// script is a hang, not a question.
+async function chooseTargets(targets, verb) {
+  if (targets.length === 1 || flags.yes === true || JSON_OUT || !process.stdin.isTTY) return targets;
+  console.log('');
+  targets.forEach((t, i) => {
+    const state = isPluginInstalled(t.dir) ? 'already installed — will be refreshed' : t.why;
+    console.log(`  ${i + 1}) ${short(t.dir)}  (${state})`);
+  });
+  const a = (await ask(`${verb} all ${targets.length}? (Y/n, or numbers like "1 3")`, 'Y')).trim().toLowerCase();
+  if (a === 'n' || a === 'no') return [];
+  if (a === 'y' || a === 'yes' || a === '') return targets;
+  const picked = [...new Set(a.split(/[\s,]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= targets.length))];
+  // An unparseable answer must not quietly mean "all" — that would install into places the
+  // pilot was in the middle of narrowing down. Say so and take none.
+  if (!picked.length) { console.log(warn(`did not understand '${a}' — nothing selected`)); return []; }
+  return picked.map((n) => targets[n - 1]);
+}
+
 // Install the skills as a PLUGIN, not as three loose skill directories.
 //
 // Claude Code gives a skill a namespace only when it arrives inside a plugin: a directory
@@ -1798,38 +1886,60 @@ async function cmdUpdate() {
 // skills named after their folders — which is what this used to do, while plugin.json sat
 // unread one directory away claiming the colon form. Driving a real Claude Code is what
 // caught it: `/memhouse:search` answered `Unknown command. Did you mean /memhouse-search?`
-function cmdPlugins() {
+async function cmdPlugins() {
   const sub = positional[0] || 'list';
-  const target = flags.target || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const pluginSrc = path.join(DELIVERY, 'plugin');
   const names = fs.readdirSync(path.join(pluginSrc, 'skills'));
-  const dst = path.join(target, 'skills', 'memhouse');
   const invocations = names.map((n) => `/memhouse:${n}`).join(', ');
+  // --target overrides the discovery rather than joining it: given one, that is the only
+  // directory touched.
+  const targets = flags.target ? [{ dir: flags.target, why: '--target' }] : claudeTargets();
   // Whatever --target was given has to reappear in the advice, or pasting it installs
   // somewhere else than the directory just inspected.
   const self = `memhouse plugins install claude${flags.target ? ` --target ${flags.target}` : ''}`;
+
   if (sub === 'list') {
     console.log(`skills available: ${invocations}`);
-    console.log(fs.existsSync(path.join(dst, '.claude-plugin', 'plugin.json'))
-      ? ok(`installed as a plugin in ${dst}`)
-      : warn(`not installed (${self})`));
-  } else if (sub === 'install' && positional[1] === 'claude') {
-    fs.mkdirSync(dst, { recursive: true });
-    fs.cpSync(pluginSrc, dst, { recursive: true });
-    console.log(ok(`installed ${names.length} skills into ${dst}`));
-    console.log(`  loads as memhouse@skills-dir next session — invoke ${invocations}`);
-  } else if (sub === 'remove' && positional[1] === 'claude') {
-    if (!fs.existsSync(dst)) { console.log(warn(`nothing installed in ${dst}`)); return 0; }
-    fs.rmSync(dst, { recursive: true });
-    // Remove the now-empty skills/ we created, but never a skills/ holding someone
-    // else's work.
-    try { fs.rmdirSync(path.join(target, 'skills')); } catch { /* not empty: leave it */ }
-    console.log(ok(`removed ${dst}`));
-  } else {
-    console.log('usage: memhouse plugins [list | install claude | remove claude] [--target DIR]');
-    return 2;
+    if (!targets.length) { console.log(warn('no Claude Code config directory found')); return 0; }
+    for (const t of targets) {
+      console.log(isPluginInstalled(t.dir)
+        ? ok(`installed in ${short(t.dir)} (${t.why})`)
+        : warn(`not installed in ${short(t.dir)} (${t.why})`));
+    }
+    if (!targets.some((t) => isPluginInstalled(t.dir))) console.log(`  install with: ${self}`);
+    return 0;
   }
-  return 0;
+
+  if (sub === 'install' && positional[1] === 'claude') {
+    if (!targets.length) {
+      console.log(warn('no Claude Code config directory found — nothing to install into'));
+      console.log('  name one explicitly with --target DIR');
+      return 1;
+    }
+    const chosen = await chooseTargets(targets, 'Install');
+    if (!chosen.length) { console.log(warn('nothing installed')); return 0; }
+    for (const t of chosen) console.log(ok(`installed ${names.length} skills into ${short(installPluginInto(t.dir))}`));
+    console.log(`  loads as memhouse@skills-dir next session — invoke ${invocations}`);
+    return 0;
+  }
+
+  if (sub === 'remove' && positional[1] === 'claude') {
+    const installed = targets.filter((t) => isPluginInstalled(t.dir));
+    if (!installed.length) { console.log(warn('nothing installed in any Claude config directory')); return 0; }
+    const chosen = await chooseTargets(installed, 'Remove from');
+    if (!chosen.length) { console.log(warn('nothing removed')); return 0; }
+    for (const t of chosen) {
+      fs.rmSync(path.join(t.dir, 'skills', 'memhouse'), { recursive: true });
+      // Remove the now-empty skills/ we created, but never a skills/ holding someone
+      // else's work.
+      try { fs.rmdirSync(path.join(t.dir, 'skills')); } catch { /* not empty: leave it */ }
+      console.log(ok(`removed ${short(path.join(t.dir, 'skills', 'memhouse'))}`));
+    }
+    return 0;
+  }
+
+  console.log('usage: memhouse plugins [list | install claude | remove claude] [--target DIR] [--yes]');
+  return 2;
 }
 
 async function cmdReset() {
@@ -2013,7 +2123,7 @@ function cmdUninstall() {
       console.log(r.sessions_v);
       break;
     }
-    case 'plugins': process.exitCode = cmdPlugins(); break;
+    case 'plugins': process.exitCode = await cmdPlugins(); break;
     case 'prompt':
       // Two audiences, two prompts. Bare `prompt` is the memory-USAGE snippet that goes
       // into a running agent's system prompt; `--install` is the one you hand an agent

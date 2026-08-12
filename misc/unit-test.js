@@ -411,5 +411,40 @@ test('a re-exec chain that has hit its cap does not restart again', () => {
   }
 });
 
+// ── claude config discovery ─────────────────────────────────────────────────────
+// The plugin installer reuses the ADAPTER's root discovery rather than carrying its own —
+// two implementations of "find every CLAUDE_CONFIG_DIR" would drift the first time a
+// playbook layout changes, which is exactly the defect install.sh was retired for.
+test('the adapter exports the root discovery the CLI installs into', () => {
+  const claude = require('../editors/claude');
+  assert.strictEqual(typeof claude.discoverClaudeRoots, 'function',
+    'bin/memhouse.js requires this export; without it the installer silently sees no playbooks');
+});
+
+test('playbook config dirs are discovered, used ones only', () => {
+  const claude = require('../editors/claude');
+  const home = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'mh-claude-home-'));
+  const saved = process.env.HOME;
+  try {
+    // A used root (has projects/), a used legacy-layout root, and an unused one that must
+    // NOT be offered — installing skills into a directory nobody runs is noise.
+    fsx.mkdirSync(pathx.join(home, '.claude-playbooks', 'alpha', 'projects'), { recursive: true });
+    fsx.mkdirSync(pathx.join(home, '.claude-playbooks', 'beta', 'playbook', 'projects'), { recursive: true });
+    fsx.mkdirSync(pathx.join(home, '.claude-playbooks', 'unused'), { recursive: true });
+    process.env.HOME = home;
+    // os.homedir() reads HOME on first call and the adapter caches it at require time, so
+    // this asserts on the pure function with the module reloaded under the new HOME.
+    delete require.cache[require.resolve('../editors/claude')];
+    const roots = require('../editors/claude').discoverClaudeRoots().map((r) => r.replace(home, ''));
+    assert.ok(roots.some((r) => r.endsWith('/alpha')), `alpha missing from ${roots}`);
+    assert.ok(roots.some((r) => r.endsWith('/beta/playbook')), `legacy beta/playbook missing from ${roots}`);
+    assert.ok(!roots.some((r) => r.endsWith('/unused')), `an unused dir was offered: ${roots}`);
+  } finally {
+    process.env.HOME = saved;
+    delete require.cache[require.resolve('../editors/claude')];
+    fsx.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
