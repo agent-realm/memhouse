@@ -131,10 +131,16 @@ Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
 
 ## Delivery kit (mirrors memory-house)
 
-`install.sh` (standalone), `AGENT-INSTALL.md` (agent-facing install steps),
-`skills/` (Claude Code skills to query/search memhouse), `plugin/` (Claude Code
-plugin wrapping the skills), `PROMPT.md` (system-prompt snippet teaching an agent
-to use memhouse as memory), `kernel-install.md` (provision as agency `memhouse`).
+`AGENT-INSTALL.md` (agent-facing install steps), `plugin/` (the Claude Code plugin
+wrapping the three skills), `PROMPT.md` (system-prompt snippet teaching an agent to
+use memhouse as memory), `kernel-install.md` (provision as agency `memhouse`).
+
+**`install.sh` is retired.** It was a second implementation of `memhouse install`,
+maintained separately and drifting apart from it: by the end it still defaulted to
+`http://localhost:8123` as `memhouse_root` — precisely the guessed house the CLI now
+refuses on purpose, because on many machines that credential reaches a real house
+belonging to someone else. One installer, and it is the one the acceptance suite
+drives.
 
 ## Non-goals (v0)
 

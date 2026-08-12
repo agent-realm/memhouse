@@ -57,13 +57,22 @@ memhouse update [--check]                  upgrade, restart daemons, check the s
 memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
-memhouse plugins install claude            /memhouse:search, :sessions, :sql
+memhouse plugins install claude            /memhouse:search, :sessions, :sql —
+                                           into every Claude Code config dir found
 memhouse prompt                            memory snippet for an agent's system prompt
 memhouse prompt --install                  an install prompt, rendered for this machine
 ```
 
 Every command works both ways: interactive for you, `--yes` / flags / `--json` for
 an agent — so an agent can install its own memory unattended.
+
+`onboard` offers the skills at the end, and `plugins` works across **every Claude Code
+config directory on the machine** — `~/.claude`, whatever `CLAUDE_CONFIG_DIR` points
+at, and each Kommander-style playbook under `~/.claude-playbooks/`. All are selected by
+default; answer with numbers to narrow it, or pass `--target DIR` for exactly one.
+Installing into just the default config is how `/memhouse:search` ends up missing from
+the instance you actually work in, silently, since a missing skill never announces
+itself.
 
 Config resolves: flags → `MEMHOUSE_*` env → `$MEMHOUSE_HOME/env` (default
 `~/.memhouse/env`). There is no house-shaped default: with nothing configured, the
