@@ -53,20 +53,35 @@ const RESUMERS = {
   //   machine this table was written on, so the flag could only have been guessed. Install
   //   one, read its --help, add it.
   //
-  //   cursor, vscode, zed, copilot-cli, copilot-jetbrains, antigravity, kiro, codebuff,
-  //   commandcode, windsurf — GUI editors with no CLI entry point that takes a session id.
-  //   Opening the folder is not resuming the session and must not be dressed up as it.
+  //   everything in GUI_ONLY — no CLI entry point takes a session id there. Opening the
+  //   folder is not resuming the session and must not be dressed up as it.
 };
 
-// Editors that have no CLI to resume into at all, separated from "we have not verified the
-// flag yet" so the refusal can say which of the two it is. Same reason `discover` separates
-// a skipped adapter from an editor you do not have: both produce nothing, and only this
-// tells them apart.
-// Stored `source` values again, not module names: `copilot.js` emits `copilot-cli`, and
-// windsurf emits its variant id.
+// Surfaces with no CLI to resume into AT ALL, separated from "the flag has not been read
+// yet" so the refusal can say which of the two it is — the same reason `discover` separates
+// a skipped adapter from an editor you do not have.
+//
+// Stored `source` values again, and two corrections already: `copilot.js` emits
+// `copilot-cli` and IS a command line, so it does not belong here; and windsurf never emits
+// 'windsurf' at all — it emits its VARIANTS id, `devin` or `devin-next` — so the name this
+// list first carried matched nothing and every Devin session fell through to the wrong
+// refusal.
+//
+// Membership means: no command line takes a session id here, so no amount of checking will
+// produce one. Anything merely UNCHECKED belongs in UNVERIFIED — asserting "there is
+// nothing to resume into" about a tool nobody has looked at is the same invented fact as
+// guessing a flag.
 const GUI_ONLY = new Set([
-  'cursor', 'vscode', 'zed', 'copilot-cli', 'copilot-jetbrains',
-  'windsurf', 'antigravity', 'kiro', 'codebuff', 'commandcode', 'gsd',
+  'cursor', 'vscode', 'zed', 'kiro', 'copilot-jetbrains', 'antigravity',
+  'devin', 'devin-next',
+]);
+
+// A plausible CLI that nobody has verified. Listed explicitly instead of left to fall
+// through a default, so the completeness test can prove every source the adapters can emit
+// lands in exactly one bucket — which is what would have caught both corrections above
+// before they shipped.
+const UNVERIFIED = new Set([
+  'goose', 'gemini-cli', 'cursor-agent', 'copilot-cli', 'codebuff', 'commandcode', 'gsd',
 ]);
 
 // A session_id is `<source>:<native-id>`. Split on the FIRST colon only: several editors
@@ -132,4 +147,4 @@ function resumeFor(row) {
   return { ...base, ok: true, command: folder ? `cd ${shq(folder)} && ${cmd}` : cmd };
 }
 
-module.exports = { RESUMERS, GUI_ONLY, resumeFor, splitSessionId };
+module.exports = { RESUMERS, GUI_ONLY, UNVERIFIED, resumeFor, splitSessionId };

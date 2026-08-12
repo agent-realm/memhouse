@@ -57,10 +57,22 @@ installed on the machine the table was written on.
 The refusal distinguishes two cases, for the same reason `discover` separates a skipped
 adapter from an editor you do not have:
 
-- **GUI editor** (cursor, vscode, zed, copilot, windsurf, antigravity, kiro, …) — there is
-  no CLI that takes a session id. Opening the folder is not resuming the session and is not
-  dressed up as it. The folder is printed as the one actionable fact memhouse holds.
-- **Unverified** — the CLI may well support it; nobody has read the flag yet.
+- **No CLI at all** (`cursor`, `vscode`, `zed`, `kiro`, `copilot-jetbrains`, `antigravity`,
+  `devin`, `devin-next`) — nothing takes a session id, and no amount of checking will
+  produce something that does. Opening the folder is not resuming the session and is not
+  dressed up as it; the folder is printed as the one actionable fact memhouse holds.
+- **Unverified** (`goose`, `gemini-cli`, `cursor-agent`, `copilot-cli`, `codebuff`,
+  `commandcode`, `gsd`) — a CLI that may well support it; nobody has read the flag yet.
+
+Both sets are **explicit**, and a test derives the full source inventory from `editors/`
+and asserts every source lands in exactly one of the three buckets. That test exists because
+the same mistake was made twice within a day of each other: `RESUMERS` was first keyed on
+`claude` when rows carry `claude-code`, and `windsurf` was listed as a GUI editor when the
+adapter emits its VARIANTS ids, `devin` and `devin-next` — so every Devin session fell
+through to the *unverified* message, which says the opposite of the truth. A source that
+matches nothing must be a test failure, not a default.
+
+And `copilot-cli` was in the GUI set while being, self-evidently, a command line.
 
 ### Two more decisions
 

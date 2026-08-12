@@ -316,6 +316,35 @@ test('a GUI editor refuses, and says which kind of refusal it is', () => {
   assert.strictEqual(r.folder, '/tmp/p'); // still the one actionable fact we hold
 });
 
+test('every source an adapter can emit lands in exactly one bucket', () => {
+  // The guard for a class that has now bitten twice in this one file: a source string
+  // matching no bucket falls through to "no verified resume command", which reads as "not
+  // checked yet" even when the truth is "there is no CLI at all".
+  //
+  // The inventory is DERIVED from the adapters, never restated here — restating by hand is
+  // exactly how 'windsurf' came to be listed when what it emits is devin/devin-next, and how
+  // the table was first keyed on 'claude' when the rows carry 'claude-code'.
+  const { RESUMERS, GUI_ONLY, UNVERIFIED } = require('../memhouse/resume');
+  const fs2 = require('fs'), path2 = require('path');
+  const dir = path2.join(__dirname, '..', 'editors');
+  const sources = new Set();
+  for (const f of fs2.readdirSync(dir).filter((x) => x.endsWith('.js'))) {
+    const src = fs2.readFileSync(path2.join(dir, f), 'utf-8');
+    for (const m of src.matchAll(/source: *'([a-z0-9-]+)'/g)) sources.add(m[1]);
+    // windsurf builds `source` from its VARIANTS ids rather than from a literal.
+    if (f === 'windsurf.js') for (const m of src.matchAll(/^\s+id: '([a-z0-9-]+)',/gm)) sources.add(m[1]);
+  }
+  assert.ok(sources.size >= 15, `expected the adapter inventory, got ${sources.size}`);
+  for (const s of sources) {
+    const buckets = [
+      RESUMERS[s] ? 'resumable' : null,
+      GUI_ONLY.has(s) ? 'gui' : null,
+      UNVERIFIED.has(s) ? 'unverified' : null,
+    ].filter(Boolean);
+    assert.strictEqual(buckets.length, 1, `source '${s}' is in ${buckets.length} buckets (${buckets.join(', ') || 'none'})`);
+  }
+});
+
 test('an unverified CLI is refused, never guessed', () => {
   // goose is plausibly resumable and deliberately absent: its flag was never read from its
   // own --help. A guessed entry prints a command that silently does the wrong thing.
