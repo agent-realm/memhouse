@@ -673,7 +673,11 @@ ${mergeGrants}
 -- CONST, not MAX: a plain default is advisory, and MAX is not enough either because 0 means
 -- UNLIMITED in ClickHouse and 0 satisfies any MAX. Measured — with a MAX ceiling in force,
 -- SETTINGS max_memory_usage = 0 was accepted and the ceiling was gone.
-CREATE SETTINGS PROFILE OR REPLACE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
+-- CREATE ... OR REPLACE, which this used, DETACHES every user already on the profile, so
+-- provisioning a second member silently stripped the first member's ceilings. IF NOT
+-- EXISTS + ALTER edits the same object in place and keeps every assignment.
+CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE};
+ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
 ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}';
 `;
 }
@@ -756,7 +760,16 @@ async function adminBootstrap(cfg, admin) {
   // 3. rooms, 4. grants, 5. Merge rooms + their grant — provision.js owns all of it, so
   // there is one implementation of the grant set rather than two that drift.
   const provision = path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js');
-  const rc = spawnSync(process.execPath, [provision, '--member', admin.member, '--merge'], {
+  // Tell it who made the user. Without this the child finds a user that exists — because
+  // THIS command created it two lines ago — and says so, producing two consecutive lines
+  // of one command's output that contradict each other:
+  //     ✓ created ClickHouse user 'henry'
+  //     [mem] ClickHouse user 'henry' already exists — provisioning rooms only
+  // and "already exists" is the exact phrase memhouse uses for the identity-takeover
+  // REFUSAL, so a first-time installer reads a success as a warning about someone else.
+  const provisionArgs = [provision, '--member', admin.member, '--merge'];
+  if (createdUser) provisionArgs.push('--user-just-created');
+  const rc = spawnSync(process.execPath, provisionArgs, {
     stdio: 'inherit',
     env: { ...process.env, MEM_URL: cfg.url, MEM_USER: admin.user, MEM_PASSWORD: admin.password, MEM_DB: cfg.db },
   });

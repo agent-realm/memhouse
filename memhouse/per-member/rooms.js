@@ -103,6 +103,23 @@ const MEMBER_PROFILE_SETTINGS = [
   'max_execution_time = 600 MIN 1 MAX 600',
   'max_threads = 16 MIN 1 MAX 16',
   'max_result_rows = 10000000 MIN 1 MAX 10000000',
+  // Provenance, pinned server-side rather than trusted to every client.
+  //
+  // `user_id MATERIALIZED currentUser()` is what records who wrote a row — but a
+  // MATERIALIZED column is computed during the INSERT, and an ASYNC insert flushes
+  // outside that context: measured on 25.11.9.34, `async_insert=1` stores user_id as the
+  // EMPTY STRING while a sync insert on the same table stamps correctly. An unattributed
+  // row is invisible to every identity-bound path at once, including its own owner's
+  // `reset`.
+  //
+  // The shipper already passes async_insert=0 on every insert, so memhouse itself was
+  // never the risk. The risk is everything ELSE holding a member credential — an agent
+  // following the /memhouse:sql skill, a migration script, a psql-habit one-liner. CONST
+  // makes the house refuse (SETTING_CONSTRAINT_VIOLATION) instead of silently accepting
+  // rows nobody owns, which is the difference between a guarantee and a convention.
+  // `doctor` still checks for blank user_id — that stays, as the detector for rows
+  // written before this profile existed.
+  'async_insert = 0 CONST',
 ].join(', ');
 
 // ClickHouse usernames are permissive; room names are not. Refuse anything that would

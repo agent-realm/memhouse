@@ -130,6 +130,12 @@ async function main() {
       console.log('[mem] shown once — hand it over, or pass --member-password next time');
     }
     console.log(`[mem] they finish with: memhouse install --url ${cfg.url} --db ${cfg.database} --user ${member} --password '…'`);
+  } else if (flag('user-just-created')) {
+    // The caller made it moments ago and has already said so. Saying "already exists"
+    // here contradicts the line above it, and does so using the exact phrase that
+    // elsewhere means "someone else owns this handle, refusing" — which reads as a
+    // warning in the middle of a successful first install.
+    console.log(`[mem] using the ClickHouse user '${member}' just created — provisioning rooms`);
   } else {
     console.log(`[mem] ClickHouse user '${member}' already exists — provisioning rooms only`);
   }
@@ -226,8 +232,19 @@ async function main() {
   //
   // Generous on purpose: a full re-ship of a large house is a big INSERT, and the point is
   // to stop one member exhausting the box, not to make honest work fail.
+  // CREATE ... OR REPLACE, which this used, DETACHES every user already assigned to the
+  // profile. One shared profile plus a replace on every provision meant that adding a
+  // second member silently stripped the first member's ceilings — measured: provision
+  // kyle, then provision lena, and `SHOW CREATE USER kyle` no longer carries the profile
+  // at all. In a three-member house only the most recently provisioned member had any
+  // limit, and nothing said so.
+  //
+  // CREATE IF NOT EXISTS + ALTER updates the same object in place and keeps every existing
+  // assignment, so one provision now brings ALL members up to the current settings —
+  // which is also what makes the async_insert pin reach members provisioned earlier.
   try {
-    await client.command({ query: `CREATE SETTINGS PROFILE OR REPLACE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
+    await client.command({ query: `CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE}` });
+    await client.command({ query: `ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
     await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}'` });
     console.log(`[mem] settings profile '${MEMBER_PROFILE}' applied to '${member}' (memory, time and thread ceilings)`);
   } catch (e) {
