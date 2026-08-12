@@ -40,7 +40,7 @@
       <img class="on-light" src="/mark.png" alt="MemHouse" width="37" height="28">
       <img class="on-dark" src="/mark-dark.png" alt="MemHouse" width="37" height="28" hidden>
       memhouse
-      <span class="ver">v0.6.0</span>
+      <span class="ver">v0.7.0</span>
     </a>
     <nav class="nav-links">
       <a class="hide-sm" href="#compare">Why</a>
@@ -60,7 +60,7 @@
 <!-- ============ HERO ============ -->
 <section class="hero">
   <div class="wrap">
-    <div class="status"><span class="dot"></span> <b>v0.6.0</b> &middot; 17 editor adapters &middot; MIT</div>
+    <div class="status"><span class="dot"></span> <b>v0.7.0</b> &middot; 17 editor adapters &middot; MIT</div>
 
     <h1 class="hero-title"><span class="dim">Your agents forget.</span><br><span class="mark">The house remembers.</span></h1>
 
@@ -455,6 +455,11 @@
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
         <h3>An isolated room per agent</h3>
         <p>Give an agent its own credential and it gets its own three rooms — it can see its memory and nobody else's. Isolation is a grant that is simply <em>absent</em>, so it fails closed rather than depending on a filter being right everywhere.</p>
+      </div>
+      <div class="card">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h8"/><rect x="17" y="10" width="5" height="10" rx="1.5"/></svg>
+        <h3>Two laptops, one memory</h3>
+        <p>Every machine you own ships into the same rooms, and each install stamps its rows with a fingerprint written once — so <code>WHERE host = …</code> tells the desktop from the laptop. It is random rather than derived from the hostname, because two machines that both answer to <code>MacBook-Pro</code> would otherwise share one identity, and renaming a machine would cut its history in half.</p>
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M2 12h2M20 12h2M9 11v2M15 11v2"/></svg>
