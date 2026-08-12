@@ -439,6 +439,13 @@ if (require.main === module) {
     console.log(`[memhouse] dashboard → http://localhost:${PORT} (house '${qy.config.database}' @ ${qy.config.url.replace(/\/\/.*@/, '//')})`
       + (HOST !== '127.0.0.1' ? ` [bound to ${HOST} — remotely reachable]` : ''));
   });
+  // An upgrade replaces public/ as well as the code, and this process holds neither: the
+  // static middleware bound to the old directory at boot, so the SPA it serves stays the
+  // old bundle however many times the pilot reloads. The shipper checks once per pass; a
+  // server has no pass, so it polls. unref() so the timer never holds the process open.
+  const selfUpdate = require('../self-update');
+  const snap = selfUpdate.snapshot(__filename);
+  setInterval(() => selfUpdate.maybeRestart({ snap, name: 'dashboard', log: console.log }), 60_000).unref();
 }
 
 module.exports = app;

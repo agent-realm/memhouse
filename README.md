@@ -52,6 +52,8 @@ container engine, install one of the two.
 ```text
 memhouse onboard | install | setup | discover | doctor | uninstall | reset
 memhouse ship [--full|--loop N] | search <terms> | stats | status
+memhouse resume <session-id>               print the command that reopens a session
+memhouse update [--check]                  upgrade, restart daemons, check the schema
 memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
@@ -67,6 +69,44 @@ Config resolves: flags → `MEMHOUSE_*` env → `$MEMHOUSE_HOME/env` (default
 `~/.memhouse/env`). There is no house-shaped default: with nothing configured, the
 commands that read or write memory refuse and say so rather than guessing
 `localhost:8123`, which on a lot of machines is a real house belonging to someone else.
+
+## Going back into a session
+
+`search` finds the conversation; `resume` hands you back into it.
+
+```bash
+memhouse resume claude:6b1f…            # prints:  cd /path/to/project && claude --resume 6b1f…
+```
+
+It **prints** the command instead of running it. A resume run from the wrong directory
+or with a stale id does not fail — it opens a *new* session, and the transcript you
+wanted is still gone while the tool reports success. You paste it, so you see it first.
+
+Verified for **claude, codex and opencode**. The GUI editors — cursor, zed, vscode,
+copilot, windsurf and the rest — have no CLI that takes a session id, so there is
+nothing to resume into and `resume` says so rather than opening a folder and calling
+it the same thing. Adding an editor means reading its real `--help`, not guessing:
+see `memhouse/resume.js`.
+
+## Staying current
+
+```bash
+memhouse update            # upgrade, restart the daemons, check the house schema
+memhouse update --check    # compare versions, change nothing
+```
+
+A bare `npm i -g memhouse@latest` does one third of the job. It does not re-pass
+`--allow-scripts=better-sqlite3`, so the five SQLite adapters go quiet; it does not
+restart the daemons, which keep parsing with the code they booted with (a shipper here
+once ran 1d16h out of a directory that had been *moved*); and it does not check whether
+your house predates a room the new shipper needs. `update` does all three, and from a
+checkout it rebuilds `public/` — otherwise `git pull` serves you the previous release's
+dashboard forever.
+
+The daemons also notice on their own: each one compares the installed version against
+what it booted with and hands over — exiting under systemd/launchd so the supervisor
+restarts it, re-execing itself when nothing is supervising. `update` just makes it
+immediate.
 
 ## How your memory is stored
 
@@ -107,13 +147,17 @@ has it wrong, so an old house cannot be corrupted by a new shipper.
 
 ### The `--allow-scripts` flag
 
-Six adapters — **cursor, zed, opencode, goose, windsurf, antigravity** — read
-sessions out of SQLite files, and `better-sqlite3` builds its native binding from
-an install script. npm 12 blocks install scripts by default, so without the flag
-those six read nothing and you ship a partial history.
+Five adapters — **cursor, zed, opencode, goose, antigravity** — read sessions out
+of SQLite files, and `better-sqlite3` builds its native binding from an install
+script. npm 12 blocks install scripts by default, so without the flag those five
+read nothing and you ship a partial history.
+
+(This said six and named windsurf, which is wrong: windsurf lists its sessions over
+language-server RPC and touches SQLite only to read a usage key, so a dead binding
+costs it numbers, not sessions. `editors/index.js` has the real list.)
 
 It is not silent: `memhouse discover` and `memhouse doctor` both name the skipped
-adapters. The other eleven adapters keep working.
+adapters. The other twelve adapters keep working.
 
 `npx` takes the same flag, before the package name:
 

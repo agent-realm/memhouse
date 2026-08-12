@@ -265,5 +265,122 @@ test('an engine that cannot answer is never dropped from ownership', () => {
   }
 });
 
+// ── resume ──────────────────────────────────────────────────────────────────────
+// The point of this command is that a wrong answer is impossible, so these check the
+// refusals rather than the happy path.
+test('a resumable session becomes a pasteable command, cd included', () => {
+  const { resumeFor } = require('../memhouse/resume');
+  const r = resumeFor({ session_id: 'claude-code:6b1f-abc', source: 'claude-code', folder: '/tmp/proj' });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.command, 'cd /tmp/proj && claude --resume 6b1f-abc');
+});
+
+test('the table is keyed on the STORED source, not the adapter module name', () => {
+  // editors/claude.js is `const name = 'claude'` and emits `source: 'claude-code'`. Keyed on
+  // the module name this refused every Claude Code session in the house — 508 of them.
+  const { RESUMERS } = require('../memhouse/resume');
+  assert.ok(RESUMERS['claude-code'], 'claude-code is what lands in the source column');
+  assert.ok(!RESUMERS.claude, 'claude is the module name and never appears in a row');
+});
+
+test('an imported session is refused before its source is even consulted', () => {
+  // 502 of 1,304 sessions in the house this was built against are imported claude-ai rows:
+  // no local store behind them, so no resume command can be right.
+  const { resumeFor } = require('../memhouse/resume');
+  const r = resumeFor({ session_id: 'claude-code:x', source: 'claude-code', folder: '/tmp/p', origin: 'import' });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.reason, /imported/);
+});
+
+test('a session id splits on the FIRST colon', () => {
+  // Several editors put colons inside their own ids. Splitting on the last one hands the
+  // CLI a truncated id, which resolves to nothing — or to a different session.
+  const { resumeFor } = require('../memhouse/resume');
+  const r = resumeFor({ session_id: 'codex:2026-08-12T10:30:00Z', source: 'codex', folder: '' });
+  assert.strictEqual(r.nativeId, '2026-08-12T10:30:00Z');
+  assert.strictEqual(r.command, 'codex resume 2026-08-12T10:30:00Z');
+});
+
+test('a folder with a space still pastes correctly', () => {
+  const { resumeFor } = require('../memhouse/resume');
+  const r = resumeFor({ session_id: 'claude-code:x', source: 'claude-code', folder: '/tmp/my proj' });
+  assert.strictEqual(r.command, "cd '/tmp/my proj' && claude --resume x");
+});
+
+test('a GUI editor refuses, and says which kind of refusal it is', () => {
+  const { resumeFor } = require('../memhouse/resume');
+  const r = resumeFor({ session_id: 'zed:99', source: 'zed', folder: '/tmp/p' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.command, null);
+  assert.match(r.reason, /GUI editor/);
+  assert.strictEqual(r.folder, '/tmp/p'); // still the one actionable fact we hold
+});
+
+test('an unverified CLI is refused, never guessed', () => {
+  // goose is plausibly resumable and deliberately absent: its flag was never read from its
+  // own --help. A guessed entry prints a command that silently does the wrong thing.
+  const { resumeFor, RESUMERS } = require('../memhouse/resume');
+  assert.ok(!RESUMERS.goose, 'goose stays out until its flag is READ, not recalled');
+  const r = resumeFor({ session_id: 'goose:1', source: 'goose', folder: '' });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.reason, /no verified resume command/);
+});
+
+// ── self-update ─────────────────────────────────────────────────────────────────
+const selfUpdate = require('../memhouse/self-update');
+const fsx = require('fs');
+const pathx = require('path');
+
+// A throwaway installation: package.json at the root, an entry two levels down, exactly
+// the shape both daemons have.
+function fakeInstall(version) {
+  const root = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'mh-selfupd-'));
+  fsx.mkdirSync(pathx.join(root, 'sub'), { recursive: true });
+  const entry = pathx.join(root, 'sub', 'entry.js');
+  fsx.writeFileSync(entry, '// daemon\n');
+  fsx.writeFileSync(pathx.join(root, 'package.json'), JSON.stringify({ version }));
+  return { root, entry };
+}
+
+test('drift is read off disk, not from a cached require', () => {
+  const { root, entry } = fakeInstall('1.0.0');
+  try {
+    const snap = selfUpdate.snapshot(entry, root);
+    assert.strictEqual(selfUpdate.driftReason(snap), null);
+    // require() would have cached 1.0.0 for the life of the process — which is precisely
+    // the value being watched for change, and precisely why fs is used instead.
+    fsx.writeFileSync(pathx.join(root, 'package.json'), JSON.stringify({ version: '1.0.1' }));
+    assert.match(selfUpdate.driftReason(snap), /1\.0\.0 → 1\.0\.1/);
+  } finally { fsx.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a vanished entry is drift, and is reported rather than exec-ed', () => {
+  const { root, entry } = fakeInstall('1.0.0');
+  try {
+    const snap = selfUpdate.snapshot(entry, root);
+    fsx.rmSync(entry);
+    assert.match(selfUpdate.driftReason(snap), /no longer exists/);
+    // maybeRestart RETURNING (rather than exiting this process) is the assertion: inside
+    // the 60s floor nothing may happen at all, which is the guard against a boot loop.
+    assert.strictEqual(selfUpdate.maybeRestart({ snap, name: 'shipper', log: () => {} }), false);
+  } finally { fsx.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a re-exec chain that has hit its cap does not restart again', () => {
+  const { root, entry } = fakeInstall('1.0.0');
+  const saved = process.env[selfUpdate.CHAIN_VAR];
+  try {
+    const snap = selfUpdate.snapshot(entry, root);
+    snap.at = Date.now() - selfUpdate.MIN_INTERVAL_MS - 1; // past the floor
+    fsx.writeFileSync(pathx.join(root, 'package.json'), JSON.stringify({ version: '2.0.0' }));
+    process.env[selfUpdate.CHAIN_VAR] = String(selfUpdate.MAX_CHAIN);
+    // Without the cap this would spawn and exit(0), taking the test run with it.
+    assert.strictEqual(selfUpdate.maybeRestart({ snap, name: 'shipper', log: () => {} }), false);
+  } finally {
+    if (saved === undefined) delete process.env[selfUpdate.CHAIN_VAR]; else process.env[selfUpdate.CHAIN_VAR] = saved;
+    fsx.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

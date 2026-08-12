@@ -48,6 +48,10 @@ catch {
 }
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
 const adapterErrorSink = require('../../editors/adapter-errors');
+const selfUpdate = require('../self-update');
+// Captured at require time, which is as close to "what this process booted with" as it
+// gets. Taking it later would record whatever an upgrade had already replaced.
+const selfSnap = selfUpdate.snapshot(__filename);
 const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../per-member/rooms');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
@@ -908,6 +912,12 @@ async function main() {
         }
         await new Promise((r) => setTimeout(r, waitMs));
         resetCaches(); // adapters cache chat lists; drop them so new sessions surface
+        // Then, before the next pass, notice if the installation underneath us changed.
+        // Checked AFTER the wait rather than before it so an upgrade landing mid-sleep is
+        // acted on at the top of the next pass instead of one whole interval later — and
+        // never mid-pass, where handing over would abandon a half-shipped session.
+        // Does not return when it hands over.
+        selfUpdate.maybeRestart({ snap: selfSnap, name: 'shipper' });
       }
     } while (loop);
   } finally {

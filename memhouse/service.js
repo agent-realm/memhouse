@@ -220,6 +220,12 @@ function install({ shipJs, envFile, logDir, interval = 300, home = null, force =
   // was working before `service install` silently stops applying — the adapter falls back
   // to its default path and just stops finding sessions, with no error anywhere.
   for (const k of ADAPTER_ENV) if (process.env[k]) env[k] = process.env[k];
+  // Tells the shipper it has a supervisor. On an upgrade a supervised daemon EXITS and lets
+  // systemd/launchd start the new version; an unsupervised one re-execs itself, because
+  // nothing else would. Getting this backwards is the expensive direction: a process that
+  // re-execs under a supervisor races the unit's own restart, and two shippers on one house
+  // clear each other's rows. See memhouse/self-update.js.
+  env.MEMHOUSE_SUPERVISED = '1';
   try { envfile.assertSingleLine(env); } catch (e) { return { ok: false, msg: e.message }; }
 
   if (kind === 'systemd') {
