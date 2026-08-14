@@ -383,18 +383,19 @@ async function assertOriginKeyed(client, rooms) {
 
 async function ensureSchema(client) {
   const rooms = await resolveRooms(client);
-  const { member } = rooms;
   const tpl = fs.readFileSync(path.join(__dirname, '..', 'house', 'schema.sql.tpl'), 'utf-8');
   const sql = tpl; // plain shared tables — nothing to render
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
-  // A MEMBER holds no CREATE TABLE — that is the point of the narrowed grant set — and
-  // ClickHouse checks the grant BEFORE it checks existence, so `IF NOT EXISTS` does not
-  // save these. Running the CREATEs in a bare loop meant `--ensure-schema` died on the
-  // FIRST statement for the very user who is told to run it, and never reached the ADD
-  // COLUMN rollout that is the whole reason to run it. Skip what we may not do and carry
-  // on; the rooms either already exist (assertRoomsExist says so) or an owner has to
-  // create them, which install already explains.
+  // Two failure shapes are survivable here and both are skipped rather than fatal:
+  //
+  //   - a permission denial. A read-only credential can still run --ensure-schema for
+  //     its ADD COLUMN rollout; ClickHouse checks the grant BEFORE existence, so IF NOT
+  //     EXISTS does not save the CREATEs. Skip what we may not do and carry on.
+  //   - a create RACE. Two housemates' first-ever ships can run these CREATEs
+  //     concurrently, and IF NOT EXISTS is not atomic against a simultaneous creator —
+  //     the loser can get TABLE_ALREADY_EXISTS or a metadata-file collision. The table
+  //     exists either way, which is the outcome this function wants.
   let denied = 0;
   for (const q of stmts) {
     try {
@@ -409,6 +410,7 @@ async function ensureSchema(client) {
     } catch (e) {
       const m = e && e.message ? e.message : String(e);
       if (/Not enough privileges|ACCESS_DENIED/i.test(m)) { denied++; continue; }
+      if (/ALREADY_EXISTS|already exists/i.test(m)) { continue; } // lost a create race — the winner made it
       throw e;
     }
   }

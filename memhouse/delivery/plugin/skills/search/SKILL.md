@@ -108,7 +108,7 @@ SELECT m.ts, m.source, m.project, m.role, m.session_id,
        s.name AS session,
        substring(m.text, 1, 300) AS snippet
 FROM messages AS m
-LEFT JOIN sessions AS s USING (session_id)
+LEFT JOIN sessions AS s USING (session_id, user_id)
 WHERE m.text_ngram LIKE '%postgres%' AND m.text_ngram LIKE '%migration%'
 ORDER BY m.ts DESC
 LIMIT 30
@@ -131,12 +131,12 @@ FORMAT PrettyCompact
 ### Example 3 — which sessions mention it most (then drill in)
 
 ```sql
-SELECT m.session_id, any(s.name) AS session, any(m.project) AS project,
+SELECT m.session_id, m.user_id, any(s.name) AS session, any(m.project) AS project,
        count() AS hits, max(m.ts) AS last_hit
 FROM messages AS m
-LEFT JOIN sessions AS s USING (session_id)
+LEFT JOIN sessions AS s USING (session_id, user_id)
 WHERE m.text_ngram LIKE '%clickhouse cache%'
-GROUP BY m.session_id
+GROUP BY m.session_id, m.user_id
 ORDER BY hits DESC
 LIMIT 10
 FORMAT PrettyCompact

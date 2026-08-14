@@ -35,6 +35,18 @@ The model is **collaborative**: housemates trust each other with the house. Narr
 grants can be layered on later if a team wants them; the isolation mechanism between
 groups that do NOT trust each other is a separate house.
 
+## One user on two machines, same session id
+
+Session ids are minted per machine, so this needs a synced home directory to happen at
+all — but when it does (the same `~/.claude` on two synced machines), both shippers ship
+the same `(session_id, user_id)`. The keys deliberately do NOT include `host`, so the
+rows collapse to the LAST shipper's copy: one logical session stays one session, with
+`host` recording who shipped it most recently. Keying on host instead would duplicate
+every such session and double what the rollup counts. An interleaved clear+insert
+between the two shippers can transiently drop rows; the next pass's skip predicate sees
+the count mismatch and re-ships — self-healing, at the price of churn. Truly parallel
+shippers per user are the deferred "ephemeral fingerprint" expert feature, not today's.
+
 ## The rollup is a saved query, not an object
 
 `sessions_v` is SQL text (house.js `sessionsRollup`), substituted into the same
