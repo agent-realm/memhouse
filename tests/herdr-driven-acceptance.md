@@ -21,8 +21,9 @@ the source.
 - You are running **inside herdr** (`$HERDR_ENV` is `1`). Nested herdr is disabled, so
   you drive the *existing* instance — do not try to launch one.
 - Read `/Users/polat/.claude/skills/herdr/SKILL.md` for the command surface.
-- Read `memhouse/per-member/INSTALL.md` — it states the three install paths and every
-  refusal. That document is the contract you are testing.
+- Read `memhouse/house/HOUSE.md` — it states the model: a house is a database, its
+  rooms are three shared tables, provenance is `user_id` × `host`. That document is the
+  contract you are testing.
 - Have the branch under test checked out in a worktree. Do not test the pilot's
   primary checkout.
 
@@ -120,9 +121,12 @@ drop it between runs).
 
 | Path | Command | Must end with |
 |---|---|---|
-| admin bootstrap | `install --admin-user … --admin-password … --member <m> --member-password …` | member created, **reconnect verified as the member**, admin credential NOT in the env file |
-| member credential | `install --url … --user … --password …` | rooms found or created, config written |
-| print the SQL | `install --print-sql --member <m>` | SQL printed, **nothing contacted, nothing written** |
+| admin bootstrap | `install --admin-user … --admin-password … --member <m> --member-password …` | user created (or verified by password if it exists), `GRANT ALL ON <db>.*`, async pin, **the member's own shipper builds the rooms**, reconnect verified as the member, admin credential NOT in the env file |
+| member credential | `install --url … --user … --password …` | rooms found or created (the credential holds ALL on the house), config written |
+| print the SQL | `install --print-sql --member <m>` | SQL printed (CREATE DATABASE, CREATE USER, GRANT ALL, table DDL, ADD SETTING pin), **nothing contacted, nothing written** |
+
+Install two members into ONE house (`--db team_a` for both). That is the model, not an
+edge case.
 
 For `--print-sql`, actually **run what it printed** — one statement per HTTP request
 (the interface refuses multi-statement bodies; there is no setting that changes that).
@@ -141,18 +145,20 @@ grep -c "<admin-password>" $MEMHOUSE_HOME/env   # must be 0
 These are the contract. Each must refuse, name both sides, and **change nothing**.
 Verify the "change nothing" half by counting rows before and after.
 
-- install twice with the same `--member` → refuses (identity takeover), unless
-  `--adopt-user` **and** `--member-password`, which it verifies by reconnecting
-- `--adopt-user` with the wrong password → refuses
-- a handle starting with a digit, or `root` → refuses
+- install with an existing `--member` and no `--member-password` → refuses and says the
+  password is how you install as them; with the RIGHT password → proceeds (verified by
+  connecting); wrong password → refuses. There is no identity-takeover concept —
+  shared tables stamp `user_id` server-side, so an existing handle hands nobody anything.
+- a handle starting with a digit → refuses
+- `--db system` or `--db information_schema` (any case) → refuses, creates NOTHING.
+  This one is load-bearing: before the check, `install --db system` granted a member
+  everything on the server's system database and created three tables inside it, exit 0.
+  `--db default` must still be ACCEPTED — user `alice` with house `default` is a
+  supported pairing.
 - an env file pointing at a different url/db → refuses, unless `--force`
-- a member with no `CREATE TABLE` and no rooms → refuses, prints the owner's command
-- a pre-0.4.4 house (transcript rooms without `origin` in the sorting key) → **the
-  shipper refuses and prints the rebuild**. Build one by creating rooms from the
-  template with the `origin` line stripped and the ORDER BY reverted.
-- a 0.4.4 house (`origin` wrongly in the SESSIONS sorting key) → same refusal. Build one
-  by adding `origin` back into the sessions ORDER BY. Both directions are wrong and both
-  must be caught.
+- a house whose rooms have a wrong sorting key for `origin` (either direction: missing
+  from messages/tool_calls, or wrongly present in sessions) → **the shipper refuses and
+  prints the rebuild**. Build both variants from the template with the key edited.
 - **no config at all** — unset every `MEMHOUSE_*` and point `MEMHOUSE_HOME` at an empty
   dir, then run `ship`, `search`, `stats`, `status`, `start`, `reset`. Each must refuse
   and name the fix. **None may connect to `localhost:8123`.** This is the one that
@@ -179,14 +185,14 @@ Then the same thing through the CLI, which the matrix does not cover:
    has already settled into `skipped`, then ship twice more. It must stay skipped. Before
    0.4.5 the skip compared `count()` against `message_count`, so a single imported row
    made that session re-ship forever.
-7. **One session row, always.** `SELECT session_id, count() FROM sessions_<m> FINAL GROUP
-   BY session_id HAVING count() > 1` must return nothing, including for sessions that
+7. **One session row, always.** `SELECT session_id, user_id, count() FROM sessions FINAL GROUP
+   BY session_id, user_id HAVING count() > 1` must return nothing, including for sessions that
    carry imported rows. Two rows double every metric the rollup computes.
 8. **Real timestamps.** Ship a Claude Code session whose JSONL has known per-message
    timestamps. The stored `ts` must match them, not be spread evenly between the
    session's first and last time.
 9. **A partial ship must be retried, not skipped.** Ship, let a session settle into
-   `skipped`, then delete that session's rows from `tool_calls_<m>` while leaving its
+   `skipped`, then delete that session's rows from `tool_calls` (that member's only) while leaving its
    session row and messages intact — the state any failure during the last of the three
    inserts leaves behind. The next ORDINARY pass must re-ship it. Before 0.4.6 the skip
    predicate read only the messages room, so those tool calls were skipped forever and
@@ -277,8 +283,10 @@ herdr pane read <pane2> --source visible --lines 60
 What must hold:
 
 - the skill finds sessions you shipped in phase 5 — content you can predict
-- room names are **suffixed** (`messages_<member>`); if the agent writes `FROM messages`
-  it gets `UNKNOWN_TABLE`, and the skill doc is what should have stopped it
+- `FROM messages` works — the rooms are plain, resolved by the connection's database.
+  The trap to watch for now is a JOIN on `session_id` alone: the skill docs say to join
+  on `(session_id, user_id)`, and an agent that drops the user half can merge two
+  housemates' rows on a colliding id
 - `/memhouse:sql` runs read-only SQL and refuses writes
 - the session rollup is a **saved query**, not an object — an agent that does
   `FROM sessions_v` is following stale instructions
@@ -286,24 +294,29 @@ What must hold:
 
 Then uninstall the plugin and confirm the skills are gone.
 
-## Phase 9 — a shared house, and the isolation claim
+## Phase 9 — the shared house
 
-The product's central claim is *"isolation is a grant that is simply absent, so it fails
-closed."* Build a house with three members via `provision.js --member <n> --merge`, ship
-distinct content into each, then try to break it:
+The model's central claim is now *"everyone in the house writes into the same tables,
+and `user_id` × `host` says where every row came from."* Build a house with two members
+(admin path twice, same `--db`), ship real sessions from both (distinct `MEMHOUSE_HOME`
+per member so each install mints its own host fingerprint), then verify:
 
-- read, INSERT, ALTER, DROP, TRUNCATE, RENAME another member's rooms — all must refuse
-- write a row claiming another member's `user_id`, by VALUES and by `INSERT … SELECT`, and
-  under `async_insert=1` (the stamp does not run during an async flush on 25.11)
-- squat or shadow another member's name
-- reach another member's CONTENT through `system.*` — metadata is fine, content is not
-- read the Merge rooms as each member: they must narrow, not deny
-- two members shipping concurrently, and two shippers as the SAME member
-- `reset` and `reset --all-origins` as one member must not touch another's rows
+- `SELECT user_id, host, count() FROM <db>.messages GROUP BY user_id, host` — two rows,
+  clean split, no blank `user_id` anywhere
+- one member's INCREMENTAL pass with the other's rows present: mostly `skipped`, not
+  re-shipped — the skip predicate must scope to its own user
+- one member's `reset --yes`: their rows only; the other member's count unmoved;
+  `origin='import'` rows unmoved
+- the partial-ship retry (delete one session's `tool_calls` for member A): the next
+  ordinary pass restores A's copy and leaves B's copy untouched
+- the dashboard shows the WHOLE house (`/api/overview` counts both members), and
+  `/api/query` with `GROUP BY user_id` splits it
+- `doctor` from either member names the other host in the rooms
 
-Report anything where isolation held but the ERROR MESSAGE leaked — table existence, row
-counts, other members' names. `messages_bob` answering 497 while `messages_nobody` answers
-60 is a roster oracle, and handles are table names here.
+Grants are deliberately broad (`ALL` on the house) — housemates are collaborators.
+Do not report the ability of one member to read or even drop another's rows as a
+finding; that is the trust model, decided 2026-08-14. The boundary under test is the
+DATABASE: a member of one house must hold nothing on another house.
 
 ## Phase 10 — the dashboard, the API, and money
 
