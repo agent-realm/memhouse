@@ -40,7 +40,7 @@
       <img class="on-light" src="/mark.png" alt="MemHouse" width="37" height="28">
       <img class="on-dark" src="/mark-dark.png" alt="MemHouse" width="37" height="28" hidden>
       memhouse
-      <span class="ver">v0.7.1</span>
+      <span class="ver">v0.8.0</span>
     </a>
     <nav class="nav-links">
       <a class="hide-sm" href="#compare">Why</a>
@@ -60,7 +60,7 @@
 <!-- ============ HERO ============ -->
 <section class="hero">
   <div class="wrap">
-    <div class="status"><span class="dot"></span> <b>v0.7.1</b> &middot; 17 editor adapters &middot; MIT</div>
+    <div class="status"><span class="dot"></span> <b>v0.8.0</b> &middot; 17 editor adapters &middot; MIT</div>
 
     <h1 class="hero-title"><span class="dim">Your agents forget.</span><br><span class="mark">The house remembers.</span></h1>
 
@@ -363,17 +363,17 @@
       <div class="panel">
         <div class="panel-head"><span class="k">▸</span> Teams</div>
         <div class="panel-body">
-          <h3>Shared memory that fails closed</h3>
+          <h3>One house, everyone's memory</h3>
           <p>
-            Every member owns their own three rooms — <code>messages_alice</code>,
-            <code>sessions_alice</code>, <code>tool_calls_alice</code>. Isolation is a grant that is
-            simply <em>absent</em>, not a row policy that has to be right on every table and every
-            read path.
+            A team's house is a database — <code>team_a.messages</code>, <code>team_a.sessions</code>,
+            <code>team_a.tool_calls</code> — and every housemate's shipper writes into the
+            <em>same</em> tables with their own credential. The server stamps
+            <code>user_id</code> on every row; the install fingerprint stamps <code>host</code>.
           </p>
           <ul class="list teal">
-            <li><b>Sharing is one GRANT</b>, issued by the member or the house owner — no operator in the loop.</li>
-            <li><b>A shared read is a Merge room</b> (<code>all_sessions</code>) that reduces to whatever the caller can already read.</li>
-            <li><b>Install centrally</b> as an agency on an ultimagent kernel, members provisioned with their own credentials.</li>
+            <li><b>Joining is two statements</b> any DBA knows: <code>CREATE USER</code>, <code>GRANT ALL</code> on the house.</li>
+            <li><b>The whole team in one dashboard</b>, no configuration — and <code>WHERE user_id = 'alice'</code> is one person.</li>
+            <li><b>The boundary is the database.</b> Groups that should not see each other get separate houses; a house's <code>ALL</code> reaches nothing outside it.</li>
           </ul>
         </div>
       </div>
@@ -381,46 +381,42 @@
 
     <div class="split" style="margin-top:34px">
       <div>
-        <h3 style="font-size:19px;margin-bottom:10px">Agents that see only their slice</h3>
+        <h3 style="font-size:19px;margin-bottom:10px">Every row says where it came from</h3>
         <p style="color:var(--text-2);font-size:15px;margin-top:0">
-          A crew is not one memory. Each agent gets a credential, and a credential is three rooms —
-          so a scout, a builder and a reviewer each hold their own history and none of them can read
-          the others by default. What one agent may see another agent's work is a decision you make,
-          not a filter you hope holds.
+          Provenance is two columns, and neither can be faked by a client.
+          <code>user_id</code> is <code>MATERIALIZED currentUser()</code> — computed by the server
+          during the insert, with async inserts pinned off on the user so the stamp cannot be
+          skipped. <code>host</code> is a fingerprint minted once per install, so two laptops with
+          the same hostname stay two machines and renaming one does not split its history.
         </p>
         <ul class="list" style="margin-top:16px">
-          <li><b>Share a whole memory, self-serve.</b> Three <code>GRANT</code>s, issued by the owner of
-            the rooms — no operator, no ticket. Measured end to end: a grant took what the recipient
-            could see from 0 rows to 22,413, and the revoke put it back to 0.</li>
-          <li><b>Share a slice, owner-mediated.</b> A subset is a grant <em>plus</em> a row policy, and
-            policies are house-scoped, so this one goes through the house owner deliberately. Both
-            halves are required: privilege without a policy shares everything, a policy without
-            privilege shares nothing.</li>
-          <li><b>Read-only by construction.</b> The grant option a member holds is attached to
-            <code>SELECT</code>, so sharing hands over reading — never writing or dropping.</li>
+          <li><b>One person:</b> <code>WHERE user_id = 'alice'</code>. <b>One machine:</b>
+            <code>WHERE host = 'macbook-4127a95b'</code>. <b>The whole house:</b> no filter.</li>
+          <li><b>Housemates are collaborators.</b> The model is trust inside the house — grants can
+            be narrowed later if a team wants, but separation between groups is a separate house,
+            not machinery inside one.</li>
+          <li><b>Your own history survives a re-ship.</b> Rows carry <code>origin</code>; the
+            shipper's clear binds it, and imported history is never its to delete.</li>
         </ul>
       </div>
       <div>
         <div class="callout" style="margin-bottom:14px">
-          <b>The line that actually matters.</b> Separation is between <em>credentials</em>, not between
-          agents. A crew running under one shared credential reads and writes the same rooms, and any
-          per-agent tag in that setup is client-supplied — which means it is a label, not a boundary.
-          Enforced separation means a credential each.
+          <b>The line that actually matters.</b> Attribution comes from the <em>credential</em>, not
+          from the client. A crew running under one shared credential is one <code>user_id</code>
+          however it labels itself — a client-supplied tag is a label, not provenance. Give each
+          person (or each agent) their own credential and the server does the rest.
         </div>
         <div class="term">
-<pre><span class="c"># one credential per agent — one isolated memory each</span>
-<span class="p">$</span> <span class="k">memhouse install --yes --user scout    …</span>
-<span class="p">$</span> <span class="k">memhouse install --yes --user builder  …</span>
-<span class="g">  ✓</span> <span class="t">messages_scout, sessions_scout, tool_calls_scout</span>
-<span class="g">  ✓</span> <span class="t">messages_builder, …</span>  <span class="c"># invisible to scout</span>
+<pre><span class="c"># a team's house, in the statements a DBA already knows</span>
+<span class="p">$</span> <span class="k">CREATE DATABASE team_a;</span>
+<span class="p">$</span> <span class="k">CREATE USER alice IDENTIFIED BY '…';</span>
+<span class="p">$</span> <span class="k">GRANT ALL ON team_a.* TO alice;</span>   <span class="c"># repeat per housemate</span>
 
-<span class="c"># let the builder read what the scout found</span>
-<span class="p">$</span> <span class="k">GRANT SELECT ON mem.messages_scout   TO builder;</span>
-<span class="p">$</span> <span class="k">GRANT SELECT ON mem.sessions_scout   TO builder;</span>
-<span class="p">$</span> <span class="k">GRANT SELECT ON mem.tool_calls_scout TO builder;</span>
-
-<span class="c"># and take it back</span>
-<span class="p">$</span> <span class="k">REVOKE SELECT ON mem.messages_scout FROM builder;</span>
+<span class="c"># everyone ships into the same rooms; the server says who wrote what</span>
+<span class="p">$</span> <span class="k">SELECT user_id, host, count() FROM team_a.messages</span>
+<span class="p">$</span> <span class="k">GROUP BY user_id, host;</span>
+<span class="t">  alice  macbook-4127a95b   64258</span>
+<span class="t">  bob    thinkpad-0fc96a7c  64258</span>
 </pre>
         </div>
       </div>
@@ -453,8 +449,8 @@
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-        <h3>An isolated room per agent</h3>
-        <p>Give an agent its own credential and it gets its own three rooms — it can see its memory and nobody else's. Isolation is a grant that is simply <em>absent</em>, so it fails closed rather than depending on a filter being right everywhere.</p>
+        <h3>A credential per person, a database per group</h3>
+        <p>Everyone in a house writes into the same three rooms, and the server stamps every row with who wrote it — attribution no client can fake. Groups that should not see each other get separate houses; a house's <code>ALL</code> reaches nothing outside its own database.</p>
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h8"/><rect x="17" y="10" width="5" height="10" rx="1.5"/></svg>
@@ -589,7 +585,7 @@
           <li><b>A plugin.</b> <code>memhouse plugins install claude</code> drops them into <em>every</em> Claude Code config directory on the machine — <code>~/.claude</code>, whatever <code>CLAUDE_CONFIG_DIR</code> points at, and each playbook under <code>~/.claude-playbooks/</code> — all selected by default, because a skill installed into only one of them is missing from the instance you actually work in, and a missing skill never announces itself. <code>onboard</code> offers this at the end.</li>
           <li><b>A prompt snippet.</b> <code>memhouse prompt</code> prints the system-prompt block that tells an agent to search memory <em>before</em> claiming ignorance.</li>
           <li><b>An install prompt, rendered for this machine.</b> <code>memhouse prompt --install</code> probes for a house, a container engine and an existing config, then states the <em>one</em> route that applies — including "already installed, do not reinstall" and "configured but the house does not answer, diagnose before repointing". An agent gets an instruction, not a decision tree to walk and a branch to pick wrong.</li>
-          <li><b>Read-only by construction.</b> Agents query; only the shipper writes. Other members' sessions stay invisible unless they granted you their rooms.</li>
+          <li><b>The skills only read.</b> Agents query; only the shipper writes — and every row an agent reads carries <code>user_id</code> and <code>host</code>, so "whose session was this" is a WHERE clause, not a guess.</li>
         </ul>
       </div>
       <div class="term">
@@ -597,7 +593,7 @@
 <span class="p">$</span> <span class="k">memhouse install --yes \
     --url https://ch.example.com:8443 \
     --user alice --password ***** --db mem</span>
-<span class="g">  ✓</span> rooms minted: <span class="t">messages_alice, sessions_alice, tool_calls_alice</span>
+<span class="g">  ✓</span> rooms ready: <span class="t">sessions, messages, tool_calls</span> in <span class="t">mem</span>
 <span class="g">  ✓</span> verified as alice
 
 <span class="p">$</span> <span class="k">memhouse plugins install claude</span>
@@ -694,9 +690,10 @@
 
       <details>
         <summary>Can a team share memory?</summary>
-        <p>Yes, and sharing is the exception rather than the default. Every member owns their own three rooms;
-        a shared read is a Merge room plus a GRANT, issued by the member themselves or the house owner.
-        Nothing is visible by accident, because visibility has to be given rather than enforced.</p>
+        <p>Sharing is the design, not a feature. A team's house is one database; every housemate's
+        shipper writes into the same tables, the server stamps who, the fingerprint stamps which
+        machine, and the dashboard shows the whole house with no configuration. Groups that should
+        not see each other run separate houses — the database is the boundary.</p>
       </details>
 
       <details>
