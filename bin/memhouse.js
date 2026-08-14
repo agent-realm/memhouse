@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS, installCommand } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
+const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS, MEMBER_PIN, installCommand } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -667,19 +667,12 @@ ${merge.trim()}
 
 ${mergeGrants}
 
--- Resource ceilings. Confidentiality isolation is a grant that is absent; this is the
--- availability half, and it did not exist until 0.4.7 — a member could raise
--- max_memory_usage, zero max_execution_time and take a shared server down for everyone.
--- CONST, not MAX: a plain default is advisory, and MAX is not enough either because 0 means
--- UNLIMITED in ClickHouse and 0 satisfies any MAX. Measured — with a MAX ceiling in force,
--- SETTINGS max_memory_usage = 0 was accepted and the ceiling was gone.
--- CREATE ... OR REPLACE, which this used, DETACHES every user already on the profile, so
--- provisioning a second member silently stripped the first member's ceilings. IF NOT
--- EXISTS + ALTER edits the same object in place and keeps every assignment.
-CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE};
-ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS NONE;
-ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS};
-ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}';
+-- Pin async_insert on the user (no settings profile — a shared profile object detached
+-- members on replace and its name was server-global, so two houses on one server rewrote
+-- each other's). The pin keeps the user_id stamp honest: a MATERIALIZED currentUser() is
+-- computed during the INSERT, and an async flush stores it as the empty string. CONST
+-- refuses the override; a client that never mentions the setting is held at 0.
+ALTER USER ${member} SETTINGS ${MEMBER_PIN};
 `;
 }
 
@@ -2271,10 +2264,38 @@ async function cmdUninstall() {
           : process.env.MEMHOUSE_PASSWORD ? 'MEMHOUSE_PASSWORD' : null;
       if (initialised && rotateAsk) {
         console.log(bad(`${rotateAsk} cannot change the credential of an existing house — the image only applies it when it initialises the data directory.`));
-        console.log('  to rotate:   ALTER USER memhouse_root IDENTIFIED BY \'…\' inside the house, then: memhouse setup --password …');
+        console.log(`  to rotate:   ALTER USER ${priorCfg.user || 'memhouse_root'} IDENTIFIED BY '…' inside the house, then: memhouse setup --password …`);
         console.log('  to start over (DESTROYS the memory):  memhouse deploy --down');
         process.exitCode = 2; break;
       }
+      // Who owns this house. A local deploy is the pilot's own machine and their own
+      // memory, so the house user is THEM — suggested from the OS username (`polat`, not
+      // `memhouse_root`) — created by the container itself at first init with full
+      // rights. No admin/member split, no provisioning dance: a URI and a credential is
+      // the whole install. The name is fixed at volume init exactly like the password,
+      // so an existing house keeps the user it was born with.
+      const osName = (os.userInfo().username || '').replace(/[^A-Za-z0-9_]/g, '_').replace(/^[0-9_]+/, '');
+      let houseUser;
+      if (initialised) {
+        // The env FILE, not resolveConfig(): flags outrank the file there, so comparing
+        // `--user other` against priorCfg.user compares the flag against itself and the
+        // refusal below can never fire — while the volume stays initialised with the
+        // original name and every later connection fails auth.
+        houseUser = readEnvFile().MEMHOUSE_USER || 'memhouse_root';
+        if (flags.user && flags.user !== true && flags.user !== houseUser) {
+          console.log(bad(`--user cannot rename the user of an existing house — the image creates it only when it initialises the data directory.`));
+          console.log(`  this house was initialised with '${houseUser}'. To start over (DESTROYS the memory):  memhouse deploy --down`);
+          process.exitCode = 2; break;
+        }
+      } else if (flags.user && flags.user !== true) {
+        houseUser = String(flags.user);
+      } else if (flags.yes !== true && process.stdin.isTTY) {
+        houseUser = (await ask(`House user (this becomes your member name)`, osName || 'memhouse_root')).trim() || osName || 'memhouse_root';
+      } else {
+        houseUser = osName || 'memhouse_root';
+      }
+      try { require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms')).assertUsableMember(houseUser); }
+      catch (e) { console.log(bad(`'${houseUser}' cannot be the house user — ${e.message}`)); process.exitCode = 2; break; }
       // An initialised volume with no credential to reuse — env file deleted, emptied, or
       // never written — is the same lockout by another route: a generated password would
       // be ignored by the server and then written over the config as if it worked.
@@ -2355,7 +2376,7 @@ async function cmdUninstall() {
       }
       const pw = reusable || crypto.randomBytes(16).toString('hex');
       if (reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
-      const r = dep.up({ password: pw, port, tag });
+      const r = dep.up({ password: pw, port, tag, user: houseUser });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
       console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));
 
@@ -2367,7 +2388,7 @@ async function cmdUninstall() {
       // house that eventually came up is unreachable forever. The image applies the
       // password only at first init, so there is no way back from that.
       if (!reusable) {
-        writeEnvFile({ ...priorCfg, url: r.url, user: 'memhouse_root', password: pw });
+        writeEnvFile({ ...priorCfg, url: r.url, user: houseUser, password: pw });
         console.log(ok(`credential saved to ${ENV_FILE} before waiting — the volume is initialised with it`));
       }
 
@@ -2417,10 +2438,10 @@ async function cmdUninstall() {
       // anticipates it) and it is NOT the narrow set INSTALL.md's grant-set argument
       // describes. A user who later adds a second member should know which house they
       // have.
-      console.log(warn(`this house is yours alone: '${'memhouse_root'}' is its superuser, and that is the credential being saved`));
+      console.log(warn(`this house is yours alone: '${houseUser}' is its superuser, and that is the credential being saved`));
       console.log('  Adding a second person later? Give them their own member instead:');
       console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member <name> --merge`);
-      flags.url = r.url; flags.user = 'memhouse_root'; flags.password = pw;
+      flags.url = r.url; flags.user = houseUser; flags.password = pw;
       flags.db = targetDb;
       flags.yes = true;
       process.exitCode = await cmdInstall({ interactive: false });

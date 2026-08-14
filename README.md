@@ -36,6 +36,12 @@ makes it worse — [EACCES on install](#eacces-on-install) tells them apart.
 memhouse deploy --local      # a loopback-bound ClickHouse, then install and ship
 ```
 
+The house it stands up is **yours by name**: its superuser defaults to your OS
+username (`polat`, not `memhouse_root` — override with `--user`), so your rooms come
+out as `sessions_polat` and `WHERE user_id = 'polat'` reads like it should. The name
+and password are fixed when the data volume is first initialised, like any ClickHouse
+container, and reused on every redeploy after that.
+
 Otherwise point at one you already run, or hand the SQL to whoever administers it:
 
 ```bash

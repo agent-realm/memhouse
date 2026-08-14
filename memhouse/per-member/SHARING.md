@@ -37,23 +37,27 @@ unforgeable **by members**, since `EXECUTE AS` is a grantable privilege they do 
 and forgeable by the owner or anyone granted it. Trust boundary is the owner, not the
 engine.
 
-The stamp is also pinned **server-side**: the member settings profile carries
-`async_insert = 0 CONST`. A MATERIALIZED column is computed during the insert, and an
-async insert flushes outside that context — measured on 25.11.9.34, `async_insert=1`
-stores `user_id` as the empty string while a sync insert on the same table stamps
-correctly. The shipper always passed `async_insert=0`, so memhouse was never the risk;
-anything else holding a member credential was. With the constraint in force a client that
-*asks* for `async_insert=1` is refused (`SETTING_CONSTRAINT_VIOLATION`), and one that
-simply does not mention the setting is held at 0 — so the insert still succeeds, stamped,
-rather than landing unowned. It is the override that is refused, not the write.
+The stamp is also pinned **server-side**, directly on the member's user:
+`ALTER USER <member> SETTINGS async_insert = 0 CONST`. A MATERIALIZED column is computed
+during the insert, and an async insert flushes outside that context — measured on
+25.11.9.34, `async_insert=1` stores `user_id` as the empty string while a sync insert on
+the same table stamps correctly. The shipper always passed `async_insert=0`, so memhouse
+was never the risk; anything else holding a member credential was. With the pin in force
+a client that *asks* for `async_insert=1` is refused (`SETTING_CONSTRAINT_VIOLATION`),
+and one that simply does not mention the setting is held at 0 — so the insert still
+succeeds, stamped, rather than landing unowned. It is the override that is refused, not
+the write.
 
-Two limits worth stating plainly. The constraint binds the **ClickHouse user**, not the
-database — if you reuse a member's credential for unrelated high-throughput ingestion
-elsewhere on that server, async inserts are refused there too. And it only takes effect
-once the profile is applied: a house provisioned by an older memhouse keeps the old
-profile until any member is provisioned again, which now updates the shared profile for
-everyone at once. `doctor`'s blank-`user_id` check remains as the detector for rows
-written before that.
+There is deliberately **no settings profile**. One existed (`memhouse_member`: resource
+ceilings plus this pin) and the shared object failed three ways — replacing it detached
+every already-assigned member, updating it in place opened an append-only trap and a
+crash window, and the name was server-global so two houses on one server rewrote each
+other's. A setting on the user has none of those modes. The ceilings went with it:
+bounding a member's queries is the server operator's policy, not memhouse's. Two notes:
+the pin binds the **ClickHouse user**, not the database, so a member credential reused
+for unrelated async ingestion elsewhere is refused there too; and members provisioned by
+an older memhouse gain the pin next time they are provisioned. `doctor`'s
+blank-`user_id` check remains as the detector for rows written before that.
 
 ## What the boundary does NOT hide: the roster
 
