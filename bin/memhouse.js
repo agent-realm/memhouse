@@ -806,6 +806,16 @@ async function cmdInstall({ interactive }) {
   let cfg = resolveConfig();
   const adminUser = flags['admin-user'];
 
+  // The house name is spliced unquoted into CREATE DATABASE and GRANT ALL ON <db>.* —
+  // validate it HERE, on every install mode, not only where deploy happens to choose it.
+  // Found by the acceptance run, driven end to end: `install --db system` sailed through,
+  // granted a member CHECK/SHOW/SELECT/INSERT/ALTER/DROP/TRUNCATE/… ON system.* and
+  // created sessions/messages/tool_calls INSIDE the server's system database, exit 0.
+  // On a shared or kernel ClickHouse that is a granted-everything-on-system user minted
+  // by a memhouse one-liner.
+  try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(cfg.db, 'house'); }
+  catch (e) { console.log(bad(e.message)); return 1; }
+
   // Option 1 — print the SQL and stop. For the common case: you have admin on this
   // ClickHouse and would rather run four statements yourself than hand a credential to an
   // installer. Nothing is written and nothing is contacted.
@@ -2291,6 +2301,11 @@ async function cmdUninstall() {
       // 'polat' — the memory would live in a database named after a role account nobody
       // chose.
       const targetDb = flags.db || process.env.MEMHOUSE_DB || readEnvFile().MEMHOUSE_DB || houseUser;
+      // Same check install runs, but EARLY — deploy initialises the container volume and
+      // writes the env file before its install step, so a refusal that waits for install
+      // arrives after the damage.
+      try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(targetDb, 'house'); }
+      catch (e) { console.log(bad(e.message)); process.exitCode = 2; break; }
       {
         // A service-managed shipper keeps the environment it was installed with, so ANY
         // switch that repoints the config leaves it shipping somewhere else — not only an
