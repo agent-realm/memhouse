@@ -37,8 +37,9 @@ memhouse deploy --local      # a loopback-bound ClickHouse, then install and shi
 ```
 
 The house it stands up is **yours by name**: its superuser defaults to your OS
-username (`polat`, not `memhouse_root` — override with `--user`), so your rooms come
-out as `sessions_polat` and `WHERE user_id = 'polat'` reads like it should. The name
+username (`polat`, not `memhouse_root` — override with `--user`), and the house
+database defaults to the same name, so your memory lives at `polat.messages` and
+`WHERE user_id = 'polat'` reads like it should. The name
 and password are fixed when the data volume is first initialised, like any ClickHouse
 container, and reused on every redeploy after that.
 
@@ -163,19 +164,30 @@ immediate.
 
 ## How your memory is stored
 
-**One house, one set of rooms per member.** You own `sessions_<you>`,
-`messages_<you>`, `tool_calls_<you>` in the `mem` database, and hold grants on
-those and nothing else. Isolation is a grant that is simply *absent*, so it fails
-closed — no row policy that has to be right on every table and every read path.
+**A house is a database; its rooms are three shared tables.** `sessions`, `messages`
+and `tool_calls` live in whatever database you point at — your own name by default
+(`polat.messages`), a team's (`team_a.messages`), even `default`. Everyone in the
+house writes into the same tables with their own credential, and every row says where
+it came from: `user_id`, stamped by the server (`MATERIALIZED currentUser()`, with
+async inserts pinned off so the stamp cannot be skipped), and `host`, the machine's
+install fingerprint.
 
-All of *your* machines ship into *your* rooms; the `host` column tells them apart.
-Another member's machines never do. A team-wide read is a `Merge` room
-(`all_sessions`) plus a `GRANT`, which narrows to whatever the caller can already
-see. Sharing a whole room needs no operator.
+`WHERE user_id = 'alice'` is one person. `WHERE host = '…'` is one machine. No filter
+is the whole house — which is exactly what a team dashboard wants.
 
-The member name comes from the server — `SELECT currentUser()` — not from your
-config. A client that could name its own member could write into someone else's
-rooms.
+Sharing is not a feature bolted on top; it IS the house. A team makes a database,
+grants each person `ALL` on it, and their shippers all write into the same rooms:
+
+```sql
+CREATE DATABASE team_a;
+CREATE USER alice IDENTIFIED BY '…';
+GRANT ALL ON team_a.* TO alice;    -- repeat per housemate
+```
+
+`ALL` on your own house reaches nothing outside it — the database is the boundary,
+which is also why joining a ClickHouse someone else runs (a kernel's, a team's) needs
+no negotiation beyond a database and a credential. Housemates are collaborators;
+groups that should not see each other get separate houses.
 
 ### Imported history is protected
 

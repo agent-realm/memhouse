@@ -63,35 +63,25 @@ FORMAT PrettyCompact
 SQL
 ```
 
-## Room names — always suffixed
+## Room names — plain, shared tables
 
-Every member owns their own rooms, named for their ClickHouse user:
-`messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There are no unsuffixed rooms;
-the bare names fail with `UNKNOWN_TABLE` rather than returning nothing. You hold no grant
-on anyone else's rooms, so isolation is not something a query can work around.
+The house's rooms are three plain tables: `messages`, `sessions`, `tool_calls` — resolved
+by the connection's database (`MEMHOUSE_DB`), not by who is asking. Everyone in the house
+writes into the same tables; `user_id` (stamped by the server) says whose row it is and
+`host` says which machine shipped it. Search the whole house by default; add
+`AND user_id = '<name>'` only when the user asks for one person's sessions.
 
-Ask the server your name once, then **type the literal room name into your SQL** — do not
-reference a shell variable inside the query:
-
-```bash
-curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-  "$MEMHOUSE_URL/?readonly=1"
-# prints e.g. alice  →  your rooms are messages_alice, sessions_alice, tool_calls_alice
-```
-
-**Keep the SQL heredoc quoted (`<<'SQL'`) and put the real name in the text.** This used to
-say "substitute it into every table name below" and show `messages_$MEM_ME`, which cannot
-expand inside a quoted heredoc — so the agent unquotes it, and then the SEARCH TERMS expand
-too. Both instances driving this skill did exactly that, unprompted, on the first attempt.
-Measured consequences, from `system.query_log`:
+**Keep the SQL heredoc quoted (`<<'SQL'`).** This skill once told the agent to substitute
+a shell variable into the table names, which cannot expand inside a quoted heredoc — so
+the agent unquotes it, and then the SEARCH TERMS expand too. Both instances driving this
+skill did exactly that, unprompted, on the first attempt. Measured consequences, from
+`system.query_log`:
 
 - a term containing `$home` became the empty string, so `LIKE '%%'` matched **every row**
   and reported hits with exit 0 — silently wrong, not an error;
 - a term containing a backtick **executed the command inside it**.
 
-A user's search term is arbitrary text. With the heredoc quoted and the room name written
-out, neither can happen.
+A user's search term is arbitrary text. With the heredoc quoted, neither can happen.
 
 **There is no `sessions_v` object.** The session rollup is a saved query over those same
 rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
@@ -105,14 +95,11 @@ grows); without `join_use_nulls` a session with no messages reports `total_msgs 
 rather than 0.
 
 **If the `memhouse` binary is not on PATH**, you cannot print the rollup — the skills are
-installable on their own. Query the rooms directly instead: `sessions_<you>` for metadata
-and `messages_<you>` for counts, each read `FINAL`, joined on `session_id` and `user_id`.
+installable on their own. Query the rooms directly instead: `sessions` for metadata
+and `messages` for counts, each read `FINAL`, joined on `session_id` and `user_id`.
 Prefer the binary when it is there; a rollup you assemble by hand and one printed by a
 DIFFERENT memhouse version are the two ways this goes quietly wrong.
 
-If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
-across every member at once, narrowed to whatever grants you actually have — a Merge room
-reduces to the rooms the caller can read, so it fails closed rather than denying outright.
 
 ## Default listing
 
@@ -173,5 +160,5 @@ FORMAT PrettyCompact
 
 A compact table: when, name (or first prompt), source, host, project, msgs,
 tokens. Offer to pull a full transcript next
-(`SELECT role, text FROM messages_<you> WHERE session_id = '…' ORDER BY seq`) or to
+(`SELECT role, text FROM messages WHERE session_id = '…' ORDER BY seq`) or to
 run /memhouse:search for a specific quote.

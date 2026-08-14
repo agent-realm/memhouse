@@ -1,6 +1,6 @@
 ---
 name: sql
-description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls rooms on ClickHouse, one set per member). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
+description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls tables on ClickHouse, shared by the house). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
 user-invocable: true
 argument-hint: "<question or SQL>"
 allowed-tools: Bash
@@ -73,35 +73,25 @@ SQL
 
 `FORMAT PrettyCompact` for display, `FORMAT JSONEachRow` to parse.
 
-## Room names — always suffixed
+## Room names — plain, shared tables
 
-Every member owns their own rooms, named for their ClickHouse user:
-`messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There are no unsuffixed rooms;
-the bare names fail with `UNKNOWN_TABLE` rather than returning nothing. You hold no grant
-on anyone else's rooms, so isolation is not something a query can work around.
+The house's rooms are three plain tables: `messages`, `sessions`, `tool_calls` — resolved
+by the connection's database (`MEMHOUSE_DB`), not by who is asking. Everyone in the house
+writes into the same tables; `user_id` (stamped by the server) says whose row it is and
+`host` says which machine shipped it. Filter with `WHERE user_id = '<name>'` when you want
+one person, or leave it off for the whole house.
 
-Ask the server your name once, then **type the literal room name into your SQL** — do not
-reference a shell variable inside the query:
-
-```bash
-curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-  "$MEMHOUSE_URL/?readonly=1"
-# prints e.g. alice  →  your rooms are messages_alice, sessions_alice, tool_calls_alice
-```
-
-**Keep the SQL heredoc quoted (`<<'SQL'`) and put the real name in the text.** This used to
-say "substitute it into every table name below" and show `messages_$MEM_ME`, which cannot
-expand inside a quoted heredoc — so the agent unquotes it, and then the SEARCH TERMS expand
-too. Both instances driving this skill did exactly that, unprompted, on the first attempt.
-Measured consequences, from `system.query_log`:
+**Keep the SQL heredoc quoted (`<<'SQL'`).** This skill once told the agent to substitute
+a shell variable into the table names, which cannot expand inside a quoted heredoc — so
+the agent unquotes it, and then the SEARCH TERMS expand too. Both instances driving this
+skill did exactly that, unprompted, on the first attempt. Measured consequences, from
+`system.query_log`:
 
 - a term containing `$home` became the empty string, so `LIKE '%%'` matched **every row**
   and reported hits with exit 0 — silently wrong, not an error;
 - a term containing a backtick **executed the command inside it**.
 
-A user's search term is arbitrary text. With the heredoc quoted and the room name written
-out, neither can happen.
+A user's search term is arbitrary text. With the heredoc quoted, neither can happen.
 
 **There is no `sessions_v` object.** The session rollup is a saved query over those same
 rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
@@ -115,22 +105,19 @@ grows); without `join_use_nulls` a session with no messages reports `total_msgs 
 rather than 0.
 
 **If the `memhouse` binary is not on PATH**, you cannot print the rollup — the skills are
-installable on their own. Query the rooms directly instead: `sessions_<you>` for metadata
-and `messages_<you>` for counts, each read `FINAL`, joined on `session_id` and `user_id`.
+installable on their own. Query the rooms directly instead: `sessions` for metadata and
+`messages` for counts, each read `FINAL`, joined on `session_id` **and `user_id`** — the
+tables are shared, and joining on `session_id` alone can merge two housemates' rows.
 Prefer the binary when it is there; a rollup you assemble by hand and one printed by a
 DIFFERENT memhouse version are the two ways this goes quietly wrong.
-
-If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
-across every member at once, narrowed to whatever grants you actually have — a Merge room
-reduces to the rooms the caller can read, so it fails closed rather than denying outright.
 
 ## Schema (the house)
 
 | Object | Kind | Columns |
 |---|---|---|
-| `sessions_<you>` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, user_id, ingested_at` |
-| `messages_<you>` | table, 1 row/message | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /memhouse:search) |
-| `tool_calls_<you>` | table, 1 row/tool call | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, user_id, ingested_at` |
+| `sessions` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, user_id, ingested_at` |
+| `messages` | table, 1 row/message | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /memhouse:search) |
+| `tool_calls` | table, 1 row/tool call | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, user_id, ingested_at` |
 | the rollup | **saved query**, not an object — `memhouse sessions-query` prints it | `session_id, source, host, name, mode, folder, project, git_branch, user_id, created_at, last_updated_at, started, ended, duration_sec, total_msgs, user_msgs, assistant_msgs, subagent_msgs, models, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, user_chars, assistant_chars, first_prompt` |
 
 Notes: `source` = editor id (`claude-code`, `codex`, `cursor`, `cursor-agent`,
@@ -147,7 +134,7 @@ Token spend by model:
 ```sql
 SELECT model, sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,
        sum(cache_read_tokens) AS cache_read
-FROM messages_<you>
+FROM messages
 WHERE model NOT IN ('', '<synthetic>')
 GROUP BY model
 ORDER BY out_tok DESC
@@ -158,7 +145,7 @@ Which tools do I use most (memhouse exclusive — memory-house has no tool table
 
 ```sql
 SELECT tool_name, count() AS calls, uniqExact(session_id) AS sessions
-FROM tool_calls_<you>
+FROM tool_calls
 GROUP BY tool_name
 ORDER BY calls DESC
 LIMIT 20
@@ -169,7 +156,7 @@ Busiest days, last two weeks:
 
 ```sql
 SELECT toDate(ts) AS day, uniqExact(session_id) AS sessions, count() AS msgs
-FROM messages_<you>
+FROM messages
 WHERE ts > now() - INTERVAL 14 DAY
 GROUP BY day
 ORDER BY day DESC
@@ -180,7 +167,7 @@ Activity by editor this week / subagent share:
 
 ```sql
 SELECT source, count() AS msgs, countIf(is_subagent) AS subagent_msgs
-FROM messages_<you>
+FROM messages
 WHERE ts > now() - INTERVAL 7 DAY
 GROUP BY source
 ORDER BY msgs DESC

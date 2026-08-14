@@ -15,7 +15,7 @@ absent grant rather than a row policy — it fails closed. There is no shared
 `sessions`/`messages`/`tool_calls` layout and no row policy in the default path; 0.4.0
 removed both. Team-wide reads are the `Merge` rooms plus a `GRANT`. The session rollup
 is a **saved query**, not a stored view — `memhouse sessions-query` prints it.
-Design and measurements: `../per-member/`.
+Design and measurements: `../house/HOUSE.md`.
 
 This is an operator runbook, so it speaks machine vocabulary throughout — ClickHouse,
 `GRANT`, `currentUser()`. That is correct for this audience.
@@ -63,40 +63,25 @@ For each person joining, split across the two authorities:
 python3 executor/executor.py submit register-member '{"handle":"alice"}'
 python3 executor/executor.py approve <call_id> && python3 executor/executor.py drain
 
-# OWNER mints that member's three rooms and their grants (memhouse_root has
-# grant-option on mem.*). One idempotent step — see ../per-member/PROVISIONING.md:
-MEM_URL=https://<kernel-host>:8443 MEM_USER=memhouse_root \
-MEM_PASSWORD=<credential> MEM_DB=mem \
-  node memhouse/per-member/provision.js --member alice --merge
+# OWNER admits the member to the house — two statements, any DBA knows them:
+#   CREATE USER alice IDENTIFIED BY '…';
+#   GRANT ALL ON mem.* TO alice;
+# (memhouse can run them: memhouse install --admin-user … --member alice)
 ```
 
-**Never `GRANT … ON mem.*` to a member.** A member who can read `mem.*` can read every
-other member's rooms, and then this is a shared house with longer table names.
-`provision.js` grants per room: `ALL` on each of alice's three, plus a re-grantable
-`SELECT` on each (that split is what makes a share read-only by construction), plus
-`SELECT` on the `Merge` rooms.
-
 Each member then runs the shipper with **their own** credential
-(`MEMHOUSE_USER=alice`) — it writes to `sessions_alice` / `messages_alice` /
-`tool_calls_alice`, resolved from `SELECT currentUser()` rather than from config, and
-the house stamps `user_id='alice'` on their rows, un-spoofably
-(`MATERIALIZED currentUser()`, `async_insert=0`).
+(`MEMHOUSE_USER=alice`) — everyone writes into the SAME three tables (`sessions`,
+`messages`, `tool_calls`), and the house stamps `user_id='alice'` on her rows,
+un-spoofably (`MATERIALIZED currentUser()`, with `async_insert = 0 CONST` pinned on the
+user so the stamp cannot be skipped). Her machines are told apart by `host`.
 
 ## 4. Visibility
 
-**Own-only is the default and needs no policy.** Alice is granted her own three rooms
-and nobody else's, so bob's rooms are not hidden from her — they are simply not hers to
-read, and the failure mode of a missing grant is a denial rather than a leak.
-
-**Team-wide reads are the `Merge` rooms** (`all_sessions`, `all_messages`,
-`all_tool_calls`) plus a `GRANT SELECT` on them, which `provision.js --merge` issues. A
-`Merge` room narrows to whatever underlying rooms the caller already holds grants for —
-measured on 26.7.1: no leak, no error — so it can be granted broadly. It also
-auto-discovers rooms created after it, so onboarding a member needs no DDL there.
-
-A member widens what a colleague sees by granting their own rooms directly
-(`GRANT SELECT ON mem.messages_alice TO bob`) — self-serve, no operator, because the
-member holds grant-option on their own `SELECT`. See `../per-member/SHARING.md`.
+**A house is shared by its housemates.** The tables are common; `user_id` and `host` say
+who wrote what, and `WHERE user_id = 'alice'` is one person. The boundary is the
+DATABASE: a member of `mem` holds nothing on any other database, so two agencies on one
+kernel ClickHouse cannot read each other. The model is collaborative — housemates trust
+each other with the house; a separate house is the isolation mechanism.
 
 Row policies are still the only way to share a *subset* of rows, which is owner-mediated
 and documented in `SHARING.md` — they are not how isolation works.

@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, mergeRooms, MEMBER_PRIVS, MEMBER_PIN, installCommand } = require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms'));
+const { roomNames, ROOM_TYPES, MEMBER_PIN, installCommand } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -65,7 +65,10 @@ function resolveConfig() {
     url: pick('url', 'MEMHOUSE_URL', 'http://localhost:8123'),
     user: pick('user', 'MEMHOUSE_USER', 'memhouse_root'),
     password: pick('password', 'MEMHOUSE_PASSWORD', ''),
-    db: pick('db', 'MEMHOUSE_DB', 'mem'),
+    // The house defaults to the USER'S OWN NAME (`polat` ships into `polat.messages`),
+    // because a house is a database and the natural first house is your own. Any name
+    // works — user 'alice' with house 'default' is a supported pairing.
+    db: pick('db', 'MEMHOUSE_DB', pick('user', 'MEMHOUSE_USER', 'memhouse_root')),
     port: pick('port', 'MEMHOUSE_PORT', '4640'),
     // Did anything actually SAY which house this is, or are the values above just the
     // defaults? The defaults are not neutral — localhost:8123 as memhouse_root is a real
@@ -600,37 +603,19 @@ function generatePassword() {
  * same templates provision.js applies, so the two cannot drift into different houses.
  */
 function memberSql(db, member, password) {
-  const here = path.join(REPO_ROOT, 'memhouse', 'per-member');
-  // The templates are written unqualified because provision.js applies them with the
-  // house already selected. A human pastes this somewhere unknown — clickhouse-client,
-  // the play UI, curl — so every name is qualified here and there is no `USE`.
-  //
-  // `currentDatabase()` in the Merge engine is the trap, and it is silent:
-  // it is evaluated at CREATE time, not at read time, so a block run without the house
-  // selected builds Merge rooms pointing at `default` that return zero rows forever. The
-  // literal name goes in instead.
+  // The template is written unqualified because the shipper applies it with the house
+  // already selected. A human pastes this somewhere unknown — clickhouse-client, the
+  // play UI, curl — so every name is qualified here and there is no `USE`.
   const qualify = (sql) => sql
-    .replace(/CREATE TABLE IF NOT EXISTS (\w+)/g, `CREATE TABLE IF NOT EXISTS ${db}.$1`)
-    .replace(/ AS (\w+)\nENGINE = Merge/g, ` AS ${db}.$1\nENGINE = Merge`)
-    .replace(/Merge\(currentDatabase\(\)/g, `Merge('${db}'`);
-  const rooms = qualify(fs.readFileSync(path.join(here, 'schema-member.sql.tpl'), 'utf-8')
-    .replaceAll('{{MEMBER}}', member));
-  const merge = qualify(fs.readFileSync(path.join(here, 'schema-merge.sql.tpl'), 'utf-8')
-    .replaceAll('{{TEMPLATE_MEMBER}}', member));
-  // The SAME grant set provision.js issues. These two paths build the same house, and when
-  // only one of them was narrowed, `install --print-sql` — the path INSTALL.md calls the
-  // common case — still emitted GRANT ALL, which includes CREATE TABLE on the member's own
-  // room name. A member provisioned that way could drop their room, recreate it as
-  // Merge('<db>','^messages_'), and double every other member's rows in the team room:
-  // exactly the attack the narrowing was for, fully reachable, one release later.
-  const grants = ROOM_TYPES.flatMap((t) => [
-    `GRANT ${MEMBER_PRIVS} ON ${db}.${t}_${member} TO ${member};`,
-    `GRANT SELECT ON ${db}.${t}_${member} TO ${member} WITH GRANT OPTION;`,
-  ]).join('\n');
-  const mergeGrants = Object.values(mergeRooms())
-    .map((n) => `GRANT SELECT ON ${db}.${n} TO ${member};`).join('\n');
+    .replace(/CREATE TABLE IF NOT EXISTS (\w+)/g, `CREATE TABLE IF NOT EXISTS ${db}.$1`);
+  const rooms = qualify(fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8'));
   return `-- memhouse: everything '${member}' needs in house '${db}'. Run as a user with
 -- ACCESS MANAGEMENT (a stock 'default' with access_management=1 will do).
+--
+-- A house is a database; its rooms are three shared tables. Everyone granted on the
+-- database writes into the same tables, and every row carries who (user_id, stamped by
+-- the server) and where from (host, the install's fingerprint). Adding a housemate later
+-- is the same two statements: CREATE USER, GRANT ALL ON the house.
 --
 -- Every name is qualified and there is no USE, so this runs anywhere: clickhouse-client,
 -- the play UI, curl, a GUI. Order matters only in that the database comes first.
@@ -655,23 +640,15 @@ CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'
 
 ${rooms.trim()}
 
--- Exactly what the shipper uses, and nothing that defines an object: no CREATE TABLE, no
--- DROP, no TRUNCATE. A member who owned the room NAME rather than its data could replace
--- it with a Merge over every member's rooms and double their rows in the team room.
--- Only SELECT is re-grantable, so a share can only ever be read-only.
-${grants}
+-- The whole database. ALL on your own house reaches nothing outside it — the database is
+-- the boundary — and it is what lets the shipper create and evolve its own tables.
+GRANT ALL ON ${db}.* TO ${member};
 
--- Team-wide reads. A Merge room reduces to the rooms the CALLER holds grants for, so
--- this narrows rather than denies, and picks up members added later with no DDL.
-${merge.trim()}
-
-${mergeGrants}
-
--- Pin async_insert on the user (no settings profile — a shared profile object detached
--- members on replace and its name was server-global, so two houses on one server rewrote
--- each other's). The pin keeps the user_id stamp honest: a MATERIALIZED currentUser() is
--- computed during the INSERT, and an async flush stores it as the empty string. CONST
--- refuses the override; a client that never mentions the setting is held at 0.
+-- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
+-- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
+-- currentUser() is computed during the INSERT, and an async flush stores it as the empty
+-- string. CONST refuses the override; a client that never mentions the setting is held
+-- at 0 and its insert lands stamped.
 ALTER USER ${member} ADD SETTING ${MEMBER_PIN};
 `;
 }
@@ -700,22 +677,19 @@ async function adminBootstrap(cfg, admin) {
     catch { console.log(bad(`house '${cfg.db}' does not exist and '${admin.user}' cannot create it: ${e.message}`)); return null; }
   }
 
-  // 2. the user. An EXISTING user is refused: adopting one silently hands the second
-  // human the first's identity and rooms, and user_id MATERIALIZED currentUser() would
-  // stamp them identically, so nothing downstream would ever notice.
-  // A member who passes --admin-user gets ACCESS_DENIED here, because no member holds
-  // SELECT ON system.users. That is the isolation working — but the raw 497 names neither
-  // side, while INSTALL.md promises install "refuses, names both sides, and creates
-  // nothing". Say who you are not, and what the owner has to run instead.
+  // 2. the user. A shared house makes an existing user unremarkable — rows are told apart
+  // by the server-stamped user_id, so "the handle is taken" hands nobody anything. What
+  // still matters is proof: connecting AS the member below is what validates whichever
+  // password is in play, existing user or fresh one.
   let exists;
   try {
     exists = (await chRows(adminCfg, `SELECT name FROM system.users WHERE name = '${admin.member}'`, { database: '' })).length > 0;
   } catch (e) {
     if (/Not enough privileges|ACCESS_DENIED|system\.users/i.test(e.message || '')) {
       console.log(bad(`'${admin.user}' is not an admin of this house — it cannot read system.users, so it cannot provision a member`));
-      console.log('  Adding a member is the house owner\'s job. Ask them for:');
-      console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${admin.member} --merge`);
-      console.log('  If you already HAVE a member credential on this house, you do not need admin:');
+      console.log('  Joining a house is two statements for whoever owns it:');
+      console.log(`     CREATE USER ${admin.member} IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO ${admin.member};`);
+      console.log('  If you already HAVE a credential on this house, you do not need admin:');
       console.log(`     memhouse install --url ${adminCfg.url} --user ${admin.member} --password …`);
       return null;
     }
@@ -723,19 +697,14 @@ async function adminBootstrap(cfg, admin) {
   }
   let password = flags['member-password'] || null;
   if (exists) {
-    if (flags['adopt-user'] !== true) {
-      console.log(bad(`ClickHouse user '${admin.member}' already exists in this house.`));
-      console.log('  Creating rooms for them would hand you their identity — user_id is stamped from');
-      console.log('  currentUser(), so their rows and yours would be indistinguishable.');
-      console.log('  If this is you on a new machine, prove it:');
-      console.log(`     memhouse install --adopt-user --member ${admin.member} --member-password '…' …`);
-      console.log(`  If it is someone else, pick another handle:  --member <name>`);
+    if (!password) {
+      console.log(bad(`ClickHouse user '${admin.member}' already exists — pass --member-password to install as them.`));
+      console.log(`  Or pick another handle:  --member <name>`);
       return null;
     }
-    if (!password) { console.log(bad('--adopt-user requires --member-password — the password is the proof')); return null; }
     try { await ch({ ...cfg, user: admin.member, password }, 'SELECT 1', { database: '' }); }
-    catch { console.log(bad(`--adopt-user: '${admin.member}' did not authenticate with that password`)); return null; }
-    console.log(ok(`adopted existing user '${admin.member}' (password verified)`));
+    catch { console.log(bad(`'${admin.member}' did not authenticate with that password`)); return null; }
+    console.log(ok(`using the existing ClickHouse user '${admin.member}' (password verified)`));
   } else {
     if (!password) {
       password = generatePassword();
@@ -751,33 +720,18 @@ async function adminBootstrap(cfg, admin) {
     createdUser = admin.member;
   }
 
-  // 3. rooms, 4. grants, 5. Merge rooms + their grant — provision.js owns all of it, so
-  // there is one implementation of the grant set rather than two that drift.
-  const provision = path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js');
-  // Tell it who made the user. Without this the child finds a user that exists — because
-  // THIS command created it two lines ago — and says so, producing two consecutive lines
-  // of one command's output that contradict each other:
-  //     ✓ created ClickHouse user 'henry'
-  //     [mem] ClickHouse user 'henry' already exists — provisioning rooms only
-  // and "already exists" is the exact phrase memhouse uses for the identity-takeover
-  // REFUSAL, so a first-time installer reads a success as a warning about someone else.
-  const provisionArgs = [provision, '--member', admin.member, '--merge'];
-  if (createdUser) provisionArgs.push('--user-just-created');
-  const rc = spawnSync(process.execPath, provisionArgs, {
-    stdio: 'inherit',
-    env: { ...process.env, MEM_URL: cfg.url, MEM_USER: admin.user, MEM_PASSWORD: admin.password, MEM_DB: cfg.db },
-  });
-  if (rc.status !== 0) {
-    // "nothing was written" was a lie whenever the CREATE USER above had already run —
-    // and it runs before this. Observed: provision.js died on a missing dependency, this
-    // printed the all-clear, and the next install refused with the identity-takeover
-    // message because the user it said it had not created was there. Say what exists, and
-    // name the two ways forward.
-    console.log(bad('provisioning failed'));
+  // 3. the grant and the pin. GRANT ALL on the house is the whole tenancy model: it
+  // reaches nothing outside the database, and it is what lets the member's own shipper
+  // create and evolve the rooms (--ensure-schema below).
+  try {
+    await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member}`, { database: '' });
+    await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
+    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', async_insert pinned`));
+  } catch (e) {
+    console.log(bad(`could not grant the house to '${admin.member}': ${e.message}`));
     if (createdUser) {
-      console.log(`  ClickHouse user '${createdUser}' WAS created before this failed; its rooms were not.`);
-      console.log('  Nothing was written to disk. To continue once the cause is fixed:');
-      console.log(`     memhouse install --adopt-user --member ${createdUser} --member-password '<the password above>' …`);
+      console.log(`  ClickHouse user '${createdUser}' WAS created before this failed.`);
+      console.log(`  Continue once fixed:  memhouse install --member ${createdUser} --member-password '<the password above>' …`);
       console.log(`  Or undo it as the admin:  DROP USER ${createdUser}`);
     } else {
       console.log('  nothing was written');
@@ -786,11 +740,15 @@ async function adminBootstrap(cfg, admin) {
   }
 
   // The step that makes this trustworthy: stop being admin, and prove the credential we
-  // are about to persist actually reaches the rooms.
+  // are about to persist can build and reach the rooms itself.
   const memberCfg = { ...cfg, user: admin.member, password };
+  if (run(SHIP_JS, ['--ensure-schema'], memberCfg) !== 0) {
+    console.log(bad(`'${admin.member}' could not create the rooms in '${cfg.db}' — nothing written to disk`));
+    return null;
+  }
   try {
-    const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN ('sessions_${admin.member}','messages_${admin.member}','tool_calls_${admin.member}')`, { database: '' });
-    if (Number(seen[0]?.n) !== 3) { console.log(bad(`'${admin.member}' cannot see all three of their rooms — nothing written`)); return null; }
+    const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN ('sessions','messages','tool_calls')`, { database: '' });
+    if (Number(seen[0]?.n) !== 3) { console.log(bad(`'${admin.member}' cannot see the three rooms — nothing written`)); return null; }
   } catch (e) { console.log(bad(`'${admin.member}' could not connect after provisioning: ${e.message}`)); return null; }
   console.log(ok(`verified as '${admin.member}' — admin credential discarded, not stored`));
   return memberCfg;
@@ -886,7 +844,7 @@ async function cmdInstall({ interactive }) {
   if (keyProblem) {
     console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
     console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
-    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}, then: memhouse ship --full`);
+    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl')}, then: memhouse ship --full`);
     console.log('  no config was written — nothing here reads as installed.');
     return 1;
   }
@@ -900,8 +858,8 @@ async function cmdInstall({ interactive }) {
     }
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
     console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
-    console.log('  admin is needed again only for: a second member, or an ADD COLUMN rollout.');
-    console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member <name> --merge`);
+    console.log('  adding a housemate later is two statements for the admin:');
+    console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
     return 0;
   }
 
@@ -910,7 +868,7 @@ async function cmdInstall({ interactive }) {
   // authenticating as memhouse_root instead: the three flags did nothing, --yes satisfied
   // haveAll so no prompt asked who you were, and resolveConfig's default was used AS A
   // CREDENTIAL. Refuse rather than do something else silently.
-  const adminOnly = ['adopt-user', 'member', 'member-password'].filter((k) => flags[k] !== undefined);
+  const adminOnly = ['member', 'member-password'].filter((k) => flags[k] !== undefined);
   if (!adminUser && adminOnly.length) {
     console.log(bad(`--${adminOnly.join(', --')} ${adminOnly.length > 1 ? 'are' : 'is'} only read with --admin-user`));
     console.log('  Those flags provision a member, which needs house admin. Without them this');
@@ -1023,7 +981,7 @@ async function cmdInstall({ interactive }) {
   if (keyProblem) {
     console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
     console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
-    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}, then: memhouse ship --full`);
+    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl')}, then: memhouse ship --full`);
     console.log('  no config was written — nothing here reads as installed.');
     return 1;
   }
@@ -1313,7 +1271,7 @@ async function cmdDoctor() {
       add(t === objects.length, t === objects.length
         ? `schema: 3/3 rooms in '${cfg.db}' (${objects.join(', ')})`
         : `schema: ${t}/${objects.length} rooms in '${cfg.db}' — missing ${absent.join(', ')}`,
-        `run: memhouse install, or as the owner: node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member ${rooms.member}`);
+        `run: memhouse install — with ALL on the house, ship --ensure-schema builds them`);
     } catch (e) { add(false, 'schema check', `${e.message} — run: memhouse install`); }
     // Columns, not just rooms. A room with a column missing accepts every insert and
     // discards that field — measured, 85 rows shipped with the value thrown away while
@@ -1321,7 +1279,7 @@ async function cmdDoctor() {
     // counted rooms.
     try {
       const { templateColumns } = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'));
-      const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+      const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
       const want = templateColumns(tpl);
       // Names AND types AND the MATERIALIZED kind. Comparing names alone left every other
       // kind of drift invisible, with measured consequences: a `UInt64` column narrowed to
@@ -1386,7 +1344,7 @@ async function cmdDoctor() {
         add(false, `sorting keys: only ${checked}/${ROOM_TYPES.length} rooms are MergeTree — the rest have no sorting key at all`,
           'a room was replaced by a Merge/View/Log engine; rebuild it from the schema template as the house owner');
       } else add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ` carry origin correctly (${checked}/${ROOM_TYPES.length} rooms)`}`,
-        `rebuild those rooms from the schema template, then: memhouse ship --full\n     template: ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'schema-member.sql.tpl')}`);
+        `rebuild those rooms from the schema template, then: memhouse ship --full\n     template: ${path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl')}`);
     } catch (e) { add(false, 'sorting keys', e.message); }
     try {
       // countIf, not any(). `any()` returns an arbitrary row's value, so on a house with
@@ -1924,8 +1882,8 @@ async function cmdReset() {
   } catch { /* pre-origin house: nothing to protect, ensureSchema will add the column */ }
 
   if (flags.yes !== true) {
-    // Name the rooms. Under the per-member layout this only ever empties the caller's own,
-    // and "ALL rows in 'mem'" would misdescribe that in the alarming direction.
+    // Name the rooms, and the scope honestly: the tables are shared, but reset only ever
+    // deletes rows whose user_id is the CALLER's — a housemate's rows are untouched.
     const scope = allOrigins
       ? `EVERY row, including ${imported} imported one(s) that re-shipping CANNOT restore,`
       : 'the rows the shipper wrote';
@@ -2299,7 +2257,7 @@ async function cmdUninstall() {
       } else {
         houseUser = osName || 'memhouse_root';
       }
-      try { require(path.join(REPO_ROOT, 'memhouse', 'per-member', 'rooms')).assertUsableMember(houseUser); }
+      try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(houseUser, 'house user'); }
       catch (e) { console.log(bad(`'${houseUser}' cannot be the house user — ${e.message}`)); process.exitCode = 2; break; }
       // An initialised volume with no credential to reuse — env file deleted, emptied, or
       // never written — is the same lockout by another route: a generated password would
@@ -2327,7 +2285,12 @@ async function cmdUninstall() {
       const tag = flags.tag || process.env.MEMHOUSE_CH_TAG || dep.managedTag() || dep.DEFAULT_TAG;
       // The database is part of the destination, not a detail of it — see the service
       // check below, which must compare it.
-      const targetDb = flags.db || process.env.MEMHOUSE_DB || priorCfg.db || 'mem';
+      // STATED sources only, then the house user. priorCfg.db is unusable here: resolveConfig
+      // computes a DEFAULT for it (the user's name, itself defaulted), so going through it
+      // handed a fresh deploy `memhouse_root` as the house name while the superuser was
+      // 'polat' — the memory would live in a database named after a role account nobody
+      // chose.
+      const targetDb = flags.db || process.env.MEMHOUSE_DB || readEnvFile().MEMHOUSE_DB || houseUser;
       {
         // A service-managed shipper keeps the environment it was installed with, so ANY
         // switch that repoints the config leaves it shipping somewhere else — not only an
@@ -2393,7 +2356,10 @@ async function cmdUninstall() {
       // house that eventually came up is unreachable forever. The image applies the
       // password only at first init, so there is no way back from that.
       if (!reusable) {
-        writeEnvFile({ ...priorCfg, url: r.url, user: houseUser, password: pw });
+        // db INCLUDED: this file is read back by the install below, and writing
+        // priorCfg's computed default here made that install refuse over a mismatch
+        // with a file this same command had just written.
+        writeEnvFile({ ...priorCfg, url: r.url, user: houseUser, password: pw, db: targetDb });
         console.log(ok(`credential saved to ${ENV_FILE} before waiting — the volume is initialised with it`));
       }
 
@@ -2444,8 +2410,8 @@ async function cmdUninstall() {
       // describes. A user who later adds a second member should know which house they
       // have.
       console.log(warn(`this house is yours alone: '${houseUser}' is its superuser, and that is the credential being saved`));
-      console.log('  Adding a second person later? Give them their own member instead:');
-      console.log(`     node ${path.join(REPO_ROOT, 'memhouse', 'per-member', 'provision.js')} --member <name> --merge`);
+      console.log('  Adding a housemate later is two statements:');
+      console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${targetDb}.* TO <name>;`);
       flags.url = r.url; flags.user = houseUser; flags.password = pw;
       flags.db = targetDb;
       flags.yes = true;

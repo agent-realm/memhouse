@@ -18,13 +18,13 @@
 
 const { createClient, ClickHouseLogLevel } = require('@clickhouse/client');
 const { calculateCost, normalizeModelName } = require('../../pricing');
-const { resolveRooms, READ_SETTINGS } = require('../per-member/rooms');
+const { resolveRooms, READ_SETTINGS } = require('../house/house');
 
 const config = {
   url: process.env.MEMHOUSE_URL || 'http://localhost:8123',
   username: process.env.MEMHOUSE_USER || 'memhouse_root',
   password: process.env.MEMHOUSE_PASSWORD || '',
-  database: process.env.MEMHOUSE_DB || 'mem',
+  database: process.env.MEMHOUSE_DB || process.env.MEMHOUSE_USER, // house defaults to the user's own name
 };
 
 let _client = null;

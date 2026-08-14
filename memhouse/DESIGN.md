@@ -5,10 +5,12 @@ on your machines — across **all 17 editors** agentlytics supports — parsed l
 shipped to a typed ClickHouse store, shareable with a team, installable on the
 ultimagent kernel as an **agency**, and visible through the agentlytics dashboard.
 
-**One house, a set of rooms per member** — `sessions_<m>`, `messages_<m>`,
-`tool_calls_<m>`. All of one member's machines ship into that member's rooms, told
-apart by the `host` column; no member writes into another's. The shared-table layout
-this once had was removed in 0.4.0; see `per-member/`.
+**A house is a database; its rooms are three shared tables** — `sessions`, `messages`,
+`tool_calls`. Everyone in the house writes into the same tables with their own
+credential; the server-stamped `user_id` says who, the install fingerprint `host` says
+which machine. Sharing IS the house; the boundary between groups is the database. (The
+layout has moved twice: shared-tables-with-row-policies fell in 0.4.0, per-member
+suffixed rooms fell in 0.8.0 — see `house/HOUSE.md` for why.)
 
 **Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) memhouse is a
 **house** — the `mem` database — **plus a resident**: the shipper. That pairing
@@ -24,23 +26,21 @@ on   = "loop"      # a daemon — not an insert trigger, not a schedule
 ```
 
 The session rollup is a **routine** — house machinery, not a second resident. Since
-0.4.0 it is not even an object: it is SQL text (`per-member/rooms.js`), substituted with
-the caller's own room names and computed during your query, for your query, writing
-nothing. memhouse has **no materialized views at all** — in fact no stored views at all
+0.4.0 it is not even an object: it is SQL text (`house/house.js`), computed during your
+query, for your query, writing nothing. memhouse has **no materialized views at all** — in fact no stored views at all
 — so the shipper is not merely a resident, it is the only candidate in the tree. Strip
 it and every remaining moving part is a routine over rows nobody is writing any more.
 
 Note that `user_id MATERIALIZED currentUser()` is a materialized *column*: it computes
-during your own insert and is part of the table's definition. It is not what isolates
-members — the room they hold no grant on does that — but it records who wrote each row,
-which keeps provenance across a share and keeps the `Merge` rooms meaningful. An identity
-property, not what makes this an agency.
+during your own insert and is part of the table's definition. It is what tells housemates'
+rows apart in the shared tables — provenance, stamped by the server, with async_insert
+pinned so it cannot be skipped. An identity property, not what makes this an agency.
 
 **Positioning:** an alternative agency **competing with memory-house**. It borrows
 memory-house's proven ideas (server-stamped identity, idempotent shipping,
 skills/plugin delivery) and agentlytics' proven assets (adapters, UI, cost engine) —
-but **not** its shared-table-plus-row-policy layout, which 0.4.0 removed in favour of
-one set of rooms per member. If it wins, it can become memory-house v4; until then the
+but **not** its row-policy machinery: memhouse's tables are shared by people who chose
+one house, and the boundary between houses is the database itself. If it wins, it can become memory-house v4; until then the
 two run side by side as separate agencies, each in its own house. Naming: the product is
 **memhouse**; the agency is **`memhouse`** and its house is the **`mem`** database
 (identifiers can't carry a dash; the owner kept the longer name, `memhouse_root`).
@@ -60,20 +60,19 @@ them free and further along; **bet 3 is the one nobody else attempts.**
    write axis this bet is precisely *moving work from routine to resident*:
    memory-house parses when you query, memhouse parses before anyone asks and
    writes the result down.
-2. **Typed common schema** (`per-member/schema-member.sql.tpl`, applied once per
-   member; `schema-merge.sql.tpl` for the team rooms). Physical typed columns (what
-   memory-house derives in views) + `tool_calls_<m>` (memory-house has no tool table)
-   + one `extra JSON` escape hatch per room so unnormalized adapter fields are never
-   lost. `ReplacingMergeTree(ingested_at)`; `messages_<m>` keyed
-   `(session_id, user_id, seq)` so a re-ship of a grown/changed session replaces stale
-   rows (latest-wins). FTS text indexes built in (CH ≥ 26.2).
-3. **Kernel-installable agency.** Same install path proven for agentlytics-agency:
-   `install-agency{memhouse}` → house + `memhouse_root` + credential; members via
-   `register-member` + owner `GRANT` on that member's own rooms. Own-only visibility
-   needs no policy: a member is granted their rooms and nobody else's. The shipper is
-   the resident that lands with it. Identity is `user_id MATERIALIZED currentUser()`
-   (requires `async_insert=0`). Sharing is a further GRANT, issued by the member
-   themselves (grant-option) or the owner.
+2. **Typed common schema** (`house/schema.sql.tpl` — three shared tables per house).
+   Physical typed columns (what memory-house derives in views) + `tool_calls`
+   (memory-house has no tool table) + one `extra JSON` escape hatch per room so
+   unnormalized adapter fields are never lost. `ReplacingMergeTree(ingested_at)`;
+   `messages` keyed `(session_id, user_id, origin, seq)` so a re-ship of a
+   grown/changed session replaces stale rows (latest-wins) and two housemates' rows
+   never collapse into one. FTS text indexes built in (CH ≥ 26.2).
+3. **Kernel-installable agency.** Joining any ClickHouse — a kernel's included — is a
+   database plus a credential: `CREATE USER`, `GRANT ALL ON <house>.* `, done. The
+   shipper is the resident that lands with it and creates its own rooms. Identity is
+   `user_id MATERIALIZED currentUser()` with `async_insert = 0 CONST` pinned on the
+   user; machines are told apart by the `host` fingerprint. The boundary between
+   agencies on one server is the database — a house's ALL reaches nothing outside it.
 4. **Borrowed UI, zero fork.** The React SPA consumes REST JSON, not tables. The
    memhouse server implements the **same `/api/*` contract** as agentlytics'
    `server.js` (same routes, same response shapes) over the memhouse schema, and
@@ -83,9 +82,9 @@ them free and further along; **bet 3 is the one nobody else attempts.**
 
 | Path | What | Notes |
 |---|---|---|
-| `per-member/rooms.js` | room-name resolution + the session rollup | one naming rule for both transports |
-| `per-member/schema-member.sql.tpl` | one member's three rooms (typed) | the owner via `provision.js`, or the member on a house they own |
-| `per-member/schema-merge.sql.tpl` | the three team Merge rooms | owner-managed; reduce to the caller's grants |
+| `house/house.js` | room names + the session rollup + the user pin | one rule for both transports |
+| `house/schema.sql.tpl` | the house's three shared tables (typed) | applied by each member's own shipper |
+| `house/HOUSE.md` | the model, and what it replaced | |
 | `shipper/ship.js` | parse-on-client shipper CLI — the resident (`worker`) | reuses `../../editors`; incremental; idempotent |
 | `server/server.js` | REST API + dashboard | same API contract as agentlytics; serves `../../public` |
 | `delivery/` | delivery kit | installer, skills, plugin, AGENT-INSTALL.md, prompt |

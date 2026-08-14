@@ -26,7 +26,7 @@
 // `source: 'claude-code'` on every chat it returns. This table was written against the
 // module names first and would have refused to resume a single Claude Code session — 508 of
 // them on the machine it was tested on. Read the values out of a real house
-// (`SELECT DISTINCT source FROM sessions_<you>`), never off the adapter's name.
+// (`SELECT DISTINCT source FROM sessions`), never off the adapter's name.
 const RESUMERS = {
   // claude --help, 2026-08-12: "-r, --resume [value]  Resume a conversation by session ID"
   'claude-code': {

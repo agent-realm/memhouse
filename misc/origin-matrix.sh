@@ -28,12 +28,16 @@ qroot "DROP DATABASE IF EXISTS $DB" >/dev/null; qroot "CREATE DATABASE $DB" >/de
 
 # --- A. a house built from the CURRENT template (origin present) -----------------
 ddl() { # ddl <member> [drop-origin]  -- HTTP takes ONE statement per request
-  local src="$REPO/memhouse/per-member/schema-member.sql.tpl"
+  local src="$REPO/memhouse/house/schema.sql.tpl"
   if [ "${2:-}" = "no-origin" ]; then
     sed "/origin LowCardinality/d; s/, origin, seq)/, seq)/; s/, origin, idx)/, idx)/" "$src" > /tmp/_ddl.$$.tpl
     src=/tmp/_ddl.$$.tpl
   fi
-  sed "s/{{MEMBER}}/$1/g" "$src" \
+  # The live template has PLAIN table names now (a house shares its tables); the matrix
+  # still builds two variant houses side by side in ONE scratch database, so it suffixes
+  # the three CREATEs itself. The guarantees under test are MergeTree semantics — the
+  # names are irrelevant to them.
+  sed -E "s/^CREATE TABLE IF NOT EXISTS (sessions|messages|tool_calls)$/CREATE TABLE IF NOT EXISTS \\1_$1/" "$src" \
   | python3 -c "
 import sys,re
 sql=re.sub(r'--.*','',sys.stdin.read())

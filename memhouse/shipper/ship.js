@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // memhouse SHIPPER — parse-on-client (bet #1 in ../DESIGN.md). Runs the 17 editor
-// adapters locally and ships TYPED rows into THE CALLER'S OWN rooms — sessions_<m> /
+// adapters locally and ships TYPED rows into the house's shared rooms — sessions /
 // messages_<m> / tool_calls_<m>, where <m> is `SELECT currentUser()` and never config
-// (../per-member/schema-member.sql.tpl, ../per-member/rooms.js). All of one member's
+// (../house/schema.sql.tpl, ../house/house.js). All of one member's
 // machines land in that member's rooms, told apart by the `host` column; no member
 // writes into another's. The typed evolution of agency/ingest.js: same host id,
 // same ts interpolation, same batching discipline — but rows land in physical
@@ -43,7 +43,7 @@ try { ({ createClient, ClickHouseLogLevel } = require('@clickhouse/client')); }
 catch {
   console.error("[memhouse] dependency '@clickhouse/client' is not installed.");
   console.error(`[memhouse] from a checkout:     npm install --prefix ${require('path').join(__dirname, '..', '..')}`);
-  console.error(`[memhouse] from an npm install: ${require('../per-member/rooms').installCommand()}`);
+  console.error(`[memhouse] from an npm install: ${require('../house/house').installCommand()}`);
   process.exit(2);
 }
 const { getAllChats, getAdapterErrors, getMessages, resetCaches } = require('../../editors');
@@ -52,7 +52,7 @@ const selfUpdate = require('../self-update');
 // Captured at require time, which is as close to "what this process booted with" as it
 // gets. Taking it later would record whatever an upgrade had already replaced.
 const selfSnap = selfUpdate.snapshot(__filename);
-const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../per-member/rooms');
+const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../house/house');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -203,7 +203,7 @@ function makeClient() {
     url: process.env.MEMHOUSE_URL,
     username: process.env.MEMHOUSE_USER,
     password: process.env.MEMHOUSE_PASSWORD || '',
-    database: process.env.MEMHOUSE_DB || 'mem',
+    database: process.env.MEMHOUSE_DB || process.env.MEMHOUSE_USER, // house defaults to the user's own name
     request_timeout: 300000, // full re-ships move tens of MB; don't cut inserts short
     clickhouse_settings: {
       // Int64/UInt64 back as JSON numbers — our values (counts, tokens) are < 2^53.
@@ -221,7 +221,7 @@ function makeClient() {
   });
 }
 
-// Create the CALLER'S OWN rooms, from ../per-member/schema-member.sql.tpl. Comments are
+// Create the house's rooms, from ../house/schema.sql.tpl. Comments are
 // stripped BEFORE the ';' split — schema comments legitimately contain semicolons.
 //
 // This is the solo path: on a house you own, `memhouse install` mints your three rooms and
@@ -229,9 +229,8 @@ function makeClient() {
 // same identity the rooms' user_id is stamped with, so a client cannot name its way into
 // someone else's rooms.
 //
-// It does NOT issue grants or create the Merge rooms. A solo owner needs neither. Adding a
-// SECOND member — grants, Merge rooms, sharing — is owner work and lives in
-// ../per-member/provision.js.
+// It issues no grants: joining a house is the admin's two statements (CREATE USER +
+// GRANT ALL ON the house), and once granted, each member's own shipper runs this.
 /**
  * Refuse to write into rooms whose sorting key is wrong for `origin` — in EITHER
  * direction. Two different houses are broken in two opposite ways:
@@ -251,7 +250,7 @@ function makeClient() {
  * Refuse, legibly, when the caller's rooms are not there.
  *
  * Without this the first thing to touch a roomless house is loadExisting's SELECT, and the
- * user gets `Unknown table expression identifier 'sessions_x' in scope SELECT session_id,
+ * user gets `Unknown table expression identifier 'sessions' in scope SELECT session_id,
  * last_updated_at, message_count, extra FROM ...` — a raw ClickHouse identifier error with
  * no next step, from a command that may be running inside a service loop. `install` and
  * `doctor` both handle the identical situation properly; ship was the one that did not.
@@ -305,7 +304,7 @@ function templateColumns(tpl) {
  */
 async function warnMissingColumns(client, rooms) {
   let tpl;
-  try { tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8'); }
+  try { tpl = fs.readFileSync(path.join(__dirname, '..', 'house', 'schema.sql.tpl'), 'utf-8'); }
   catch { return; }
   const want = templateColumns(tpl);
   const missing = [];
@@ -375,7 +374,7 @@ async function assertOriginKeyed(client, rooms) {
       + wrong.map((s) => `    ${s}`).join('\n')
       + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
       + '\n    RENAME TABLE <room> TO <room>_old;'
-      + `\n    -- recreate from ${path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl')}`
+      + `\n    -- recreate from ${path.join(__dirname, '..', 'house', 'schema.sql.tpl')}`
       + '\n    INSERT INTO <room> SELECT * FROM <room>_old;'
       + '\n  (add `, \'ship\' AS origin` to the SELECT only if <room>_old has no origin column)'
       + '\n  A house with no imported rows can also just be re-shipped from scratch.');
@@ -385,8 +384,8 @@ async function assertOriginKeyed(client, rooms) {
 async function ensureSchema(client) {
   const rooms = await resolveRooms(client);
   const { member } = rooms;
-  const tpl = fs.readFileSync(path.join(__dirname, '..', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
-  const sql = tpl.replaceAll('{{MEMBER}}', member);
+  const tpl = fs.readFileSync(path.join(__dirname, '..', 'house', 'schema.sql.tpl'), 'utf-8');
+  const sql = tpl; // plain shared tables — nothing to render
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
   const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
   // A MEMBER holds no CREATE TABLE — that is the point of the narrowed grant set — and
@@ -422,13 +421,6 @@ async function ensureSchema(client) {
   // would error. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
   // pre-existing row reads as 'ship', which is what it was.
   //
-  // Deliberately NOT applied to the Merge rooms — but not for the reason this comment used
-  // to give. It claimed they "reject ALTER"; they do not, on either 26.7 or 25.11, where
-  // `ALTER TABLE all_messages ADD COLUMN …` succeeds. The real reason is that a Merge room
-  // is a VIEW over whatever `^messages_` matches: a column added to it is cosmetic, is not
-  // backed by the underlying rooms, and drifts from them the moment a member is added. It
-  // takes its structure from a member room at CREATE time, so recreating it is the only
-  // correct way to change it — and nothing reads `origin` through it anyway.
   // EVERY column the template declares, not just `origin`.
   //
   // This used to add exactly one column, which meant any OTHER column missing from a room
@@ -807,7 +799,7 @@ function reportAdapterErrors(warned) {
   const noBinding = errors.filter((e) => e.missingBinding).map((e) => e.source);
   if (noBinding.length) {
     console.log(`[memhouse] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
-    console.log(`[memhouse]          fix: ${require('../per-member/rooms').installCommand()}`);
+    console.log(`[memhouse]          fix: ${require('../house/house').installCommand()}`);
   }
   for (const e of errors.filter((x) => !x.missingBinding)) {
     console.log(`[memhouse] WARNING: ${e.source} skipped — ${e.message}`);
