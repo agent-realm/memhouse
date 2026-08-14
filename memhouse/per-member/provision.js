@@ -234,7 +234,7 @@ async function main() {
   // is the server operator's policy, not memhouse's. What remains is the provenance pin;
   // see MEMBER_PIN in rooms.js for why it is correctness rather than policy.
   try {
-    await client.command({ query: `ALTER USER ${member} SETTINGS ${MEMBER_PIN}` });
+    await client.command({ query: `ALTER USER ${member} ADD SETTING ${MEMBER_PIN}` });
     console.log(`[mem] pinned async_insert=0 on '${member}' (keeps the user_id stamp honest)`);
   } catch (e) {
     // A server where the admin cannot ALTER USER still gets a working member; say so.

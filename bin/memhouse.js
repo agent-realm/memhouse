@@ -672,7 +672,7 @@ ${mergeGrants}
 -- each other's). The pin keeps the user_id stamp honest: a MATERIALIZED currentUser() is
 -- computed during the INSERT, and an async flush stores it as the empty string. CONST
 -- refuses the override; a client that never mentions the setting is held at 0.
-ALTER USER ${member} SETTINGS ${MEMBER_PIN};
+ALTER USER ${member} ADD SETTING ${MEMBER_PIN};
 `;
 }
 
@@ -2281,12 +2281,17 @@ async function cmdUninstall() {
         // `--user other` against priorCfg.user compares the flag against itself and the
         // refusal below can never fire — while the volume stays initialised with the
         // original name and every later connection fails auth.
-        houseUser = readEnvFile().MEMHOUSE_USER || 'memhouse_root';
-        if (flags.user && flags.user !== true && flags.user !== houseUser) {
+        const storedUser = readEnvFile().MEMHOUSE_USER;
+        // No stored user means the env file is gone or emptied — the stored PASSWORD is
+        // gone with it, so the `initialised && !reusable` refusal below already owns this
+        // case. Refusing `--user` here on a guessed 'memhouse_root' would tell the pilot
+        // their house "was initialised with memhouse_root" on no evidence at all.
+        if (storedUser && flags.user && flags.user !== true && flags.user !== storedUser) {
           console.log(bad(`--user cannot rename the user of an existing house — the image creates it only when it initialises the data directory.`));
-          console.log(`  this house was initialised with '${houseUser}'. To start over (DESTROYS the memory):  memhouse deploy --down`);
+          console.log(`  this house was initialised with '${storedUser}'. To start over (DESTROYS the memory):  memhouse deploy --down`);
           process.exitCode = 2; break;
         }
+        houseUser = storedUser || 'memhouse_root';
       } else if (flags.user && flags.user !== true) {
         houseUser = String(flags.user);
       } else if (flags.yes !== true && process.stdin.isTTY) {
