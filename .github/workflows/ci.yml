@@ -1,0 +1,108 @@
+# CI — the release gate.
+#
+# Three layers, cheapest first:
+#   1. npm test         — syntax gate + unit checks (no network, milliseconds)
+#   2. origin-matrix    — the import/ship data guarantees against a REAL ClickHouse,
+#                         on both supported version lines. This script is the distilled
+#                         form of the bug that once destroyed 27,948 imported messages
+#                         in one ship pass; it does not get skipped.
+#   3. a headless e2e   — admin install → ship → status against the same server. CI has
+#                         no editor sessions, so the ship legitimately ships 0; what the
+#                         step proves is the whole provisioning + schema + connection
+#                         path on a machine that is not a developer's.
+#
+# Both ClickHouse lines run because they differ in ways that have bitten: 25.11 gates
+# the text indexes behind allow_experimental_full_text_index (Code 344 without it), and
+# several ALTER/DELETE behaviours differ. Dropping one line here is how a "works on my
+# CH" regression ships.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        clickhouse: ["25.11", "26.7"]
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:${{ matrix.clickhouse }}
+        env:
+          CLICKHOUSE_USER: memhouse_root
+          CLICKHOUSE_PASSWORD: cipw
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --ulimit nofile=262144:262144
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # npm >= 12 blocks install scripts by default; the repo's package.json carries
+      # `allowScripts` for better-sqlite3, which project-scoped installs honour.
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+      - name: wait for ClickHouse
+        run: |
+          for i in $(seq 1 60); do
+            curl -s -m 3 -u memhouse_root:cipw --data-binary "SELECT 1" http://localhost:8123/ | grep -q 1 && exit 0
+            sleep 2
+          done
+          echo "ClickHouse never answered" >&2; exit 1
+      - name: origin matrix (data guarantees)
+        run: misc/origin-matrix.sh ci http://localhost:8123 memhouse_root cipw
+      - name: headless e2e — install, ship, status
+        run: |
+          set -euo pipefail
+          export MEMHOUSE_HOME="$RUNNER_TEMP/mh-home"
+          mkdir -p "$MEMHOUSE_HOME"
+          node bin/memhouse.js install --url http://localhost:8123 \
+            --admin-user memhouse_root --admin-password cipw \
+            --member ci --member-password cipw2 --db cihouse --yes --no-ship
+          node bin/memhouse.js ship --full | tee /tmp/ship.log
+          grep -q "shipped 0 sessions" /tmp/ship.log   # a runner has no editor sessions
+          node bin/memhouse.js status --json | node -e "
+            let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+              const j=JSON.parse(s);
+              if(!j.connected) { console.error('status says not connected'); process.exit(1); }
+              if(!j.host || !j.host.id) { console.error('no host identity'); process.exit(1); }
+              console.log('status ok:', j.url, j.db, 'as', j.user, 'host', j.host.id);
+            })"
+      - name: refusals stay refusals
+        run: |
+          set -euo pipefail
+          export MEMHOUSE_HOME="$RUNNER_TEMP/mh-refuse"
+          mkdir -p "$MEMHOUSE_HOME"
+          # no config → exit 2, and the reserved database → exit 1, creating nothing
+          if env -u MEMHOUSE_URL -u MEMHOUSE_USER node bin/memhouse.js ship; then exit 1; fi
+          if node bin/memhouse.js install --url http://localhost:8123 \
+              --admin-user memhouse_root --admin-password cipw \
+              --member evil --member-password x --db system --yes --no-ship; then exit 1; fi
+          test "$(curl -s -u memhouse_root:cipw --data-binary "SELECT count() FROM system.users WHERE name='evil'" http://localhost:8123/)" = "0"
+
+  pack-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # What ships is what `files` says — this catches a credential, an env file, or a
+      # retired module sneaking back into the tarball. prepack builds the UI, so this
+      # also proves the SPA still builds.
+      - run: npm install --no-audit --no-fund
+      - run: npm pack
+      - name: audit tarball contents
+        run: |
+          set -euo pipefail
+          tar tzf memhouse-*.tgz > /tmp/contents.txt
+          ! grep -iE '\.env$|npmrc|host\.json|credentials|per-member/' /tmp/contents.txt
+          grep -q 'package/public/index.html' /tmp/contents.txt   # built UI present
+          grep -q 'package/LICENSE' /tmp/contents.txt
