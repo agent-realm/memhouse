@@ -14,7 +14,7 @@
 // No server, no fixtures, no network. Runs in milliseconds.
 
 const assert = require('assert');
-const rooms = require('../memhouse/per-member/rooms');
+const rooms = require('../memhouse/house/house');
 const envfile = require('../memhouse/envfile');
 
 let passed = 0;
@@ -25,84 +25,55 @@ function test(name, fn) {
   }
 }
 
-// ── room names ──────────────────────────────────────────────────────────────────
-test('rooms are suffixed with the member', () => {
+// ── the house's rooms ───────────────────────────────────────────────────────────
+test('rooms are plain shared tables — the database is the boundary', () => {
   const r = rooms.roomNames('alice');
-  assert.strictEqual(r.sessions, 'sessions_alice');
-  assert.strictEqual(r.messages, 'messages_alice');
-  assert.strictEqual(r.tool_calls, 'tool_calls_alice');
+  assert.strictEqual(r.sessions, 'sessions');
+  assert.strictEqual(r.messages, 'messages');
+  assert.strictEqual(r.tool_calls, 'tool_calls');
+  // The identity still travels with the names: writers BIND it (ship.js's clear), and
+  // readers scope by it. Losing it here silently un-scopes every consumer.
   assert.strictEqual(r.member, 'alice');
-});
-
-test('there is no shared layout to fall back to', () => {
-  // roomNames used to accept null for three bare rooms. A caller that still passes null
-  // must fail loudly rather than silently addressing rooms nobody writes.
-  for (const bad of [null, undefined]) assert.throws(() => rooms.roomNames(bad), /expected/);
+  assert.strictEqual(r.user, 'alice');
 });
 
 test('the session rollup is a QUERY, not a fourth object', () => {
-  const alice = rooms.roomNames('alice');
+  const r = rooms.roomNames('alice');
   // SQL text, substituted into the same `FROM ... AS c` position a view name would hold.
-  assert.ok(alice.sessions_v.startsWith('('), 'the rollup must be a subquery');
-  assert.ok(alice.sessions_v.includes('FROM sessions_alice AS s'), alice.sessions_v);
-  assert.ok(alice.sessions_v.includes('LEFT JOIN messages_alice AS m'), 'the LEFT JOIN must survive');
-  // No name means nothing for the Merge selectors to swallow — the whole class of
-  // collision a `sessions_v_alice` view created does not exist.
-  for (const re of [/^sessions_/, /^messages_/, /^tool_calls_/]) {
-    assert.ok(!re.test(alice.sessions_v), `${re} must not match a subquery`);
-  }
+  assert.ok(r.sessions_v.startsWith('('), 'the rollup must be a subquery');
+  assert.ok(r.sessions_v.includes('FROM sessions AS s'), r.sessions_v);
+  assert.ok(r.sessions_v.includes('LEFT JOIN messages AS m'), 'the LEFT JOIN must survive');
+  // Shared tables make this the load-bearing line: two housemates' rows must never merge,
+  // even on a colliding session_id.
+  assert.match(r.sessions_v, /GROUP BY s\.session_id, s\.user_id/, 'rollup must group by user too');
 });
 
 test('the rollup is self-contained — it needs nothing from the caller', () => {
   // This test used to assert the OPPOSITE, on the belief that a subquery cannot carry a
   // trailing SETTINGS clause. It can (verified on 26.7.2.59 and 25.11.9.34), and the
   // belief cost real accuracy: any consumer that forgot final=1 counted every message
-  // once per undeleted ReplacingMergeTree version — 2x right after a ship, 3x a few ships
-  // later, growing until a merge happened to collapse the parts.
+  // once per undeleted ReplacingMergeTree version — 2x right after a ship, growing until
+  // a merge happened to collapse the parts.
   const v = rooms.roomNames('alice').sessions_v;
   assert.match(v, /SETTINGS join_use_nulls = 1/, 'rollup must carry join_use_nulls itself');
   // Alias BEFORE final: `FROM t FINAL AS s` is a syntax error, `FROM t AS s FINAL` is not.
-  assert.match(v, /FROM sessions_alice AS s FINAL/, 'sessions must be read FINAL');
-  assert.match(v, /LEFT JOIN messages_alice AS m FINAL/, 'messages must be read FINAL');
+  assert.match(v, /FROM sessions AS s FINAL/, 'sessions must be read FINAL');
+  assert.match(v, /LEFT JOIN messages AS m FINAL/, 'messages must be read FINAL');
   // READ_SETTINGS still applies to DIRECT room reads, which carry no FINAL of their own.
   assert.strictEqual(rooms.READ_SETTINGS.join_use_nulls, 1);
   assert.strictEqual(rooms.READ_SETTINGS.final, 1);
 });
 
-test("'root' is refused at the rooms layer, in any case", () => {
-  // provision.js is an admin entry point in its own right; a reservation that lives only
-  // in the CLI let `provision.js --member root` create three orphan rooms before failing.
-  for (const r of ['root', 'Root', 'ROOT', 'rOOt']) {
-    assert.throws(() => rooms.assertUsableMember(r), /container artefact/, `accepted '${r}'`);
-  }
-  // 'default' is a poor member name but a real one; existing houses use it.
-  assert.doesNotThrow(() => rooms.assertUsableMember('default'));
-});
-
-test('handles that would need quoting are refused', () => {
+test('names that would need quoting, and ClickHouse-owned databases, are refused', () => {
   for (const bad of ['1alice', 'ali ce', 'ali-ce', "ali'ce", 'ali.ce', '']) {
-    assert.throws(() => rooms.assertUsableMember(bad), /expected/, `accepted '${bad}'`);
+    assert.throws(() => rooms.assertUsableName(bad), /expected/, `accepted '${bad}'`);
   }
-});
-
-test('every Merge selector matches member rooms and never itself', () => {
-  // Read the patterns out of the template rather than restating them, so a change there
-  // has to face this test.
-  //
-  // Self-match is the property that matters now that there is one layout: `^sessions_`
-  // must catch `sessions_<anyone>` and must NOT catch `all_sessions`, or the Merge room
-  // reads itself. Type-first naming is what buys this — `<member>_sessions` could not.
-  const tpl = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'memhouse', 'per-member', 'schema-merge.sql.tpl'), 'utf-8');
-  const pats = [...tpl.matchAll(/Merge\(currentDatabase\(\), '([^']+)'\)/g)].map((m) => m[1]);
-  assert.strictEqual(pats.length, rooms.ROOM_TYPES.length, 'one Merge room per room type');
-  const all = Object.values(rooms.mergeRooms());
-  for (const [i, t] of rooms.ROOM_TYPES.entries()) {
-    const sel = new RegExp(pats[i]);
-    assert.ok(sel.test(`${t}_alice`), `${pats[i]} must match ${t}_alice`);
-    assert.ok(sel.test(`${t}_v`), `${pats[i]} must match ${t}_v — 'v' is an ordinary handle now`);
-    for (const room of all) assert.ok(!sel.test(room), `${pats[i]} must not match the Merge room ${room}`);
+  for (const owned of ['system', 'SYSTEM', 'information_schema']) {
+    assert.throws(() => rooms.assertUsableName(owned), /ClickHouse's own/, `accepted '${owned}'`);
   }
+  // `default` is deliberately allowed — a stock container's default database is a real
+  // place to keep a house, and user 'alice' with house 'default' is a supported pairing.
+  assert.doesNotThrow(() => rooms.assertUsableName('default'));
 });
 
 test('the shipper clear must bind origin, or it deletes imported history', () => {
@@ -126,7 +97,7 @@ test('the shipper clear must bind origin, or it deletes imported history', () =>
 
 test('every room type carries an origin column defaulting to ship', () => {
   const tpl = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'memhouse', 'per-member', 'schema-member.sql.tpl'), 'utf-8');
+    require('path').join(__dirname, '..', 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
   const n = (tpl.match(/origin LowCardinality\(String\) DEFAULT 'ship'/g) || []).length;
   assert.strictEqual(n, rooms.ROOM_TYPES.length,
     `origin must be on all ${rooms.ROOM_TYPES.length} room types, found ${n}`);

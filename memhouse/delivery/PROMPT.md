@@ -26,22 +26,20 @@ FIRST. Only say you don't know after a search comes back empty.
 (full-text over messages), `/memhouse:sessions` (list/filter sessions),
 `/memhouse:sql` (free-form read-only SQL). Without skills, query directly.
 
-**Table names first.** Every member owns their rooms, so every table below takes your
-username as a suffix — `messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There
-are no unsuffixed rooms; the plain names fail with `UNKNOWN_TABLE` rather than
-returning nothing. Get the suffix from `SELECT currentUser()`. **There is no
-`sessions_v` object** — the rollup is a saved query over those same rooms, and
+**Table names.** The house's rooms are three plain, shared tables — `messages`,
+`sessions`, `tool_calls` — in the connection's database. Everyone in the house writes
+into the same tables; `user_id` (server-stamped) says whose row it is and `host` says
+which machine. Query the whole house by default; add `WHERE user_id = '<name>'` for one
+person. **There is no `sessions_v` object** — the rollup is a saved query, and
 `memhouse sessions-query` prints it ready to drop into a `FROM (...) AS c`.
-`all_messages` / `all_sessions` / `all_tool_calls` read across every member you hold a
-grant for.
 
 - Find sessions about a topic (FTS, lowercase your terms):
-  `SELECT DISTINCT session_id, any(project), min(ts) FROM messages_<you>
+  `SELECT DISTINCT session_id, any(project), min(ts) FROM messages
    WHERE hasToken(text_word, 'clickhouse') GROUP BY session_id
    ORDER BY 3 DESC LIMIT 10 SETTINGS final=1, join_use_nulls=1 FORMAT PrettyCompact`
 - Recent sessions: `SELECT session_id, source, project, started, first_prompt
    FROM $(memhouse sessions-query) AS c ORDER BY started DESC LIMIT 20 SETTINGS final=1, join_use_nulls=1`
-- Replay one session: `SELECT role, text FROM messages_<you>
+- Replay one session: `SELECT role, text FROM messages
    WHERE session_id = '<id>' ORDER BY seq SETTINGS final=1, join_use_nulls=1`
 
 **Rules.**

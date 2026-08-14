@@ -1,16 +1,13 @@
--- mem — one member's rooms. Applied per member — {{MEMBER}} is the ClickHouse username.
---
--- Room naming is TYPE-FIRST (sessions_<m>, not <m>_sessions) so the Merge rooms
--- can anchor on a fixed room type and never match themselves.
---
--- user_id MATERIALIZED currentUser() is retained even though the room names the member:
--- it keeps provenance across a share and keeps the Merge rooms meaningful. Writers must
--- use async_insert=0 or the stamp does not happen.
+-- The house's three rooms — plain, shared tables. Everyone in the house writes into
+-- these same tables with their own credential; `user_id MATERIALIZED currentUser()`
+-- (server-stamped, async_insert pinned to 0 on the user) says who, and `host` says
+-- which machine. There is no per-member table and no Merge room: the database IS the
+-- boundary, and a housemate is anyone granted on it.
 --
 -- ClickHouse >= 26.2 natively — 25.11 works because the shipper passes
 -- allow_experimental_full_text_index=1 per-query when applying this file.
 
-CREATE TABLE IF NOT EXISTS sessions_{{MEMBER}}
+CREATE TABLE IF NOT EXISTS sessions
 (
     session_id String,
     source LowCardinality(String),
@@ -47,7 +44,7 @@ CREATE TABLE IF NOT EXISTS sessions_{{MEMBER}}
 ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (session_id, user_id);
 
-CREATE TABLE IF NOT EXISTS messages_{{MEMBER}}
+CREATE TABLE IF NOT EXISTS messages
 (
     session_id String,
     seq UInt32,
@@ -88,7 +85,7 @@ CREATE TABLE IF NOT EXISTS messages_{{MEMBER}}
 ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (session_id, user_id, origin, seq);
 
-CREATE TABLE IF NOT EXISTS tool_calls_{{MEMBER}}
+CREATE TABLE IF NOT EXISTS tool_calls
 (
     session_id String,
     seq UInt32,

@@ -9,7 +9,7 @@ allowed-tools: Bash
 # /memhouse:search — search conversation memory
 
 Search the full message history in the memhouse house. Every room is named for your
-ClickHouse user — `messages_<you>`, `sessions_<you>` — see **Room names** below.
+ClickHouse user — `messages`, `sessions` — see **Room names** below.
 
 ## Connection
 
@@ -59,35 +59,25 @@ SQL
 `FORMAT PrettyCompact` for display; `FORMAT JSONEachRow` when you want to parse
 the rows yourself.
 
-## Room names — always suffixed
+## Room names — plain, shared tables
 
-Every member owns their own rooms, named for their ClickHouse user:
-`messages_<you>`, `sessions_<you>`, `tool_calls_<you>`. There are no unsuffixed rooms;
-the bare names fail with `UNKNOWN_TABLE` rather than returning nothing. You hold no grant
-on anyone else's rooms, so isolation is not something a query can work around.
+The house's rooms are three plain tables: `messages`, `sessions`, `tool_calls` — resolved
+by the connection's database (`MEMHOUSE_DB`), not by who is asking. Everyone in the house
+writes into the same tables; `user_id` (stamped by the server) says whose row it is and
+`host` says which machine shipped it. Search the whole house by default; add
+`AND user_id = '<name>'` only when the user asks for one person's sessions.
 
-Ask the server your name once, then **type the literal room name into your SQL** — do not
-reference a shell variable inside the query:
-
-```bash
-curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary "SELECT currentUser() FORMAT TabSeparated" \
-  "$MEMHOUSE_URL/?readonly=1"
-# prints e.g. alice  →  your rooms are messages_alice, sessions_alice, tool_calls_alice
-```
-
-**Keep the SQL heredoc quoted (`<<'SQL'`) and put the real name in the text.** This used to
-say "substitute it into every table name below" and show `messages_$MEM_ME`, which cannot
-expand inside a quoted heredoc — so the agent unquotes it, and then the SEARCH TERMS expand
-too. Both instances driving this skill did exactly that, unprompted, on the first attempt.
-Measured consequences, from `system.query_log`:
+**Keep the SQL heredoc quoted (`<<'SQL'`).** This skill once told the agent to substitute
+a shell variable into the table names, which cannot expand inside a quoted heredoc — so
+the agent unquotes it, and then the SEARCH TERMS expand too. Both instances driving this
+skill did exactly that, unprompted, on the first attempt. Measured consequences, from
+`system.query_log`:
 
 - a term containing `$home` became the empty string, so `LIKE '%%'` matched **every row**
   and reported hits with exit 0 — silently wrong, not an error;
 - a term containing a backtick **executed the command inside it**.
 
-A user's search term is arbitrary text. With the heredoc quoted and the room name written
-out, neither can happen.
+A user's search term is arbitrary text. With the heredoc quoted, neither can happen.
 
 **There is no `sessions_v` object.** The session rollup is a saved query over those same
 rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
@@ -98,13 +88,10 @@ both rooms and a trailing `SETTINGS join_use_nulls = 1`, so it is correct wherev
 paste it. `final=1` on the connection still matters for reads of the rooms THEMSELVES,
 which carry no FINAL of their own.
 
-If you hold `SELECT` on them, `all_messages` / `all_sessions` / `all_tool_calls` read
-across every member at once, narrowed to whatever grants you actually have — a Merge room
-reduces to the rooms the caller can read, so it fails closed rather than denying outright.
 
 ## How to search (the FTS columns)
 
-`messages_<you>` carries two MATERIALIZED lowercase copies of `text`, each with a
+`messages` carries two MATERIALIZED lowercase copies of `text`, each with a
 text index — search those, display `text`:
 
 - `text_ngram` (ngram index) → substring match: `text_ngram LIKE '%term%'`
@@ -120,8 +107,8 @@ phrase → one `LIKE` clause for the whole phrase.
 SELECT m.ts, m.source, m.project, m.role, m.session_id,
        s.name AS session,
        substring(m.text, 1, 300) AS snippet
-FROM messages_<you> AS m
-LEFT JOIN sessions_<you> AS s USING (session_id)
+FROM messages AS m
+LEFT JOIN sessions AS s USING (session_id, user_id)
 WHERE m.text_ngram LIKE '%postgres%' AND m.text_ngram LIKE '%migration%'
 ORDER BY m.ts DESC
 LIMIT 30
@@ -132,7 +119,7 @@ FORMAT PrettyCompact
 
 ```sql
 SELECT ts, project, session_id, substring(text, 1, 200) AS snippet
-FROM messages_<you>
+FROM messages
 WHERE hasToken(text_word, 'rls')
   AND source = 'claude-code'
   AND ts > now() - INTERVAL 14 DAY
@@ -144,12 +131,12 @@ FORMAT PrettyCompact
 ### Example 3 — which sessions mention it most (then drill in)
 
 ```sql
-SELECT m.session_id, any(s.name) AS session, any(m.project) AS project,
+SELECT m.session_id, m.user_id, any(s.name) AS session, any(m.project) AS project,
        count() AS hits, max(m.ts) AS last_hit
-FROM messages_<you> AS m
-LEFT JOIN sessions_<you> AS s USING (session_id)
+FROM messages AS m
+LEFT JOIN sessions AS s USING (session_id, user_id)
 WHERE m.text_ngram LIKE '%clickhouse cache%'
-GROUP BY m.session_id
+GROUP BY m.session_id, m.user_id
 ORDER BY hits DESC
 LIMIT 10
 FORMAT PrettyCompact
@@ -163,14 +150,14 @@ FORMAT PrettyCompact
   `cursor`, `cursor-agent`, `vscode`, `zed`, `opencode`, `gemini-cli`,
   `windsurf`, `antigravity`, `copilot-cli`, `goose`, `kiro`, …)
 - Skip subagent noise → `AND NOT m.is_subagent`
-- Only user/assistant text lives in `messages_<you>`; tool invocations are in
-  `tool_calls_<you>` (`tool_name`, `args`) — search `args ILIKE '%term%'` there
+- Only user/assistant text lives in `messages`; tool invocations are in
+  `tool_calls` (`tool_name`, `args`) — search `args ILIKE '%term%'` there
   only if the user explicitly wants tool calls searched.
 
 ## Output
 
 Summarize hits grouped by session (name, source, project, date, 1–2 best
 snippets each) and give the total hit count. Offer to pull the full transcript
-of the best session (`SELECT role, text FROM messages_<you> WHERE session_id = '…'
+of the best session (`SELECT role, text FROM messages WHERE session_id = '…'
 ORDER BY seq`). If zero hits, retry with broader/fewer terms and report the
-corpus size (`SELECT count() FROM messages_<you>`).
+corpus size (`SELECT count() FROM messages`).

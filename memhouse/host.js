@@ -1,7 +1,7 @@
 // Which machine shipped this row.
 //
 // All of one member's machines ship into that member's rooms — that is the point of the
-// per-member layout — and the `host` column is the only thing telling them apart. So the
+// shared-house layout — and the `host` column is the only thing telling them apart. So the
 // value has to be BOTH unique per machine and stable across that machine's lifetime.
 //
 // It used to be derived, `sha256(hostname|platform|arch)`, and that fails in both
