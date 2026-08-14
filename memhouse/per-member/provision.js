@@ -44,7 +44,7 @@ catch {
   console.error(`  From an npm install:  ${require('./rooms').installCommand()}`);
   process.exit(2);
 }
-const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS } = require('./rooms');
+const { ROOM_TYPES, mergeRooms, assertUsableMember, MEMBER_PRIVS, MEMBER_PIN } = require('./rooms');
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
@@ -226,47 +226,20 @@ async function main() {
   }
   console.log(`[mem] granted ${MEMBER_PRIVS} on 3 rooms to '${member}'; SELECT is the only re-grantable one`);
 
-  // 2b. A settings profile with CEILINGS, not just defaults.
-  //
-  // Every isolation test passed on confidentiality and none existed for availability: a
-  // member could `SETTINGS max_memory_usage=100000000000`, `max_execution_time=0` and
-  // `max_threads=64` on a shared house, and take the server down for everyone. The
-  // constraint form (`MAX`) is what makes it a ceiling — a plain default is advisory and a
-  // member simply overrides it, which is what they were doing.
-  //
-  // Generous on purpose: a full re-ship of a large house is a big INSERT, and the point is
-  // to stop one member exhausting the box, not to make honest work fail.
-  // CREATE ... OR REPLACE, which this used, DETACHES every user already assigned to the
-  // profile. One shared profile plus a replace on every provision meant that adding a
-  // second member silently stripped the first member's ceilings — measured: provision
-  // kyle, then provision lena, and `SHOW CREATE USER kyle` no longer carries the profile
-  // at all. In a three-member house only the most recently provisioned member had any
-  // limit, and nothing said so.
-  //
-  // CREATE IF NOT EXISTS + ALTER updates the same object in place and keeps every existing
-  // assignment, so one provision now brings ALL members up to the current settings —
-  // which is also what makes the async_insert pin reach members provisioned earlier.
-  // SETTINGS NONE first, because ALTER only upserts what it lists: a setting dropped from
-  // MEMBER_PROFILE_SETTINGS in a later version would otherwise stay enforced forever on
-  // every upgraded house, and anything an operator had added to a profile of the same name
-  // would survive too. Clearing then applying gives the same absolute state OR REPLACE had,
-  // without its detachment.
-  //
-  // The gap between the two statements is admin-only and sub-second — but it is not
-  // self-healing: a crash or a dropped connection between them leaves the profile EMPTY,
-  // so every member is unbounded until someone provisions again. Nothing here notices, and
-  // `doctor` does not check the profile. Re-run provision if one dies mid-way.
+  // 2b. The one server-side setting a member carries, on the USER — there is no settings
+  // profile any more. The shared `memhouse_member` profile earned its removal: OR REPLACE
+  // detached every previously-assigned member, the fix opened an append-only trap and a
+  // crash window, and the name was server-global so two houses on one server rewrote each
+  // other's ceilings. The ceilings themselves are gone too — bounding a member's queries
+  // is the server operator's policy, not memhouse's. What remains is the provenance pin;
+  // see MEMBER_PIN in rooms.js for why it is correctness rather than policy.
   try {
-    await client.command({ query: `CREATE SETTINGS PROFILE IF NOT EXISTS ${MEMBER_PROFILE}` });
-    await client.command({ query: `ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS NONE` });
-    await client.command({ query: `ALTER SETTINGS PROFILE ${MEMBER_PROFILE} SETTINGS ${MEMBER_PROFILE_SETTINGS}` });
-    await client.command({ query: `ALTER USER ${member} SETTINGS PROFILE '${MEMBER_PROFILE}'` });
-    console.log(`[mem] settings profile '${MEMBER_PROFILE}' applied to '${member}' (memory, time and thread ceilings)`);
+    await client.command({ query: `ALTER USER ${member} ADD SETTING ${MEMBER_PIN}` });
+    console.log(`[mem] pinned async_insert=0 on '${member}' (keeps the user_id stamp honest)`);
   } catch (e) {
-    // A server where the admin cannot create profiles still gets a working member; say so
-    // rather than failing the provision.
-    console.log(`[mem] note: could not apply the '${MEMBER_PROFILE}' settings profile — ${e.message}`);
-    console.log('[mem] the member works, but nothing bounds their query resources on this server');
+    // A server where the admin cannot ALTER USER still gets a working member; say so.
+    console.log(`[mem] note: could not pin async_insert on '${member}' — ${e.message}`);
+    console.log('[mem] async inserts from this member would store an empty user_id; keep clients at async_insert=0');
   }
 
   // 3. Merge rooms

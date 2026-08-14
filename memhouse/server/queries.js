@@ -925,6 +925,12 @@ async function rawQuery(sql) {
     // Cut the result off rather than failing a query that was legitimately large.
     result_overflow_mode: 'break',
     max_execution_time: 30,
+    // Result caps bound what LEAVES the server; this bounds what the query does inside
+    // it — a huge GROUP BY hits none of the caps above while eating the box's memory.
+    // Used to come from the member settings profile; that object is gone (it detached
+    // members on replace and its name was server-global), so the one caller that pipes
+    // arbitrary SQL carries its own ceiling.
+    max_memory_usage: 8000000000,
   });
   const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
   return { columns, rows, count: rows.length, truncated: rows.length >= RAW_MAX_ROWS };

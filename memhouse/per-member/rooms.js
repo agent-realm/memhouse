@@ -39,41 +39,6 @@ const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
 const MEMBER_PRIVS = 'SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD COLUMN, OPTIMIZE';
 
 /**
- * Resource ceilings for a member, as a settings profile.
- *
- * Here for the same reason MEMBER_PRIVS is here: there are two paths that provision a
- * house — provision.js and `install --print-sql` — and a change made to one of them and
- * not the other has now happened eight times. Anything a member is GIVEN belongs in this
- * file, so both paths read the same definition.
- *
- * MIN..MAX, not CONST and not MAX alone.
- *
- * A plain default is advisory — a member writes `SETTINGS max_memory_usage = …` on their
- * query and overrides it. MAX alone is not enough either: in ClickHouse **0 means
- * unlimited** for these, and 0 satisfies any MAX, so `SETTINGS max_memory_usage = 0`
- * removed the ceiling entirely. MIN 1 closes that.
- *
- * CONST closes it too and was tried first — but CONST refuses EVERY change, including the
- * server's own. `rawQuery` in memhouse/server/queries.js pins max_result_rows and
- * max_execution_time to protect the dashboard from an unbounded query, and under CONST
- * those pins were refused with Code 452, so /api/query returned an error for every input
- * on any house provisioned after that change. A ceiling has to stop a member RAISING the
- * limit while still letting anyone LOWER it.
- *
- * max_memory_usage is per QUERY; max_memory_usage_for_user bounds the member across
- * concurrent queries, without which N parallel queries x the per-query ceiling is
- * unbounded.
- *
- * Limits are generous on purpose: the point is to stop one member exhausting a shared
- * server, not to make an honest full re-ship fail — a 20M-row scan runs inside them.
- *
- * KNOWN GAP, deliberately not closed here: ALTER UPDATE, ALTER DELETE and OPTIMIZE are in
- * MEMBER_PRIVS and execute in the background merge pool, where these per-query settings do
- * not apply. A member looping `OPTIMIZE … FINAL` on a large room can still load the box.
- * Bounding that needs server-level merge-pool configuration, which is the operator's, not
- * something a per-member profile can express.
- */
-/**
  * The global-install command that will actually work HERE.
  *
  * Every site that printed `npm install -g memhouse --allow-scripts=better-sqlite3` printed
@@ -96,31 +61,25 @@ function installCommand() {
   return base;
 }
 
-const MEMBER_PROFILE = 'memhouse_member';
-const MEMBER_PROFILE_SETTINGS = [
-  'max_memory_usage = 8000000000 MIN 1 MAX 8000000000',
-  'max_memory_usage_for_user = 16000000000 MIN 1 MAX 16000000000',
-  'max_execution_time = 600 MIN 1 MAX 600',
-  'max_threads = 16 MIN 1 MAX 16',
-  'max_result_rows = 10000000 MIN 1 MAX 10000000',
-  // Provenance, pinned server-side rather than trusted to every client.
-  //
-  // `user_id MATERIALIZED currentUser()` is what records who wrote a row — but a
-  // MATERIALIZED column is computed during the INSERT, and an ASYNC insert flushes
-  // outside that context: measured on 25.11.9.34, `async_insert=1` stores user_id as the
-  // EMPTY STRING while a sync insert on the same table stamps correctly. An unattributed
-  // row is invisible to every identity-bound path at once, including its own owner's
-  // `reset`.
-  //
-  // The shipper already passes async_insert=0 on every insert, so memhouse itself was
-  // never the risk. The risk is everything ELSE holding a member credential — an agent
-  // following the /memhouse:sql skill, a migration script, a psql-habit one-liner. CONST
-  // makes the house refuse (SETTING_CONSTRAINT_VIOLATION) instead of silently accepting
-  // rows nobody owns, which is the difference between a guarantee and a convention.
-  // `doctor` still checks for blank user_id — that stays, as the detector for rows
-  // written before this profile existed.
-  'async_insert = 0 CONST',
-].join(', ');
+// The ONE server-side setting a member carries, applied directly on the user — there is
+// no settings profile. There used to be one (`memhouse_member`, resource ceilings plus
+// this pin), and the shared object earned its removal three times over: CREATE OR REPLACE
+// detached every previously-assigned member (only the last-provisioned member ever had
+// ceilings), fixing that opened an append-only trap and a crash window, and the profile
+// NAME is server-global — two memhouse houses on one ClickHouse silently shared one
+// profile, each provision rewriting the other's. A setting on the user has none of those
+// failure modes. Resource ceilings went with it: bounding a member's queries is the
+// server operator's policy, not memhouse's.
+//
+// This pin stays because it is correctness, not policy. `user_id MATERIALIZED
+// currentUser()` is computed during the INSERT, and an ASYNC insert flushes outside that
+// context — measured on 25.11.9.34, `async_insert=1` stores user_id as the EMPTY STRING
+// while a sync insert stamps correctly. An unattributed row is invisible to every
+// identity-bound path at once, including its own owner's `reset`. The shipper always
+// passes async_insert=0; this guards every OTHER holder of the credential. CONST refuses
+// the override (SETTING_CONSTRAINT_VIOLATION); a client that never mentions the setting
+// is simply held at 0 and its insert lands stamped.
+const MEMBER_PIN = 'async_insert = 0 CONST';
 
 // ClickHouse usernames are permissive; room names are not. Refuse anything that would
 // need quoting or could change how a Merge regex or a name-splitter reads.
@@ -246,7 +205,7 @@ function mergeRooms() {
 }
 
 module.exports = {
-  MEMBER_PRIVS, installCommand, MEMBER_PROFILE, MEMBER_PROFILE_SETTINGS,
+  MEMBER_PRIVS, installCommand, MEMBER_PIN,
   ROOM_TYPES, READ_SETTINGS, assertUsableMember,
   sessionsRollup, roomNames, currentUser, resolveRooms, mergeRooms,
 };
