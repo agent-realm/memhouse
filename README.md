@@ -293,6 +293,16 @@ In constellation terms (`TERMINOLOGY.md`) memhouse is an **agency**: a **house**
 alone would hold; the shipper is what makes it act. It competes with
 memory-house; if it wins, it becomes memory-house v4.
 
+## What's supported
+
+| Surface | Status |
+|---|---|
+| macOS | primary — developed and driven here daily |
+| Linux | real — installs, ships, `service install` (systemd `--user`), rootless podman `deploy --local`; exercised on Debian and Ubuntu machines |
+| Windows | **untested** — the adapters declare Windows paths but no one has run a single install; treat it as unknown until this row changes |
+| ClickHouse | 25.11 and 26.x, both in CI; 26.2+ needs no flags, 25.x needs the text-index flag the shipper already passes |
+| Node | ≥ 20.19 today; the native-binding requirement (`--allow-scripts=better-sqlite3`) is slated to disappear with `node:sqlite` |
+
 ## Heritage & license
 
 Built on [agentlytics](https://github.com/f/agentlytics) by Fatih Kadir Akın (MIT)
