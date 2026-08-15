@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.9.0 — 2026-08-16
 
 **`node:sqlite`.** Breaking on the Node floor, and the reason `npm i -g memhouse` is
 now the whole install.
