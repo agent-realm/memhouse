@@ -50,14 +50,19 @@ const MEMBER_PIN = 'async_insert = 0 CONST';
 /**
  * The global-install command that will actually work HERE.
  *
- * Every site that printed `npm install -g memhouse --allow-scripts=better-sqlite3` printed
- * a line that fails with EACCES on any distro-packaged Node, because the global prefix is
- * root-owned — measured on a clean Ubuntu machine, exit 243. `sudo` is right for exactly
- * one of the two causes and makes the other worse, and what tells them apart is who owns
- * the prefix — so look, rather than guess.
+ * The flag half of this is gone: the command carried `--allow-scripts=better-sqlite3`
+ * for as long as SQLite was a native module, and omitting it silently cost five
+ * adapters. `node:sqlite` needs no install script, so the base command is now the plain
+ * one everybody already types.
+ *
+ * The `sudo` half stays, because it was never about the flag. A bare install fails with
+ * EACCES on any distro-packaged Node, because the global prefix is root-owned — measured
+ * on a clean Ubuntu machine, exit 243. `sudo` is right for exactly one of the two causes
+ * and makes the other worse, and what tells them apart is who owns the prefix — so look,
+ * rather than guess.
  */
 function installCommand() {
-  const base = 'npm install -g memhouse --allow-scripts=better-sqlite3';
+  const base = 'npm install -g memhouse';
   try {
     const { execFileSync } = require('child_process');
     const prefix = execFileSync('npm', ['prefix', '-g'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();

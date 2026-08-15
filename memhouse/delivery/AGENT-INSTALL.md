@@ -7,21 +7,21 @@ in order; every command is copy-pasteable.
 machine it runs on — which editors have sessions, whether a ClickHouse answers, whether
 docker or podman exists — and states the one route that applies. This file is the static
 long-form version and assumes a reachable ClickHouse already exists, which is the case
-`deploy --local` was added to remove. Prereqs: Node >= 20.19 and a reachable
+`deploy --local` was added to remove. Prereqs: Node >= 24 and a reachable
 ClickHouse >= 26.2 (local server, Cloud, or a kernel house — see
 `kernel-install.md` for the kernel path). No checkout required — memhouse is on npm.
 
 ## 1. Install
 
 ```bash
-npm install -g memhouse --allow-scripts=better-sqlite3
+npm install -g memhouse
 ```
 
-`--allow-scripts=better-sqlite3` is required, not cosmetic. Five adapters (cursor,
-goose, opencode, zed, antigravity) read SQLite session stores, and npm 12 blocks
-the install script that builds the native binding. Without it those five silently
-return zero sessions and you ship a partial history. Verify with step 4 —
-`memhouse discover` names any adapter it had to skip.
+No flags. This line used to require `--allow-scripts=better-sqlite3`, without which
+five adapters (cursor, goose, opencode, zed, antigravity) silently returned zero
+sessions and you shipped a partial history. SQLite now comes from `node:sqlite`, which
+is part of Node, so there is no install script and nothing to allow. Step 4 still
+verifies — `memhouse discover` names any adapter it had to skip, for any reason.
 
 On `EACCES`, decide by **who owns the prefix root**. Not the path — Homebrew's
 prefix is `/usr/local` on Intel and `/opt/homebrew` on Apple Silicon and is
@@ -34,7 +34,7 @@ ls -ld "$(npm prefix -g)"     # the prefix ROOT decides
 ```
 
 Prefix root owned by `root` → a system-managed Node; re-run as
-`sudo npm install -g memhouse --allow-scripts=better-sqlite3`.
+`sudo npm install -g memhouse`.
 
 Prefix root owned by the current user → the prefix is theirs (Homebrew, fnm, nvm,
 volta), so the root-owned file npm tripped on is a stray from an earlier `sudo npm`
@@ -42,8 +42,8 @@ and another `sudo` adds more. Repair that path instead:
 `sudo chown -R "$(id -u):$(id -g)" <path npm named>` (same for `~/.npm`).
 
 From a checkout instead (contributors): `npm install --no-audit --no-fund` in the
-repo root — its `allowScripts` field already covers the binding — then substitute
-`node bin/memhouse.js` for `memhouse` below.
+repo root — nothing compiles — then substitute `node bin/memhouse.js` for `memhouse`
+below.
 
 ## 2. Configure the connection
 
@@ -77,9 +77,11 @@ memhouse discover     # which adapters were read, and which were SKIPPED
 memhouse stats        # per-source counts now in the house
 ```
 
-Read `discover` first. It prints one line per editor it found sessions for, and
-warns by name about any adapter it had to skip — that warning is the only signal
-that step 1's `--allow-scripts` flag was missed and five editors are dark.
+Read `discover` first. It prints one line per editor it found sessions for, and warns
+by name about any adapter it had to skip. On a healthy install that list is empty: the
+one cause that could take five adapters out at once — a missing native SQLite binding —
+no longer exists, so anything named here is a single editor's own store (locked by a
+running editor, corrupt, or on a schema this parser does not know).
 
 `stats` should show one row per source (claude-code, codex, gemini-cli, …) with
 non-zero sessions/messages. Or verify by SQL — rooms are named for your ClickHouse

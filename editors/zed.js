@@ -2,16 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-// Required lazily. A top-level require makes this native module a load-time dependency
-// of the whole adapter set: editors/index.js imports every adapter, so one missing
-// binding threw before any adapter ran and `discover` reported ZERO editors — losing the
-// eleven that need no native code at all. The adapterErrors path exists to degrade one
-// adapter at a time, and a top-level throw walks straight past it.
-let Database = null;
-function openDb(...a) {
-  if (!Database) Database = require('better-sqlite3');
-  return new Database(...a);
-}
+const { openReadOnly, bytesOf } = require('./sqlite');
 const adapterErrors = require('./adapter-errors');
 
 // Zed stores data in different locations depending on the platform
@@ -72,13 +63,13 @@ function decompressZstd(buf) {
 }
 
 // ============================================================
-// Query SQLite using better-sqlite3 (cross-platform)
+// Query SQLite using node:sqlite (cross-platform, no native dependency)
 // ============================================================
 
 function queryDb(sql) {
   if (!fs.existsSync(THREADS_DB)) return [];
   try {
-    const db = openDb(THREADS_DB, { readonly: true });
+    const db = openReadOnly(THREADS_DB);
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
@@ -100,7 +91,7 @@ function getThreadColumns() {
   if (threadColumns) return threadColumns;
   if (!fs.existsSync(THREADS_DB)) return new Set();
   try {
-    const db = openDb(THREADS_DB, { readonly: true });
+    const db = openReadOnly(THREADS_DB);
     const cols = db.prepare('PRAGMA table_info(threads)').all().map((r) => r.name);
     db.close();
     // PRAGMA on a missing or renamed table SUCCEEDS with zero rows rather than
@@ -131,10 +122,14 @@ function resetCache() {
 function queryBlob(id) {
   if (!fs.existsSync(THREADS_DB)) return null;
   try {
-    const db = openDb(THREADS_DB, { readonly: true });
+    const db = openReadOnly(THREADS_DB);
     const row = db.prepare('SELECT data FROM threads WHERE id = ?').get(id);
     db.close();
-    return row ? row.data : null;
+    // As a Buffer, not the raw Uint8Array node:sqlite hands back. Both callers below
+    // treat it as one: the uncompressed path calls .toString('utf-8') on it, which on a
+    // bare Uint8Array yields "40,181,47,…" — the byte VALUES, comma-joined — and the
+    // thread would then fail JSON.parse as if it were corrupt.
+    return row ? bytesOf(row.data) : null;
   } catch (e) {
     // This is the message-blob read. A silent null here becomes a zero-message
     // session, which overwrites the stored transcript on re-ship.

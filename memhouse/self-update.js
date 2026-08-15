@@ -6,10 +6,10 @@
 // of the CLI you just typed, not the version the daemon is running. On macminim a shipper
 // ran 1d16h out of a directory that had been MOVED — the fix was live, the machine was not.
 //
-// npm's own `postinstall` is the obvious hook and the wrong one. Install scripts are
-// blocked by default (`--allow-scripts`), which is the very condition this product already
-// has to work around, and a package install that restarts a user's daemons is a surprise
-// even when it works.
+// npm's own `postinstall` is the obvious hook and the wrong one. npm >= 12 blocks install
+// scripts by default, so it would not run at all on a stock install — the same default
+// that cost this product its SQLite binding until `node:sqlite` removed the need for one —
+// and a package install that restarts a user's daemons is a surprise even when it works.
 //
 // So the daemon notices for itself. Once per loop pass it compares what is on disk against
 // what it booted with, and when they differ it hands over:

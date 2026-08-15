@@ -226,12 +226,17 @@ Most of the last forty defects came from disbelieving a fix, not from new ground
 Drive each through the pane and read the result. Do not accept exit 0 as a pass.
 
 ```
-discover      names editors with sessions, and any adapter skipped for a missing
-              native binding — install WITHOUT --allow-scripts=better-sqlite3 once
-              and confirm it NAMES the skipped adapters rather than silently
-              reporting zero. It reports five (zed, opencode, antigravity, cursor,
-              goose); windsurf also requires the binding but is excluded upstream
-              in editors/index.js because its getChats() is RPC. Five is correct
+discover      names editors with sessions, and ZERO skipped adapters. Install with
+              `npm i -g memhouse` and no flags whatsoever, then assert the five
+              SQLite-backed adapters (zed, opencode, antigravity, cursor, goose)
+              are LISTED WITH COUNTS for every one of them the machine actually
+              has — not merely "no error". This check used to be the opposite:
+              install without --allow-scripts=better-sqlite3 and confirm the five
+              were NAMED as skipped. That flag, and the missing-native-binding
+              class it guarded, no longer exist — SQLite is node:sqlite. Any
+              adapter named as skipped here is now a per-store failure (a locked
+              state.vscdb, a corrupt file, an unknown schema) and is a real defect
+              to chase, not an install step someone forgot
 doctor        every line a check mark on a healthy house; on a broken one, the
               failing line must name the fix
 status        counts and freshness; --json parses
@@ -353,9 +358,11 @@ specifically intend to rebuild, and check the credential age first. Three-week-o
 session data is still real session data.
 
 Install from the **published tarball**, not a checkout — `npm pack`, then
-`npm install -g <tgz> --allow-scripts=better-sqlite3`. That is what a user gets, and it
+`npm install -g <tgz>` with no flags and no npm config. That is what a user gets, and it
 differs from a worktree in ways that have mattered: `public/assets/` is gitignored and
-built by `prepack`, so a worktree can be testing a stale dashboard bundle.
+built by `prepack`, so a worktree can be testing a stale dashboard bundle. The tarball
+must also carry no native dependency — `tar tzf <tgz> | grep -i sqlite` finds nothing,
+and the install's node_modules contains no `.node` file.
 
 There is no ClickHouse on testbed. Either `deploy --local --house-port <port>` (podman,
 rootless — check the lingering warning) or point at a lab over the tunnel.

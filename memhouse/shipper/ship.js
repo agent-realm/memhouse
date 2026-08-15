@@ -792,18 +792,17 @@ async function runShip(client, opts = {}) {
   return { sessions, skipped, msgRows, toolRows, unreadable };
 }
 
-// Warn once per adapter per pass. `warned` carries across the two call sites so a
-// dead binding is not reported twice in the same run.
+// Warn once per adapter per pass. `warned` carries across the two call sites so one
+// unreadable store is not reported twice in the same run.
+//
+// The loud case used to be a missing better-sqlite3 binding, which took five adapters
+// out together and came with a reinstall command attached. SQLite ships with Node now;
+// what is left is per-store, and each error already says what happened.
 function reportAdapterErrors(warned) {
   const errors = getAdapterErrors().filter((e) => !warned.has(e.source));
   if (!errors.length) return;
   for (const e of errors) warned.add(e.source);
-  const noBinding = errors.filter((e) => e.missingBinding).map((e) => e.source);
-  if (noBinding.length) {
-    console.log(`[memhouse] WARNING: ${noBinding.length} adapter(s) skipped, sessions NOT shipped — better-sqlite3 has no native binding: ${noBinding.join(', ')}`);
-    console.log(`[memhouse]          fix: ${require('../house/house').installCommand()}`);
-  }
-  for (const e of errors.filter((x) => !x.missingBinding)) {
+  for (const e of errors) {
     console.log(`[memhouse] WARNING: ${e.source} skipped — ${e.message}`);
   }
 }

@@ -80,12 +80,12 @@
 
     <div class="cmd" style="max-width:620px">
       <span class="prompt">$</span>
-      <code id="hero-cmd">npm install -g memhouse --allow-scripts=better-sqlite3</code>
+      <code id="hero-cmd">npm install -g memhouse</code>
       <button class="copy" data-copy="#hero-cmd">copy</button>
     </div>
     <p class="hero-note">
       then <b>memhouse onboard</b> — discover, configure, ship, start.<br>
-      keep <b>--allow-scripts</b>: five adapters read SQLite and need the native binding.
+      no flags, no build step, nothing native. needs <b>Node 24+</b>.
     </p>
 
     <div class="tiles">
@@ -525,8 +525,8 @@
 
     <div class="split">
       <div class="term">
-<pre><span class="c"># install (keep the flag — five adapters read SQLite)</span>
-<span class="p">$</span> <span class="k">npm install -g memhouse --allow-scripts=better-sqlite3</span>
+<pre><span class="c"># install</span>
+<span class="p">$</span> <span class="k">npm install -g memhouse</span>
 
 <span class="c"># no ClickHouse yet? onboard offers to stand one up</span>
 <span class="p">$</span> <span class="k">memhouse deploy --local</span>
@@ -552,7 +552,7 @@
         </p>
         <div class="cmd" style="margin:14px 0 22px">
           <span class="prompt">$</span>
-          <code id="npx-cmd">npx --allow-scripts=better-sqlite3 -y memhouse discover</code>
+          <code id="npx-cmd">npx -y memhouse discover</code>
           <button class="copy" data-copy="#npx-cmd">copy</button>
         </div>
 
@@ -617,7 +617,7 @@
       <p>One command to see what every agent on your machines has actually been doing — and to let the next one read it.</p>
       <div class="cmd">
         <span class="prompt">$</span>
-        <code id="cta-cmd">npm install -g memhouse --allow-scripts=better-sqlite3</code>
+        <code id="cta-cmd">npm install -g memhouse</code>
         <button class="copy" data-copy="#cta-cmd">copy</button>
       </div>
       <div class="cta-row" style="justify-content:center;margin-top:20px">
@@ -642,16 +642,19 @@
       </details>
 
       <details>
-        <summary>Why do I need <code>--allow-scripts=better-sqlite3</code>?</summary>
-        <p>Five adapters — Cursor, Goose, OpenCode, Zed and Antigravity — read sessions out of SQLite files,
-        and <code>better-sqlite3</code> builds its native binding from an install script. npm 12 blocks
-        install scripts by default, so without the flag those five read nothing and your history is partial
-        by exactly those five editors.</p>
-        <p>Up to 0.4.3 it was worse than that: the missing module threw at import time, before any adapter
-        ran, so <code>discover</code> reported <em>zero</em> editors on a machine that had plenty. The four
-        remaining offenders now load it lazily, so the eleven adapters needing no native code work either
-        way and the five that do are named as skipped. Keep the flag anyway — a partial history that looks
-        complete is the failure worth avoiding.</p>
+        <summary>Do I need any flags, or a compiler?</summary>
+        <p>No. <code>npm install -g memhouse</code> with nothing after it is the complete install, and
+        nothing in it compiles.</p>
+        <p>It was not always so. Five adapters — Cursor, Goose, OpenCode, Zed and Antigravity — read
+        sessions out of SQLite files, and that used to mean <code>better-sqlite3</code>, whose native
+        binding is built by an npm install script. npm 12 blocks install scripts by default, so the install
+        needed <code>--allow-scripts=better-sqlite3</code> — a flag npm never remembered, that had to be
+        re-typed on every upgrade, and whose omission cost you those five editors with no error at all.
+        Up to 0.4.3 it was worse still: the missing module threw at import time, before any adapter ran, so
+        <code>discover</code> reported <em>zero</em> editors on a machine that had plenty.</p>
+        <p>SQLite now comes from <code>node:sqlite</code>, which is part of Node itself and stable in 24 —
+        hence the Node 24 floor. There is no binding to build, no flag to forget, and no way for an adapter
+        to go dark for want of one.</p>
       </details>
 
       <details>

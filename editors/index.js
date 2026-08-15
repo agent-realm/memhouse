@@ -26,58 +26,19 @@ for (const editor of editors) {
 
 // Per-adapter failures from the last getAllChats() pass. An adapter that throws is
 // skipped so one broken editor cannot take down a scan, but the failure is recorded
-// here rather than discarded: a missing better-sqlite3 native binding and an editor
-// the user simply does not have both produce zero sessions, and only this tells them
-// apart. See getAdapterErrors().
-let adapterErrors = [];
-
-// better-sqlite3 ships a prebuilt binary via an install script. npm >= 12 blocks
-// install scripts by default, so a plain `npm i -g memhouse` leaves no binding and
-// every SQLite-backed adapter reads zero sessions.
-const MISSING_BINDING = /Could not locate the bindings file|Cannot find module 'better-sqlite3'/;
-
-// Adapters that read sessions out of a SQLite store, so a dead binding costs
-// sessions. Membership is narrower than `grep -l better-sqlite3 editors/*.js`:
-// windsurf/devin also requires better-sqlite3, but only in getDevinApiKey() for
-// usage — its getChats() is pure language-server RPC, so its sessions survive a
-// broken binding and listing it here would raise a false alarm. antigravity is
-// listed because its *offline* chats come from SQLite, though its live cascades,
-// like devin's, come over RPC — a failure there is partial.
-// Held as module references, not strings, so the reported name always matches the
-// adapter's own `name`.
-const SQLITE_BACKED = [antigravity, cursor, goose, opencode, zed].map((m) => m.name);
-
-// Construct an in-memory database. Loading the module is not enough — better-sqlite3
-// resolves the native binding lazily, on first open.
+// here rather than discarded: an unreadable store and an editor the user simply does
+// not have both produce zero sessions, and only this tells them apart. See
+// getAdapterErrors().
 //
-// This only answers "can SQLite work at all". It deliberately cannot tell whether a
-// given editor's real store is readable: permissions, locking, corruption, and
-// SQLCipher all pass this probe and fail later. Those are reported by the adapters
-// themselves through adapter-errors.
-function probeSqlite() {
-  try {
-    const Database = require('better-sqlite3');
-    const db = new Database(':memory:');
-    db.close();
-    return { available: true };
-  } catch (e) {
-    const message = ((e && e.message) || String(e)).split('\n')[0];
-    return { available: false, message, missingBinding: MISSING_BINDING.test(message) };
-  }
-}
-
-// Cache only success. A failed probe must be retried: a long-running shipper daemon
-// that warned about a missing binding should notice once the user installs it,
-// rather than repeating the warning for the life of the process.
-let sqliteProbe = null;
-function sqliteStatus() {
-  if (sqliteProbe === null) {
-    const result = probeSqlite();
-    if (result.available) sqliteProbe = result;
-    return result;
-  }
-  return sqliteProbe;
-}
+// There used to be a second, coarser class beside those: better-sqlite3's native
+// binding could be missing outright, taking all five SQLite-backed adapters down at
+// once for a reason none of them could see, so a separate probe ran an in-memory open
+// and reported the verdict against every one of them. SQLite is `node:sqlite` now — it
+// arrives with Node and cannot go missing — so that probe, its MISSING_BINDING regex,
+// and the `missingBinding` flag they put on every error are gone. What remains is the
+// per-store reporting the adapters do themselves: permissions, locking, corruption and
+// schema drift are all still real and all still land here, one line per adapter.
+let adapterErrors = [];
 
 /**
  * Get all chats from all editor adapters, sorted by most recent first.
@@ -92,11 +53,7 @@ function getAllChats() {
       chats.push(...editorChats);
     } catch (e) {
       const message = (e && e.message) || String(e);
-      adapterErrors.push({
-        source: editor.name,
-        message: message.split('\n')[0],
-        missingBinding: MISSING_BINDING.test(message),
-      });
+      adapterErrors.push({ source: editor.name, message: message.split('\n')[0] });
     }
   }
 
@@ -110,27 +67,19 @@ function getAllChats() {
 }
 
 /**
- * Adapters that could not report their sessions: [{ source, message, missingBinding }].
+ * Adapters that could not report their sessions: [{ source, message, detail? }].
  * Empty when every adapter ran clean.
  *
  * Two sources, because there are two ways an adapter goes quiet. One throws out of
- * getChats() and is recorded during the pass. The other is a dead SQLite binding,
- * which throws nowhere at all — the adapters catch it internally — so it is probed
- * for directly and reported against every SQLite-backed adapter at once.
+ * getChats() and is recorded during the pass. The other catches its own failure — a
+ * locked state.vscdb, a thread blob that will not decompress, a schema the parser does
+ * not know — and reports it through the adapter-errors sink so the shipper knows not to
+ * overwrite a good stored transcript with a partial read.
  */
 function getAdapterErrors() {
   const errors = adapterErrors.slice();
   for (const e of adapterErrorSink.recorded()) {
-    errors.push({ source: e.source, message: e.message, detail: e.detail, missingBinding: MISSING_BINDING.test(e.message) });
-  }
-  const sqlite = sqliteStatus();
-  if (!sqlite.available) {
-    const already = new Set(errors.map((e) => e.source));
-    for (const source of SQLITE_BACKED) {
-      if (!already.has(source)) {
-        errors.push({ source, message: sqlite.message, missingBinding: sqlite.missingBinding });
-      }
-    }
+    errors.push({ source: e.source, message: e.message, detail: e.detail });
   }
   // One line per adapter, not one per failed query — a broken store is usually hit
   // many times in a single scan.
