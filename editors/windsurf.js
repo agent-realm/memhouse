@@ -484,13 +484,13 @@ function getDevinApiKey(appNames) {
           dbPath = path.join(HOME, '.config', appName, 'User', 'globalStorage', 'state.vscdb');
       }
       if (!fs.existsSync(dbPath)) continue;
-      const Database = require('better-sqlite3');
-      const db = new Database(dbPath, { readonly: true });
+      const { openReadOnly, textOf } = require('./sqlite');
+      const db = openReadOnly(dbPath);
       try {
         for (const key of keys) {
           const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key);
           if (!row) continue;
-          const parsed = JSON.parse(row.value);
+          const parsed = JSON.parse(textOf(row.value));
           if (parsed.apiKey) return parsed.apiKey;
         }
       } finally {

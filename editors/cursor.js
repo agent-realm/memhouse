@@ -1,13 +1,4 @@
-// Required lazily. A top-level require makes this native module a load-time dependency
-// of the whole adapter set: editors/index.js imports every adapter, so one missing
-// binding threw before any adapter ran and `discover` reported ZERO editors — losing the
-// eleven that need no native code at all. The adapterErrors path exists to degrade one
-// adapter at a time, and a top-level throw walks straight past it.
-let Database = null;
-function openDb(...a) {
-  if (!Database) Database = require('better-sqlite3');
-  return new Database(...a);
-}
+const { openReadOnly, textOf, bytesOf } = require('./sqlite');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -52,16 +43,16 @@ function hexToString(hex) {
 function readStoreMeta(db) {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get('0');
   if (!row) return null;
-  const hex = typeof row.value === 'string' ? row.value : Buffer.from(row.value).toString('hex');
+  const hex = typeof row.value === 'string' ? row.value : bytesOf(row.value).toString('hex');
   try {
     return JSON.parse(hexToString(hex));
   } catch {
-    try { return JSON.parse(row.value); } catch { return null; }
+    try { return JSON.parse(textOf(row.value)); } catch { return null; }
   }
 }
 
 function parseTreeBlob(data) {
-  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  const buf = bytesOf(data);
   const messageRefs = [];
   const childRefs = [];
   let offset = 0;
@@ -114,7 +105,10 @@ function collectStoreMessages(db, rootBlobId) {
     if (!row) return;
     const data = row.data;
     try {
-      const json = typeof data === 'string' ? JSON.parse(data) : JSON.parse(data.toString('utf-8'));
+      // textOf, not data.toString(): a message blob arrives as a Uint8Array, whose own
+      // toString() renders the bytes as "123,45,…" and would send every message in the
+      // tree down the tree-blob path below.
+      const json = JSON.parse(textOf(data));
       if (json && json.role) { allMessages.push(normalizeStoreMessage(json)); return; }
     } catch { /* tree blob */ }
     const { messageRefs, childRefs } = parseTreeBlob(data);
@@ -156,11 +150,11 @@ function getWorkspaceMap() {
 
 function getComposerHeaders(stateDbPath) {
   try {
-    const db = openDb(stateDbPath, { readonly: true });
+    const db = openReadOnly(stateDbPath);
     const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'composer.composerData'").get();
     db.close();
     if (!row) return [];
-    const data = JSON.parse(row.value);
+    const data = JSON.parse(textOf(row.value));
     return (data.allComposers || []).map((c) => ({
       composerId: c.composerId,
       name: c.name || null,
@@ -183,7 +177,7 @@ function getModelPreference(globalDb) {
   try {
     const row = globalDb.prepare("SELECT value FROM ItemTable WHERE key = 'cursor/lastSingleModelPreference'").get();
     if (!row) return null;
-    const pref = JSON.parse(row.value);
+    const pref = JSON.parse(textOf(row.value));
     return pref.composer || pref.agent || null;
   } catch { return null; }
 }
@@ -197,7 +191,7 @@ function getComposerBubbles(globalDb, composerId) {
   const bubbles = [];
   for (const row of rows) {
     try {
-      const obj = JSON.parse(row.value);
+      const obj = JSON.parse(textOf(row.value));
       bubbles.push(obj);
     } catch (e) {
       // Historically treated as "binary blob, skip", but a row that will not decode
@@ -286,7 +280,7 @@ function getChats() {
   // Source 1: ~/.cursor/chats store.db
   for (const { workspace, chatId, dbPath } of getAgentStoreChats()) {
     try {
-      const db = openDb(dbPath, { readonly: true });
+      const db = openReadOnly(dbPath);
       const meta = readStoreMeta(db);
       db.close();
       if (meta) {
@@ -325,7 +319,7 @@ function getChats() {
 
   // Source 2: workspaceStorage composers
   let globalDb = null;
-  try { globalDb = openDb(GLOBAL_STORAGE_DB, { readonly: true }); }
+  try { globalDb = openReadOnly(GLOBAL_STORAGE_DB); }
   catch (e) {
     // Absent is normal — Cursor may simply not be installed. Unreadable is not.
     if (fs.existsSync(GLOBAL_STORAGE_DB)) adapterErrors.record('cursor', e, GLOBAL_STORAGE_DB);
@@ -378,7 +372,7 @@ function getChats() {
 
 function getMessages(chat) {
   if (chat._type === 'agent-store') {
-    const db = openDb(chat._dbPath, { readonly: true });
+    const db = openReadOnly(chat._dbPath);
     const msgs = collectStoreMessages(db, chat._rootBlobId);
     db.close();
     // Use lastUsedModel as fallback for assistant messages without model info
@@ -391,7 +385,7 @@ function getMessages(chat) {
   }
 
   let globalDb;
-  try { globalDb = openDb(GLOBAL_STORAGE_DB, { readonly: true }); }
+  try { globalDb = openReadOnly(GLOBAL_STORAGE_DB); }
   catch (e) {
     // Returning [] unreported would let a re-ship overwrite this session's stored
     // transcript with nothing.
@@ -416,10 +410,10 @@ function getMessages(chat) {
 
 function getCursorAccessToken() {
   try {
-    const db = openDb(GLOBAL_STORAGE_DB, { readonly: true });
+    const db = openReadOnly(GLOBAL_STORAGE_DB);
     const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'").get();
     db.close();
-    return row ? row.value : null;
+    return row ? textOf(row.value) : null;
   } catch { return null; }
 }
 

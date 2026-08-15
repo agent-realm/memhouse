@@ -7,13 +7,12 @@ ClickHouse. Nothing is proxied or intercepted. Then you can search every past
 session, see what it cost, and let an agent query its own history.
 
 ```bash
-npm install -g memhouse --allow-scripts=better-sqlite3
+npm install -g memhouse
 memhouse onboard
 ```
 
-That is the whole install. `onboard` finds your editors, sets up a house, ships,
-and starts the dashboard. **Don't drop `--allow-scripts`** — see
-[below](#the-allow-scripts-flag).
+That is the whole install — no flags, nothing to compile. `onboard` finds your
+editors, sets up a house, ships, and starts the dashboard.
 
 **On most Linux distros that first line needs `sudo`.** A distro-packaged Node puts
 its global prefix under `/usr`, which you do not own, so npm stops with `EACCES`.
@@ -22,7 +21,7 @@ Ubuntu machine:
 
 ```bash
 ls -ld "$(npm prefix -g)"     # root-owned? use sudo. Owned by you? do NOT — see EACCES below
-sudo npm install -g memhouse --allow-scripts=better-sqlite3
+sudo npm install -g memhouse
 ```
 
 If the prefix is yours (Homebrew, fnm, nvm, volta), `sudo` is the wrong fix and
@@ -149,13 +148,11 @@ memhouse update            # upgrade, restart the daemons, check the house schem
 memhouse update --check    # compare versions, change nothing
 ```
 
-A bare `npm i -g memhouse@latest` does one third of the job. It does not re-pass
-`--allow-scripts=better-sqlite3`, so the five SQLite adapters go quiet; it does not
-restart the daemons, which keep parsing with the code they booted with (a shipper here
-once ran 1d16h out of a directory that had been *moved*); and it does not check whether
-your house predates a room the new shipper needs. `update` does all three, and from a
-checkout it rebuilds `public/` — otherwise `git pull` serves you the previous release's
-dashboard forever.
+A bare `npm i -g memhouse@latest` does half the job. It does not restart the daemons,
+which keep parsing with the code they booted with (a shipper here once ran 1d16h out of
+a directory that had been *moved*); and it does not check whether your house predates a
+room the new shipper needs. `update` does both, and from a checkout it rebuilds
+`public/` — otherwise `git pull` serves you the previous release's dashboard forever.
 
 The daemons also notice on their own: each one compares the installed version against
 what it booted with and hands over — exiting under systemd/launchd so the supervisor
@@ -210,24 +207,22 @@ has it wrong, so an old house cannot be corrupted by a new shipper.
 
 ## Troubleshooting
 
-### The `--allow-scripts` flag
+### An editor reads zero sessions
 
-Five adapters — **cursor, zed, opencode, goose, antigravity** — read sessions out
-of SQLite files, and `better-sqlite3` builds its native binding from an install
-script. npm 12 blocks install scripts by default, so without the flag those five
-read nothing and you ship a partial history.
+Five adapters — **cursor, zed, opencode, goose, antigravity** — read sessions out of
+SQLite files. That used to mean `better-sqlite3`, whose native binding is built by
+an npm install script; npm 12 blocks install scripts by default, so a plain install left
+all five reading nothing and the fix was a flag
+(`--allow-scripts=better-sqlite3`) you had to re-type on every upgrade. SQLite is
+`node:sqlite` now — part of Node — so that failure class is gone along with the flag.
 
-(This said six and named windsurf, which is wrong: windsurf lists its sessions over
-language-server RPC and touches SQLite only to read a usage key, so a dead binding
-costs it numbers, not sessions. `editors/index.js` has the real list.)
-
-It is not silent: `memhouse discover` and `memhouse doctor` both name the skipped
-adapters. The other twelve adapters keep working.
-
-`npx` takes the same flag, before the package name:
+What can still go wrong is one store at a time: a `state.vscdb` locked by a running
+editor, a corrupt file, a schema a new editor release changed. None of it is silent —
+`memhouse discover` and `memhouse doctor` both name the skipped adapter and say why,
+and the other sixteen keep working.
 
 ```bash
-npx --allow-scripts=better-sqlite3 -y memhouse discover
+npx -y memhouse discover      # no flags here either
 ```
 
 ### `EACCES` on install
@@ -262,7 +257,7 @@ A rootless podman house has the same problem for the same reason, and
 ## Working from a checkout
 
 ```bash
-npm install            # the repo's allowScripts field covers the binding
+npm install            # two runtime deps, no build step
 node bin/memhouse.js …
 npm test               # syntax gate + unit checks
 ```
@@ -301,7 +296,7 @@ memory-house; if it wins, it becomes memory-house v4.
 | Linux | real — installs, ships, `service install` (systemd `--user`), rootless podman `deploy --local`; exercised on Debian and Ubuntu machines |
 | Windows | **untested** — the adapters declare Windows paths but no one has run a single install; treat it as unknown until this row changes |
 | ClickHouse | 25.11 and 26.x, both in CI; 26.2+ needs no flags, 25.x needs the text-index flag the shipper already passes |
-| Node | ≥ 20.19 today; the native-binding requirement (`--allow-scripts=better-sqlite3`) is slated to disappear with `node:sqlite` |
+| Node | **≥ 24** — SQLite comes from `node:sqlite`, which is stable in 24. It works flagless on 22.13+ but prints `ExperimentalWarning` on every command (measured on v22.23.2), and Node 20 is past EOL. There is no native dependency and no build step at any version. |
 
 ## Heritage & license
 

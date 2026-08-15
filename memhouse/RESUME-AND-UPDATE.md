@@ -95,18 +95,15 @@ original to duplicate the copy.
 
 ### The gap
 
-`npm i -g memhouse@latest` does one third of the job, and the other two thirds have each
-cost a real machine real sessions:
+`npm i -g memhouse@latest` does half the job, and the other half has cost a real machine
+real sessions:
 
-1. **`--allow-scripts=better-sqlite3` is not remembered.** Omit it on the upgrade and
-   `better-sqlite3` has no binding again — cursor, zed, opencode, goose and antigravity
-   read zero sessions on every pass afterwards.
-2. **The daemons keep running the old code.** See §3.
-3. **The house can be older than the shipper.** A newer shipper may need a column an
+1. **The daemons keep running the old code.** See §3.
+2. **The house can be older than the shipper.** A newer shipper may need a column an
    existing room lacks; it detects that and prints the rebuild, but only if something runs
    it.
 
-And from a checkout there is a fourth: `git pull` updates `ui/src` and leaves the built
+And from a checkout there is a third: `git pull` updates `ui/src` and leaves the built
 bundle in `public/`, so the dashboard serves the previous release however often it is
 restarted. A published tarball is immune — `prepack` builds `public/` before publish.
 
@@ -114,7 +111,7 @@ restarted. A published tarball is immune — `prepack` builds `public/` before p
 
 | Kind | Detected by | Action |
 |---|---|---|
-| `global` | under `npm prefix -g` | `npm i -g memhouse@latest --allow-scripts=better-sqlite3` |
+| `global` | under `npm prefix -g` | `npm i -g memhouse@latest` |
 | `checkout` | a `.git` at the root | `git pull --ff-only` → `npm install` → `npm run build` |
 | `local-dep` | `node_modules/memhouse`, not under the global prefix | refuse; print the right command for where it lives |
 | `npx` | `_npx` in the resolved path | refuse — the next `npx` resolves the registry anyway |

@@ -141,11 +141,15 @@ memory. None ingest agent sessions.
   into *installed skills*. Our skills must be chosen. One independent analysis of 270
   real sessions found **only 4.8% involved an explicit history query** — a pull-only
   model gets invoked rarely.
-- **Install weight — we are the heaviest in the category.** AgentsView, deja-vu and
-  ctx are single dependency-free binaries via Homebrew, Docker, `go install` or curl.
-  We are Node, need `--allow-scripts=better-sqlite3` (five adapters silently read
-  nothing without it), and additionally need a ClickHouse to point at. Our README
-  spends paragraphs on `EACCES`/`sudo` triage. That is a real adoption tax.
+- **Install weight — still the heaviest in the category, but half the tax is paid.**
+  AgentsView, deja-vu and ctx are single dependency-free binaries via Homebrew, Docker,
+  `go install` or curl. We are Node and need a ClickHouse to point at.
+  **Resolved 2026-08-16:** the native-dependency half is gone. `better-sqlite3` was
+  replaced by `node:sqlite`, so `npm i -g memhouse` with no flags is now a complete,
+  fully working install — no `--allow-scripts`, no build step, and no five-adapters-
+  silently-read-nothing failure mode. What remains of the tax is the runtime (Node,
+  not a static binary), the ClickHouse dependency, and the `EACCES`/`sudo` prefix
+  triage, which was never about the flag and is not fixable from our side.
 - **Semantic search.** AgentsView (opt-in index), claude-mem (Chroma),
   claude-history (local embedding model). We are FTS-only. Contested rather than
   settled — deja-vu made the same choice and was criticised for it on HN.

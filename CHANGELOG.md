@@ -4,6 +4,28 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+**`node:sqlite`.** Breaking on the Node floor, and the reason `npm i -g memhouse` is
+now the whole install.
+
+- The `better-sqlite3` dependency is **gone**, replaced by `node:sqlite` — built into
+  Node, stable in 24. No native binding, no install script, no build step.
+- **`--allow-scripts=better-sqlite3` is retired.** It was required on every install and
+  every upgrade, npm never remembered it, and omitting it left cursor, zed, opencode,
+  goose and antigravity reading zero sessions — indistinguishable from editors the
+  pilot does not have. That failure class no longer exists, so the probe that reported
+  it (`MISSING_BINDING`, `probeSqlite`) and the `missingBinding` flag on every
+  `getAdapterErrors()` entry are removed. Per-store failures — locking, permissions,
+  corruption, schema drift — are reported exactly as before.
+- **`engines` moves to `>=24`.** `node:sqlite` works flagless on 22.13+ but prints
+  `ExperimentalWarning` on every command (measured on v22.23.2); Node 20 is past EOL.
+- Blob columns arrive as `Uint8Array` rather than `Buffer`, whose `toString()` renders
+  byte values instead of decoding utf-8. Every blob-or-text read in the adapters now
+  goes through `editors/sqlite.js`; message output was verified byte-identical against
+  the old implementation on real opencode and zed stores and on BLOB-valued cursor and
+  goose fixtures.
+
 ## 0.8.0 — 2026-08-14
 
 **The shared house.** Breaking, and the reason the number moved.

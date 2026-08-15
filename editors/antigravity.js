@@ -2,16 +2,7 @@ const { execSync, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-// Required lazily. A top-level require makes this native module a load-time dependency
-// of the whole adapter set: editors/index.js imports every adapter, so one missing
-// binding threw before any adapter ran and `discover` reported ZERO editors — losing the
-// eleven that need no native code at all. The adapterErrors path exists to degrade one
-// adapter at a time, and a top-level throw walks straight past it.
-let Database = null;
-function openDb(...a) {
-  if (!Database) Database = require('better-sqlite3');
-  return new Database(...a);
-}
+const { openReadOnly, textOf } = require('./sqlite');
 const { getAppDataPath } = require('./base');
 const adapterErrors = require('./adapter-errors');
 
@@ -244,13 +235,14 @@ function readGlobalStateValue(key) {
 
   let db = null;
   try {
-    db = openDb(ANTIGRAVITY_GLOBAL_STORAGE_DB, { readonly: true, fileMustExist: true });
+    // fileMustExist is gone with better-sqlite3, not lost: node:sqlite refuses to
+    // create a database it is opening read-only, and the existsSync above still stands.
+    db = openReadOnly(ANTIGRAVITY_GLOBAL_STORAGE_DB);
     const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key);
     if (!row) return null;
-    const v = row.value;
-    if (typeof v === 'string') return v;
-    if (Buffer.isBuffer(v) || v instanceof Uint8Array) return Buffer.from(v).toString('utf-8');
-    return v == null ? null : String(v);
+    // ItemTable.value is declared BLOB and usually holds TEXT — textOf covers both,
+    // including the Uint8Array node:sqlite returns for the byte case.
+    return row.value == null ? null : textOf(row.value);
   } catch (e) {
     // Only the offline half of getChats() reads this store; live cascades come over
     // RPC. So a failure here costs some sessions, not all of them.

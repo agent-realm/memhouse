@@ -480,5 +480,56 @@ test('a corrupt fingerprint file is replaced, not obeyed', () => {
   } finally { fsx.rmSync(home, { recursive: true, force: true }); }
 });
 
+// ── the SQLite value bridge ─────────────────────────────────────────────────────
+// better-sqlite3 returned a Buffer for a BLOB column; node:sqlite returns a plain
+// Uint8Array. Buffer.toString() decodes utf-8, so every `JSON.parse(row.value)` in the
+// adapters worked on bytes by accident. Uint8Array.toString() renders the byte VALUES
+// comma-joined — "123,34,114,…" — which parses as neither JSON nor text and surfaces
+// four frames later as a corrupt-store error against a store that is perfectly fine.
+// Editor stores are inconsistent about which type they hand back (the VS Code family
+// declares ItemTable.value BLOB and usually stores TEXT in it), so this is the seam
+// every blob-or-text read goes through.
+const sqlitebridge = require('../editors/sqlite');
+
+test('textOf decodes bytes as utf-8, not as a list of byte values', () => {
+  const json = JSON.stringify({ role: 'user', content: 'héllo' });
+  // The exact thing node:sqlite hands back for a BLOB column.
+  const asBytes = new Uint8Array(Buffer.from(json, 'utf-8'));
+  assert.strictEqual(sqlitebridge.textOf(asBytes), json);
+  assert.deepStrictEqual(JSON.parse(sqlitebridge.textOf(asBytes)).content, 'héllo');
+  // The defect this exists to prevent: the bare toString() the adapters used to rely on.
+  assert.notStrictEqual(asBytes.toString('utf-8'), json);
+  // TEXT columns pass through untouched, and a Buffer still works.
+  assert.strictEqual(sqlitebridge.textOf(json), json);
+  assert.strictEqual(sqlitebridge.textOf(Buffer.from(json)), json);
+  assert.strictEqual(sqlitebridge.textOf(null), null);
+});
+
+test('bytesOf gives byte-walkers a Buffer whatever SQLite returned', () => {
+  // Cursor walks a blob tree by offset and hex-encodes 32-byte hashes out of it; zed
+  // hands its thread blob to zstd. Both need Buffer semantics, not Uint8Array ones.
+  const raw = Buffer.from([0x0a, 0x20, 0xde, 0xad, 0xbe, 0xef]);
+  const asBytes = new Uint8Array(raw);
+  const b = sqlitebridge.bytesOf(asBytes);
+  assert.ok(Buffer.isBuffer(b));
+  assert.strictEqual(b.slice(2).toString('hex'), 'deadbeef');
+  assert.strictEqual(b.length, raw.length);
+  assert.strictEqual(sqlitebridge.bytesOf(raw), raw, 'a Buffer is returned as-is, not copied');
+});
+
+test('SQLite is part of Node — there is no binding that can go missing', () => {
+  // The whole reason `--allow-scripts=better-sqlite3` existed, and the reason five
+  // adapters could report zero sessions on a healthy machine. If this ever throws, the
+  // engines floor in package.json is wrong for the Node running the tests.
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(a)');
+  db.close();
+  // And getAdapterErrors no longer carries the flag that class was reported through.
+  const errs = require('../editors').getAdapterErrors();
+  assert.ok(Array.isArray(errs));
+  assert.ok(errs.every((e) => !('missingBinding' in e)), 'missingBinding died with the native dep');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

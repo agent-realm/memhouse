@@ -35,7 +35,7 @@ rotate on first connect (`issue-credential{user:'memhouse_root'}`).
 ## 2. Owner sets up the house
 
 ```bash
-npm install -g memhouse --allow-scripts=better-sqlite3
+npm install -g memhouse
 memhouse install --yes \
   --url https://<kernel-host>:8443 \
   --user memhouse_root \
@@ -46,9 +46,9 @@ memhouse install --yes \
 That writes `~/.memhouse/env`, applies the schema, and runs the first ship.
 `memhouse start` then keeps it fresh on a 300s loop.
 
-Keep `--allow-scripts=better-sqlite3`: without it npm 12 leaves `better-sqlite3`
-with no native binding and the five SQLite-backed adapters ship nothing, silently.
-`memhouse discover` names any adapter it had to skip.
+No flags: SQLite comes from `node:sqlite`, so there is no native binding to build
+and no adapter that can go dark for want of one. `memhouse discover` still names any
+adapter it had to skip — now always a single editor's own store.
 
 The kernel never runs or reads any of this — it is content-blind; the shipper is
 the agency's own resident, a deterministic `worker` on a loop (no LLM, not an

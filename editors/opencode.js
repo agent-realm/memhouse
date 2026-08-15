@@ -1,16 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-// Required lazily. A top-level require makes this native module a load-time dependency
-// of the whole adapter set: editors/index.js imports every adapter, so one missing
-// binding threw before any adapter ran and `discover` reported ZERO editors — losing the
-// eleven that need no native code at all. The adapterErrors path exists to degrade one
-// adapter at a time, and a top-level throw walks straight past it.
-let Database = null;
-function openDb(...a) {
-  if (!Database) Database = require('better-sqlite3');
-  return new Database(...a);
-}
+const { openReadOnly, textOf } = require('./sqlite');
 const adapterErrors = require('./adapter-errors');
 
 // OpenCode stores data in XDG-style paths across all platforms
@@ -31,13 +22,13 @@ function getOpenCodeDbPath() {
 const DB_PATH = getOpenCodeDbPath();
 
 // ============================================================
-// Query SQLite using better-sqlite3
+// Query SQLite using node:sqlite (built into Node — nothing to install)
 // ============================================================
 
 function queryDb(sql) {
   if (!fs.existsSync(DB_PATH)) return [];
   try {
-    const db = openDb(DB_PATH, { readonly: true });
+    const db = openReadOnly(DB_PATH);
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
@@ -94,7 +85,7 @@ function getSqliteSessions() {
 function getSqliteMessages(sessionId) {
   if (!fs.existsSync(DB_PATH)) return [];
   try {
-    const db = openDb(DB_PATH, { readonly: true });
+    const db = openReadOnly(DB_PATH);
     const messages = db.prepare(
       `SELECT m.id as msg_id, m.data as msg_data, m.time_created
        FROM message m WHERE m.session_id = ? ORDER BY m.time_created ASC`
@@ -107,7 +98,7 @@ function getSqliteMessages(sessionId) {
       // yields a TRUNCATED history that looks complete — and a re-ship would replace
       // the full stored transcript with the shortened one. Report it so the shipper
       // refuses to overwrite good data with a partial read.
-      try { msgData = JSON.parse(msg.msg_data); }
+      try { msgData = JSON.parse(textOf(msg.msg_data)); }
       catch (e) { adapterErrors.record('opencode', e, `message ${msg.msg_id}`); continue; }
 
       const role = msgData.role;
@@ -120,7 +111,7 @@ function getSqliteMessages(sessionId) {
       const contentParts = [];
       for (const part of parts) {
         let partData;
-        try { partData = JSON.parse(part.data); }
+        try { partData = JSON.parse(textOf(part.data)); }
         catch (e) { adapterErrors.record('opencode', e, `part of message ${msg.msg_id}`); continue; }
         const type = partData.type;
 

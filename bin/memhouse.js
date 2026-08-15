@@ -356,18 +356,15 @@ Engine: MEMHOUSE_ENGINE pins docker or podman when both are installed and one ca
 `;
 
 // A skipped adapter and an editor the user does not have look identical — both
-// contribute zero sessions. Say which happened, and how to fix the one that is fixable.
+// contribute zero sessions. Say which happened.
+//
+// There was a second branch here for the one cause that hit five adapters at once: a
+// missing better-sqlite3 native binding, fixable only by reinstalling with a flag. With
+// SQLite now inside Node there is nothing to install and nothing to advise — every
+// remaining failure is one adapter's own store, and its own message is the whole story.
 function printAdapterErrors(errors) {
   if (!errors || errors.length === 0) return;
-  const blocked = errors.filter((e) => e.missingBinding);
-  const other = errors.filter((e) => !e.missingBinding);
-  if (blocked.length) {
-    console.log(warn(`${blocked.length} adapter${blocked.length > 1 ? 's' : ''} skipped — better-sqlite3 has no native binding: ${blocked.map((e) => e.source).join(', ')}`));
-    console.log('  their sessions are NOT being shipped. npm >= 12 blocks install scripts by default; rebuild with:');
-    console.log('    ${installCommand()}');
-    console.log('  (from a checkout: npm install --no-audit --no-fund, which package.json already allows)');
-  }
-  for (const e of other) console.log(warn(`${e.source.padEnd(16)} skipped: ${e.message}`));
+  for (const e of errors) console.log(warn(`${e.source.padEnd(16)} skipped: ${e.message}`));
 }
 
 async function cmdDiscover() {
@@ -1229,8 +1226,11 @@ async function cmdDoctor() {
   const checks = [];
   const add = (okFlag, label, hint) => checks.push({ ok: okFlag, label, hint });
 
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  add(major > 20 || (major === 20 && minor >= 19), `node ${process.versions.node}`, 'need >= 20.19');
+  // 24 because SQLite comes from `node:sqlite`, which is stable there. It works on 22.13+
+  // but prints an ExperimentalWarning on every command, and 20 is past EOL. Below the
+  // floor, the five SQLite-backed adapters are the part that actually breaks.
+  const [major] = process.versions.node.split('.').map(Number);
+  add(major >= 24, `node ${process.versions.node}`, 'need >= 24 — node:sqlite is stable there; the SQLite-backed adapters need it');
   add(fs.existsSync(ENV_FILE), `config ${ENV_FILE}`, 'run: memhouse install');
   // doctor is exempt from requireConfig — diagnosing an unconfigured machine is its job —
   // but "exempt from refusing" is not "licensed to log in somewhere". With no config it
@@ -1445,11 +1445,11 @@ async function cmdDoctor() {
     }
     adapterErrors = getAdapterErrors();
     for (const t of thrown) {
-      if (!adapterErrors.some((e) => e.source === t.source)) adapterErrors.push({ ...t, missingBinding: false });
+      if (!adapterErrors.some((e) => e.source === t.source)) adapterErrors.push(t);
     }
-    // Any adapter that could not be read is a failure, whatever the cause — a
-    // locked or corrupt store loses just as many sessions as a missing binding.
-    const blocked = adapterErrors.filter((e) => e.missingBinding).map((e) => e.source);
+    // Any adapter that could not be read is a failure, whatever the cause — a locked or
+    // corrupt store loses sessions just as surely as the missing native binding this
+    // used to have a separate remedy for.
     const failed = adapterErrors.map((e) => e.source);
     add(adapterErrors.length === 0,
       // "visible locally" is what the ADAPTERS see; `stats` reports what the house HOLDS,
@@ -1458,9 +1458,7 @@ async function cmdDoctor() {
       // find the other number elsewhere (161 here, 156 there, on a real machine) gives
       // them no way to tell "correctly skipped" from "silently dropped".
       `adapters: ${seen} sessions visible locally${failed.length ? ` (${failed.length} skipped: ${failed.join(', ')})` : ''} — compare with what the house holds: memhouse stats`,
-      blocked.length ? installCommand()
-        : adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ')
-          : undefined);
+      adapterErrors.length ? adapterErrors.map((e) => `${e.source}: ${e.message}`).join('; ') : undefined);
   } catch (e) { add(false, 'adapters', e.message); }
   // Which models in this house have no price. An unpriced model is not an error — a new
   // release always lands before pricing.json catches up — but it IS silent: calculateCost
@@ -1657,12 +1655,12 @@ async function cmdUpdate() {
 
   if (kind === 'npx') {
     console.log(warn('nothing to update — npx resolves the registry on every run'));
-    console.log('  to keep a version around: npm install -g memhouse --allow-scripts=better-sqlite3');
+    console.log('  to keep a version around: npm install -g memhouse');
     return 1;
   }
   if (kind === 'local-dep') {
     console.log(warn('this is a project dependency, not a global install'));
-    console.log(`  upgrade it where it lives: npm install memhouse@latest --allow-scripts=better-sqlite3`);
+    console.log(`  upgrade it where it lives: npm install memhouse@latest`);
     return 1;
   }
 
@@ -1690,10 +1688,11 @@ async function cmdUpdate() {
       }
     }
   } else {
-    // --allow-scripts is not optional and not remembered: npm >= 12 blocks install scripts
-    // by default, so an upgrade without it leaves better-sqlite3 with no binding and the
-    // five SQLite-backed adapters read zero sessions on every pass afterwards.
-    const r = spawnSync('npm', ['install', '-g', 'memhouse@latest', '--allow-scripts=better-sqlite3'], { stdio: 'inherit' });
+    // Plain, with no flag to forget. This carried `--allow-scripts=better-sqlite3` for as
+    // long as SQLite was a native module: npm never remembered it, and an upgrade without
+    // it left the binding unbuilt and the five SQLite-backed adapters reading zero
+    // sessions on every pass afterwards. There is no binding to build now.
+    const r = spawnSync('npm', ['install', '-g', 'memhouse@latest'], { stdio: 'inherit' });
     if (r.status !== 0) {
       console.log(bad('npm install failed — nothing was restarted, the running version is unchanged'));
       console.log('  if it was EACCES: ls -ld "$(npm prefix -g)" — root-owned needs sudo, yours needs a chown');

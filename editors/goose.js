@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+const { openReadOnly, textOf } = require('./sqlite');
 const adapterErrors = require('./adapter-errors');
 
 const GOOSE_DIR = path.join(os.homedir(), '.local', 'share', 'goose', 'sessions');
@@ -9,30 +10,17 @@ const DB_PATH = path.join(GOOSE_DIR, 'sessions.db');
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'goose', 'config.yaml');
 
 // ============================================================
-// Query SQLite via better-sqlite3 (cross-platform)
+// Query SQLite via node:sqlite (cross-platform, part of Node itself)
 // ============================================================
 
-let Database;
-function getDatabase() {
-  if (!Database) {
-    try {
-      Database = require('better-sqlite3');
-    } catch {
-      // better-sqlite3 not available
-    }
-  }
-  return Database;
-}
-
+// This used to swallow "SQLite is unavailable" as a case of its own, because
+// better-sqlite3's binding could genuinely be absent. It cannot be now — so an open
+// that fails is an open that failed, and the one catch below reports it like any other
+// unreadable store.
 function queryDb(sql) {
   if (!fs.existsSync(DB_PATH)) return [];
-  const Db = getDatabase();
-  if (!Db) {
-    adapterErrors.record('goose', new Error('better-sqlite3 unavailable'), DB_PATH);
-    return [];
-  }
   try {
-    const db = new Db(DB_PATH, { readonly: true });
+    const db = openReadOnly(DB_PATH);
     const rows = db.prepare(sql).all();
     db.close();
     return rows;
@@ -201,7 +189,7 @@ function getMessagesFromDb(chat) {
     // A row we cannot decode drops a message from the transcript. Silently, that is
     // a truncation that looks complete, and a re-ship would replace the stored
     // transcript with it. Report so the shipper withholds and retries instead.
-    try { parts = JSON.parse(row.content_json); }
+    try { parts = JSON.parse(textOf(row.content_json)); }
     catch (e) { adapterErrors.record('goose', e, `session ${chat.composerId}`); continue; }
     if (!Array.isArray(parts)) {
       adapterErrors.record('goose', new Error('message content_json is not an array'), `session ${chat.composerId}`);
@@ -314,7 +302,7 @@ function getMessagesFromJsonl(chat) {
 function extractSessionModel(row) {
   if (row.model_config_json) {
     try {
-      const cfg = JSON.parse(row.model_config_json);
+      const cfg = JSON.parse(textOf(row.model_config_json));
       if (cfg.model) return cfg.model;
       if (cfg.model_id) return cfg.model_id;
     } catch {}

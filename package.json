@@ -43,10 +43,7 @@
   "author": "Ramazan Polat <ramazanpolat@gmail.com> (built on agentlytics by fkadev)",
   "license": "MIT",
   "engines": {
-    "node": ">=20.19.0"
-  },
-  "allowScripts": {
-    "better-sqlite3": true
+    "node": ">=24.0.0"
   },
   "repository": {
     "type": "git",
@@ -54,7 +51,6 @@
   },
   "dependencies": {
     "@clickhouse/client": "^1.23.1",
-    "better-sqlite3": "^12.6.2",
     "express": "^4.22.1"
   }
 }

@@ -21,7 +21,7 @@ editor files/DBs → editors/*.js → memhouse/shipper/ship.js → ClickHouse ro
 
 ```bash
 git clone https://github.com/agent-realm/memhouse.git
-cd memhouse && npm install          # the allowScripts field covers better-sqlite3
+cd memhouse && npm install          # two runtime deps, no native build
 
 node bin/memhouse.js discover       # read-only: what this machine has
 node bin/memhouse.js --help
@@ -30,8 +30,9 @@ npm test                            # syntax gate + unit checks
 cd ui && npm run dev                # SPA on 5173, proxying /api to the server
 ```
 
-`npm install` without `--allow-scripts` from a checkout is fine — `package.json` already
-allows the one script that matters. A **published** install needs the flag; see the README.
+Nothing here compiles. SQLite comes from `node:sqlite`, which is part of Node — hence
+the `engines: >=24` floor, where it is stable rather than warning. There is no install
+script to allow, in a checkout or from npm.
 
 ---
 

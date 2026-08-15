@@ -45,8 +45,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # npm >= 12 blocks install scripts by default; the repo's package.json carries
-      # `allowScripts` for better-sqlite3, which project-scoped installs honour.
+      # No install scripts to worry about: the only native dependency was better-sqlite3
+      # and SQLite now comes from `node:sqlite`, which is why node-version is pinned at
+      # 24 (where it is stable rather than warning) and why `engines` says >=24.
       - run: npm install --no-audit --no-fund
       - run: npm test
       - name: wait for ClickHouse
