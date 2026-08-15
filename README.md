@@ -1,10 +1,23 @@
 # memhouse
 
-Long-term memory for coding agents. memhouse reads the session transcripts your
-editors already write to disk — **17 of them**, Claude Code, Codex, Cursor, Zed,
-Copilot, Gemini CLI and the rest — parses them locally, and ships typed rows into
-ClickHouse. Nothing is proxied or intercepted. Then you can search every past
-session, see what it cost, and let an agent query its own history.
+**Claude Code deletes your transcripts after 30 days.** (`cleanupPeriodDays`,
+default 30 — session files are removed at startup.) Measured on the machine this
+was built on: months of daily use, and the oldest surviving local transcript was
+nine days old. Every problem you solved before that exists nowhere — unless
+something durable was keeping it.
+
+memhouse is that something. It reads the session transcripts your editors already
+write to disk — **17 of them**: Claude Code, Codex, Cursor, Zed, Copilot, Gemini
+CLI and the rest — parses them locally, and ships typed rows into a ClickHouse
+**you own**. Nothing is proxied, intercepted, or sent to anyone's cloud. Then you
+can search every past session, see what it cost, resume the conversation that
+solved this before, and let an agent query its own history.
+
+And every row says where it came from, in a way no client can fake: `user_id` is
+stamped **by the server** (`MATERIALIZED currentUser()`, async inserts pinned off
+so the stamp cannot be skipped) and `host` is a fingerprint minted once per
+install. A team pointed at one house is a team memory with real attribution — not
+a label somebody's client claimed.
 
 ```bash
 npm install -g memhouse
