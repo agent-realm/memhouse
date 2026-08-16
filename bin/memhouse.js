@@ -2125,6 +2125,28 @@ async function cmdMigrateRooms() {
     }
   }
 
+  // Heal the rooms the rebuild did NOT touch. `sessions` keeps its key across schema 2,
+  // so it is never in `todo` — but a 0.9.0 house's sessions room still lacks the new
+  // `epoch` column, and leaving it missing means the very next `ship` opens with a
+  // "fields are being DISCARDED" warning that sends the pilot to a second command. A
+  // migration should hand back a house with nothing left to heal.
+  try {
+    const { templateColumns } = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'));
+    const want = templateColumns(tpl);
+    for (const t of ROOM_TYPES) {
+      if (todo.some((x) => x.t === t)) continue; // rebuilt from the template — complete
+      const name = r[`${t}_raw`];
+      const have = new Set((await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${name}'`, { database: '' })).map((c) => c.name));
+      if (!have.size) continue;
+      for (const col of (want[t] || [])) {
+        if (have.has(col.name)) continue;
+        await ch(cfg, `ALTER TABLE ${name} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
+          { settings: { allow_experimental_full_text_index: 1 } });
+        console.log(ok(`${name}: added missing column ${col.name}`));
+      }
+    }
+  } catch (e) { console.log(warn(`could not heal columns on the untouched rooms: ${e.message} — memhouse ship --ensure-schema does the same`)); }
+
   await houseMeta(cfg, 'schema_version', String(SCHEMA_VERSION));
   console.log(`\n${ok(`house is at schema ${SCHEMA_VERSION}`)}`);
   console.log('  verify with: memhouse doctor');

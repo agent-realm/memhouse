@@ -252,6 +252,13 @@ async function main() {
     assert.strictEqual(first.bumped, 0, 'an unchanged source forked the session again');
     const second = await ship.runShip(client);
     assert.strictEqual(second.bumped, 0);
+    // SKIPPED, not silently re-shipped-in-place. `bumped === 0` alone let a real bug
+    // through: the skip predicate's tool-count lookup missed (mismatched map keys), so
+    // every session WITH tool calls — this fixture has one — re-shipped on every pass
+    // with zero bumps and every counter green. Measured on a real history as 324 of 437
+    // re-shipping forever.
+    assert.strictEqual(second.sessions, 0,
+      `a settled session with tool calls re-shipped (${second.sessions} shipped, ${second.skipped} skipped)`);
     const epochs = await raw(
       `SELECT DISTINCT epoch FROM messages FINAL WHERE session_id = {s:String} ORDER BY epoch`,
       { s: `claude:${id}` });

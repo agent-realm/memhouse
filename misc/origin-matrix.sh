@@ -30,7 +30,11 @@ qroot "DROP DATABASE IF EXISTS $DB" >/dev/null; qroot "CREATE DATABASE $DB" >/de
 ddl() { # ddl <member> [drop-origin]  -- HTTP takes ONE statement per request
   local src="$REPO/memhouse/house/schema.sql.tpl"
   if [ "${2:-}" = "no-origin" ]; then
-    sed "/origin LowCardinality/d; s/, origin, seq)/, seq)/; s/, origin, idx)/, idx)/" "$src" > /tmp/_ddl.$$.tpl
+    # The legacy variant predates BOTH origin and epoch, so strip the columns AND their
+    # key entries. The key patterns must track the live template: they silently stopped
+    # matching when epoch joined the key, the CREATE then referenced a deleted column and
+    # failed, and D2/D3 reported UNKNOWN_TABLE instead of testing the upgrade path.
+    sed "/origin LowCardinality/d; /epoch UInt32/d; s/, origin, epoch, seq)/, seq)/; s/, origin, epoch, idx)/, idx)/" "$src" > /tmp/_ddl.$$.tpl
     src=/tmp/_ddl.$$.tpl
   fi
   # The live template has PLAIN table names now (a house shares its tables); the matrix

@@ -241,6 +241,22 @@ test('a room missing epoch from its key is refused — that key cannot retain a 
   assert.ok(rooms.keyProblem('messages', ''));
 });
 
+test('loadExisting builds its (session, epoch) keys identically at all three sites', () => {
+  // One of these was once typed with a space while the other two used U+0000, so the
+  // tool-state lookup missed on every call, `tools.n` read 0, and every session with
+  // tool calls re-shipped on every pass — measured as 324 of 437, forever. The key
+  // builder is one expression at three sites; pin them to each other.
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'memhouse', 'shipper', 'ship.js'), 'utf-8');
+  const keys = src.match(/`\$\{(?:id|r\.session_id)\}[^`]*\$\{epoch\}`/g) || [];
+  assert.strictEqual(keys.length, 3, `expected the 3 key sites, found ${keys.length}`);
+  const seps = new Set(keys.map((k) => k.replace(/\$\{(?:id|r\.session_id)\}/, '').replace(/\$\{epoch\}/, '')));
+  assert.strictEqual(seps.size, 1, `key separators differ across sites: ${JSON.stringify([...seps])}`);
+  assert.ok([...seps][0].includes('\\u0000'), 'the separator must be the escaped NUL, not a raw byte or a space');
+  // And no raw control bytes anywhere in the file — a literal NUL makes grep call it binary.
+  assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(src), 'ship.js contains a raw control byte');
+});
+
 test('the schema template parser reads the rooms it actually creates', () => {
   // It matched `<type>_{{MEMBER}}` for a whole release after the rooms became plain
   // shared tables, so it returned NOTHING and three surfaces reported success over an

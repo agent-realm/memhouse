@@ -589,12 +589,22 @@ async function loadExisting(client, rooms) {
   // have no rows at the session's current epoch, and reading its highest epoch instead
   // would answer with the superseded parse. See the tool_calls note below, which is where
   // that actually bites.
-  const at = (m, id, epoch) => m.get(`${id} ${epoch}`) || null;
+  //
+  // U+0000 as the key separator, and written as an ESCAPE, deliberately. A session_id is
+  // '<source>:<adapter-local id>' and an adapter-local id can legally contain any
+  // printable character, so only a byte that cannot appear in one is collision-proof.
+  // The escape matters twice over: a literal NUL byte typed here once made grep treat
+  // this file as binary — and one of the three key sites was typed with a plain space
+  // instead, so the tool lookups missed on every call, `tools.n` read 0, every session
+  // with tool calls failed `intact`, and a real 437-session history re-shipped 324
+  // sessions on EVERY pass, forever, with every surface green. All three sites must
+  // build this key identically; the unit test pins them to each other.
+  const at = (m, id, epoch) => m.get(`${id}\u0000${epoch}`) || null;
   const msgState = new Map();     // (session, epoch) → { n, maxSeq }
   const msgEpoch = new Map();     // session → newest epoch present
   for (const r of await mr.json()) {
     const epoch = toInt(r.epoch);
-    msgState.set(`${r.session_id} ${epoch}`, { n: toInt(r.n), maxSeq: toInt(r.max_seq) });
+    msgState.set(`${r.session_id}\u0000${epoch}`, { n: toInt(r.n), maxSeq: toInt(r.max_seq) });
     msgEpoch.set(r.session_id, Math.max(epoch, msgEpoch.get(r.session_id) || 0));
   }
   // The tool_calls room needs the same check, and used to have none. shipSession writes
@@ -613,7 +623,7 @@ async function loadExisting(client, rooms) {
   const toolEpoch = new Map();    // session → newest epoch present
   for (const r of await tr.json()) {
     const epoch = toInt(r.epoch);
-    toolState.set(`${r.session_id} ${epoch}`, { n: toInt(r.n), maxIdx: toInt(r.max_idx) });
+    toolState.set(`${r.session_id}\u0000${epoch}`, { n: toInt(r.n), maxIdx: toInt(r.max_idx) });
     toolEpoch.set(r.session_id, Math.max(epoch, toolEpoch.get(r.session_id) || 0));
   }
   const map = new Map();
