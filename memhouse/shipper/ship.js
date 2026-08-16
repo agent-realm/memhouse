@@ -585,13 +585,17 @@ async function loadExisting(client, rooms) {
             WHERE user_id = currentUser() AND origin = 'ship' GROUP BY session_id, epoch`,
     format: 'JSONEachRow',
   });
-  // { session_id → { epoch, n, maxSeq } } for the CURRENT epoch only.
-  const msgState = new Map();
+  // Kept PER EPOCH, not collapsed to each room's own newest — a room can legitimately
+  // have no rows at the session's current epoch, and reading its highest epoch instead
+  // would answer with the superseded parse. See the tool_calls note below, which is where
+  // that actually bites.
+  const at = (m, id, epoch) => m.get(`${id} ${epoch}`) || null;
+  const msgState = new Map();     // (session, epoch) → { n, maxSeq }
+  const msgEpoch = new Map();     // session → newest epoch present
   for (const r of await mr.json()) {
     const epoch = toInt(r.epoch);
-    const cur = msgState.get(r.session_id);
-    if (cur && cur.epoch >= epoch) continue;
-    msgState.set(r.session_id, { epoch, n: toInt(r.n), maxSeq: toInt(r.max_seq) });
+    msgState.set(`${r.session_id} ${epoch}`, { n: toInt(r.n), maxSeq: toInt(r.max_seq) });
+    msgEpoch.set(r.session_id, Math.max(epoch, msgEpoch.get(r.session_id) || 0));
   }
   // The tool_calls room needs the same check, and used to have none. shipSession writes
   // sessions, then messages, then tool_calls — so a pass that fails during the LAST of
@@ -605,12 +609,12 @@ async function loadExisting(client, rooms) {
             WHERE user_id = currentUser() AND origin = 'ship' GROUP BY session_id, epoch`,
     format: 'JSONEachRow',
   });
-  const toolState = new Map();
+  const toolState = new Map();    // (session, epoch) → { n, maxIdx }
+  const toolEpoch = new Map();    // session → newest epoch present
   for (const r of await tr.json()) {
     const epoch = toInt(r.epoch);
-    const cur = toolState.get(r.session_id);
-    if (cur && cur.epoch >= epoch) continue;
-    toolState.set(r.session_id, { epoch, n: toInt(r.n), maxIdx: toInt(r.max_idx) });
+    toolState.set(`${r.session_id} ${epoch}`, { n: toInt(r.n), maxIdx: toInt(r.max_idx) });
+    toolEpoch.set(r.session_id, Math.max(epoch, toolEpoch.get(r.session_id) || 0));
   }
   const map = new Map();
   for (const r of await rs.json()) {
@@ -622,19 +626,29 @@ async function loadExisting(client, rooms) {
     // have tool calls re-ship exactly once and then record it. Self-correcting, and
     // cheaper than a branch that has to be remembered forever.
     const toolCount = toInt(r.extra && r.extra.toolCallCount);
-    const msgs = msgState.get(r.session_id);
-    const tools = toolState.get(r.session_id);
-    const intact = (msgs ? msgs.n : 0) === count && (tools ? tools.n : 0) === toolCount;
     // The session's current epoch is whatever its ROWS say, never what the sessions row
     // says: sessions is latest-wins with no origin in its key, so an import writing that
     // row after a bump would hand the next pass a 0 and make it overwrite the current
     // parse. The column there is for people, not for this.
-    const epoch = Math.max(msgs ? msgs.epoch : 0, tools ? tools.epoch : 0);
+    const epoch = Math.max(msgEpoch.get(r.session_id) || 0, toolEpoch.get(r.session_id) || 0);
+    // Everything else is read AT that epoch, and "no rows there" means zero — not "look
+    // at the newest epoch this room happens to have".
+    //
+    // Getting this wrong does not lose data, it makes the shipper churn forever. A parse
+    // that keeps its messages but drops every tool call writes nothing into tool_calls at
+    // the new epoch. Reading that room's own newest epoch then returned the SUPERSEDED
+    // count (say 2) and its maxIdx — so `intact` compared 2 against the recorded 0 and was
+    // false on every pass, and decideEpoch compared `0 - 1 < oldMaxIdx` and bumped again
+    // on every pass. The session re-shipped and gained an epoch forever, growing the house
+    // without end, while every surface reported success.
+    const msgs = at(msgState, r.session_id, epoch) || { n: 0, maxSeq: -1 };
+    const tools = at(toolState, r.session_id, epoch) || { n: 0, maxIdx: -1 };
+    const intact = msgs.n === count && tools.n === toolCount;
     map.set(r.session_id, {
       ms, count, bc, intact, epoch,
-      maxSeq: msgs ? msgs.maxSeq : -1,
-      maxIdx: tools ? tools.maxIdx : -1,
-      hasRows: Boolean(msgs || tools),
+      maxSeq: msgs.maxSeq,
+      maxIdx: tools.maxIdx,
+      hasRows: msgEpoch.has(r.session_id) || toolEpoch.has(r.session_id),
     });
   }
   return map;

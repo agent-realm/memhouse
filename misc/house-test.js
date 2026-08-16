@@ -302,6 +302,17 @@ async function main() {
     const kept = await raw(`SELECT tool_name FROM tool_calls FINAL WHERE session_id = {s:String}`,
       { s: `claude:${id}` });
     assert.ok(kept.length > 0, 'the superseded tool calls were destroyed rather than retained');
+
+    // And it SETTLES. This is the churn case: with the tool room's own newest epoch used
+    // for the skip predicate, `intact` compared the superseded tool count against the
+    // recorded 0 and decideEpoch compared `0 - 1 < oldMaxIdx` — so the session re-shipped
+    // and gained an epoch on every single pass, forever, with every surface green.
+    const settle = await ship.runShip(client);
+    assert.strictEqual(settle.bumped, 0, 'a session with no tool calls forks on every pass');
+    assert.strictEqual(settle.sessions, 0, 'a session with no tool calls re-ships on every pass');
+    const epochs = await raw(`SELECT DISTINCT epoch FROM messages FINAL WHERE session_id = {s:String} ORDER BY epoch`,
+      { s: `claude:${id}` });
+    assert.deepStrictEqual(epochs.map((x) => Number(x.epoch)), [0, 1], 'the house grew an epoch for nothing');
   });
 
   await test('a session that parses to zero messages is withheld, not written', async () => {
