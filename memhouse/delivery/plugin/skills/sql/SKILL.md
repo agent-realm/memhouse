@@ -14,11 +14,12 @@ given). If they give a question, write the SQL yourself from the schema below.
 **Read-only rule:** the shipper (`ship.js`) is the only writer, and it is INSERT-ONLY: it
 never deletes and never mutates, because a re-parse that shrank or was rewritten is
 written under a new `epoch` instead of over the stored one. Never INSERT/ALTER/DROP from
-here. What memhouse itself needs is `SELECT, INSERT, ALTER ADD COLUMN, OPTIMIZE` — the
-`ALTER DELETE` this line used to list was there for the per-session clear that no longer
-exists. Most houses grant `ALL` on the database, which is broader; nothing memhouse runs
-uses the destructive half of it. Reads need no scoping clause: the house you can name is
-already yours, and there is no policy to work around.
+here. The shipping path needs `SELECT, INSERT, ALTER ADD COLUMN, OPTIMIZE` and nothing
+more — the `ALTER DELETE` this line used to list was there for the per-session clear that
+no longer exists, so no unattended process can lose you a row. `ALTER DELETE` is still
+needed by the one command that is *meant* to remove rows, `memhouse reset`, which asks
+first. Most houses grant `ALL` on the database anyway. Reads need no scoping clause: the
+house you can name is already yours, and there is no policy to work around.
 
 **One session can be in `messages` twice.** A session that Claude Code compacted, or that
 shrank for any other reason, keeps its earlier parse — that is the whole point of `epoch`,

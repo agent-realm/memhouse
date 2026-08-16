@@ -460,14 +460,19 @@ async function ensureSchema(client) {
       });
       have = new Set((await rs.json()).map((r) => r.name));
     } catch { /* unreadable: the checks above already reported why */ }
+    // No columns means the table is not there — the CREATEs above were denied, or this is
+    // a house where the meta tables were never created. ALTERing it would throw
+    // UNKNOWN_TABLE, which is not a permissions error and so prints, once per column, on
+    // every `--ensure-schema`. Nothing to heal on a table that does not exist.
+    if (!have.size) continue;
     for (const col of (wantCols[t] || [])) {
-      if (have.size && have.has(col.name)) continue;
+      if (have.has(col.name)) continue;
       try {
         await client.command({
           query: `ALTER TABLE ${rooms[`${t}_raw`]} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
           clickhouse_settings: { allow_experimental_full_text_index: 1 },
         });
-        if (have.size) console.log(`[memhouse] added missing column ${rooms[`${t}_raw`]}.${col.name}`);
+        console.log(`[memhouse] added missing column ${rooms[`${t}_raw`]}.${col.name}`);
       } catch (e) {
         const m = e && e.message ? e.message : String(e);
         if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
@@ -897,7 +902,7 @@ async function runShip(client, opts = {}) {
   };
 
   const seen = new Set(); // adapters must not double-ship a session id within a pass
-  let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0, unreadable = 0, bumped = 0;
+  let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0, unreadable = 0, bumped = 0, withheld = 0;
   for (const chat of chats) {
     if (chat.encrypted) continue;
     // Same canonical '<source>:<adapter-local id>' as rowsForChat: dedup and
@@ -947,6 +952,22 @@ async function runShip(client, opts = {}) {
     // the underlying store is readable.
     if (!rows || failedHere) { unreadable++; continue; }
 
+    // A KNOWN session that now parses to nothing is withheld, not written.
+    //
+    // Two reasons, and the second is the one that bites. An adapter that swallows its own
+    // failure returns [] rather than throwing, which is indistinguishable from a chat
+    // whose content really did vanish — and the house is the party that still has the
+    // content either way. Worse, writing it would not even be honest about itself: with
+    // zero rows to insert, the new epoch exists nowhere in the room, so the read filter's
+    // max(epoch) would keep answering with the SUPERSEDED epoch and serve the old parse as
+    // if it were current. Withholding leaves the session out of the skip predicate, so
+    // every pass retries it and says so.
+    if (prev && prev.hasRows && !rows.msgRows.length) {
+      withheld++;
+      console.log(`[memhouse] WARNING: ${id} parsed to 0 messages but the house holds ${prev.count} — withholding`);
+      continue;
+    }
+
     // Which parse this belongs to. A known session whose stored rows the new parse
     // cannot be laid over — shorter, or rewritten at an overlapping position — moves to
     // a new epoch instead of overwriting anything. See decideEpoch.
@@ -979,7 +1000,7 @@ async function runShip(client, opts = {}) {
   // Anything that only failed while reading messages — the sink is reset by the
   // next getAllChats(), so unreported here means never reported at all.
   reportAdapterErrors(warned);
-  return { sessions, skipped, msgRows, toolRows, unreadable, bumped };
+  return { sessions, skipped, msgRows, toolRows, unreadable, bumped, withheld };
 }
 
 // Warn once per adapter per pass. `warned` carries across the two call sites so one
@@ -1060,7 +1081,10 @@ async function main() {
       let failed = false;
       try {
         const r = await runShip(client, { full });
-        console.log(`[memhouse] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}${r.bumped ? `, ${r.bumped} kept an earlier parse` : ''}) → ` +
+        console.log(`[memhouse] shipped ${r.sessions} sessions (${r.skipped} skipped`
+          + `${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}`
+          + `${r.withheld ? `, ${r.withheld} withheld-empty` : ''}`
+          + `${r.bumped ? `, ${r.bumped} kept an earlier parse` : ''}) → ` +
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         failed = true;

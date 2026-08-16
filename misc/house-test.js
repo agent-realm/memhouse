@@ -278,6 +278,54 @@ async function main() {
     assert.deepStrictEqual(shown, ['[compacted summary]', 'c2 original', 'c3 original']);
   });
 
+  await test('a parse that loses ALL its tool calls does not serve the old ones', async () => {
+    // The room would answer max(epoch) with the SUPERSEDED epoch, because the new parse
+    // wrote no rows into it at all — so the dashboard would show a current transcript
+    // beside tool calls from a parse that no longer exists. tool_calls takes its epoch
+    // from messages for exactly this reason.
+    const id = 'notools-1';
+    fixture.chats = [chat(id, ['t1', 't2 with a tool', 't3'])];
+    await ship.runShip(client, { full: true });
+    assert.ok((await read(`SELECT count() AS n FROM {{tool_calls}} WHERE session_id = {s:String}`,
+      { s: `claude:${id}` }))[0].n > 0, 'fixture produced no tool calls to lose');
+
+    // Rewritten, and every assistant turn is gone — what a compaction does.
+    const flat = chat(id, ['t1 v2', 't2 v2', 't3 v2'], { updatedAt: T0 + 60000 });
+    for (const m of flat._messages) { m.role = 'user'; delete m._toolCalls; }
+    fixture.chats = [flat];
+    await ship.runShip(client);
+
+    const shown = await read(`SELECT tool_name FROM {{tool_calls}} WHERE session_id = {s:String}`,
+      { s: `claude:${id}` });
+    assert.strictEqual(shown.length, 0, `the read layer still shows ${shown.length} superseded tool call(s)`);
+    // Still nothing destroyed: they are in the room, at the epoch they were written under.
+    const kept = await raw(`SELECT tool_name FROM tool_calls FINAL WHERE session_id = {s:String}`,
+      { s: `claude:${id}` });
+    assert.ok(kept.length > 0, 'the superseded tool calls were destroyed rather than retained');
+  });
+
+  await test('a session that parses to zero messages is withheld, not written', async () => {
+    // An adapter that swallows its own failure returns [] rather than throwing, which is
+    // indistinguishable from a chat whose content really vanished — and writing it would
+    // not even be self-consistent: with no rows at the new epoch, the read filter would
+    // keep serving the superseded parse as if it were current.
+    const id = 'empty-1';
+    fixture.chats = [chat(id, ['e1', 'e2', 'e3'])];
+    await ship.runShip(client, { full: true });
+    const emptied = chat(id, [], { updatedAt: T0 + 60000 });
+    fixture.chats = [emptied];
+    const r = await ship.runShip(client);
+    assert.strictEqual(r.withheld, 1, 'an empty re-parse was written instead of withheld');
+    assert.strictEqual(r.bumped, 0, 'an empty re-parse forked the session');
+    const shown = await read(`SELECT text FROM {{messages}} WHERE session_id = {s:String} ORDER BY seq`,
+      { s: `claude:${id}` });
+    assert.deepStrictEqual(shown.map((x) => x.text), ['e1', 'e2', 'e3'],
+      'the stored transcript stopped being readable after an empty parse');
+    const sess = (await read(`SELECT message_count FROM {{sessions}} WHERE session_id = {s:String}`,
+      { s: `claude:${id}` }))[0];
+    assert.strictEqual(Number(sess.message_count), 3, 'the session row was overwritten with 0');
+  });
+
   // ── the common case must stay free ────────────────────────────────────────────
   await test('growth re-ships in place — an unchanged prefix costs no extra rows', async () => {
     const id = 'grow-1';

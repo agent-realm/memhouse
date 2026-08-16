@@ -210,7 +210,7 @@ const ROOM_MATERIALIZED = {
   tool_calls: ['user_id'],
 };
 
-function currentParse(table) {
+function currentParse(table, epochSource = table) {
   const extra = (ROOM_MATERIALIZED[table] || ['user_id']).join(', ');
   return `(
     SELECT *, ${extra}
@@ -218,7 +218,7 @@ function currentParse(table) {
     WHERE origin != 'ship'
        OR (session_id, user_id, epoch) IN (
             SELECT session_id, user_id, max(epoch)
-            FROM ${table}
+            FROM ${epochSource}
             WHERE origin = 'ship'
             GROUP BY session_id, user_id)
   )`;
@@ -288,7 +288,13 @@ function roomNames(user) {
   // session by construction, latest-wins, and carries no epoch anyone may read.
   out.sessions = 'sessions';
   out.messages = currentParse('messages');
-  out.tool_calls = currentParse('tool_calls');
+  // tool_calls takes its epoch from MESSAGES, not from itself. A parse that produces
+  // messages but NO tool calls is ordinary — a compaction can remove every assistant turn
+  // that called something — and it writes zero rows into this room at the new epoch. Asked
+  // for its own max(epoch), the room would answer with the SUPERSEDED epoch and serve the
+  // old parse's tool calls beside the new parse's messages. Both rooms are written by the
+  // same pass at the same epoch, so messages is the authority for both.
+  out.tool_calls = currentParse('tool_calls', 'messages');
   // The house's own record of itself — plain names, nothing to filter.
   for (const t of META_TYPES) { out[t] = t; out[`${t}_raw`] = t; }
   out.sessions_v = sessionsRollup(out);
