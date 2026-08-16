@@ -137,3 +137,57 @@ ORDER BY (session_id, user_id, origin, epoch, idx);
 -- sessionsRollup). A stored view would need a name inside the `^sessions_` namespace
 -- the Merge rooms select on, a fourth grant, and a fourth object to provision and roll
 -- forward — for nothing the query does not already do.
+
+-- ─────────────────────────────────────────────────────────────────────────────────
+-- The house's own record of itself. Not rooms: nothing about a conversation lives
+-- here, and the shipper's guards do not require them (a member on someone else's
+-- house may hold no rights to create them, and shipping must not depend on it).
+--
+-- The house needs these because it now has STATE THE CLIENT CANNOT DERIVE. Sorting
+-- keys cannot be altered, so a schema change is a rebuild — and a rebuild has a
+-- middle, an actor, and an outcome. "Which version is this house at, is a migration
+-- half-done, and who did what" was previously answerable only by reading DDL and
+-- guessing.
+--
+-- Live facts are NOT copied here. Which rooms exist, which users hold which grants,
+-- how big each room is: `system.tables`, `system.columns` and `system.users` are
+-- authoritative and always current, and a mirror of them would be a second truth that
+-- goes stale. What is recorded is what those cannot say: intent, sequence, outcome.
+
+CREATE TABLE IF NOT EXISTS house_meta
+(
+    -- House-wide keys only ('schema_version', 'house_created_at'). Anything per-member
+    -- or per-machine belongs in house_events, which is append-only — this room is
+    -- latest-wins, so two members writing one key would overwrite each other.
+    key String,
+    value String,
+    updated_at DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_by String MATERIALIZED currentUser(),
+    host LowCardinality(String) DEFAULT ''
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (key);
+
+CREATE TABLE IF NOT EXISTS house_events
+(
+    event_at DateTime64(3, 'UTC') DEFAULT now64(3),
+    -- 'migration' — a room rebuild, one row per transition (pending → applied|failed)
+    -- 'version'   — a memhouse version seen writing to this house, when it changes
+    -- 'schema'    — the house's schema version being set or moved
+    kind LowCardinality(String),
+    id String DEFAULT '',                      -- migration id, e.g. '0100-epoch-key'
+    status LowCardinality(String) DEFAULT '',  -- pending | applied | failed | observed
+    from_version String DEFAULT '',
+    to_version String DEFAULT '',
+    actor String MATERIALIZED currentUser(),
+    host LowCardinality(String) DEFAULT '',
+    rows_before UInt64 DEFAULT 0,
+    rows_after UInt64 DEFAULT 0,
+    detail String DEFAULT ''
+)
+-- Plain MergeTree, and nothing ever updates a row: the history IS the table, and the
+-- current state of a migration is argMax(status, event_at) over its id. A migration
+-- that failed and was retried should read as exactly that, not as a single row whose
+-- earlier attempts were overwritten.
+ENGINE = MergeTree
+ORDER BY (event_at, kind, id);

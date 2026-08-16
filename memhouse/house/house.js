@@ -34,6 +34,30 @@
 const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
 
 /**
+ * The house's own record of itself — not rooms. Nothing about a conversation lives in
+ * them, the shipper's guards do not require them, and a member who cannot create them
+ * still ships normally.
+ */
+const META_TYPES = ['house_meta', 'house_events'];
+
+/**
+ * What generation of the schema a house is at. Bumped only when existing rooms have to be
+ * REBUILT to keep working — a new column is not a version, because ensureSchema rolls one
+ * out in place.
+ *
+ *   1  0.4.x–0.9.x  shared rooms, origin in the transcript keys
+ *   2  0.10.0       epoch in the transcript keys; the shipper became insert-only
+ *
+ * A house at 1 is not broken, it is un-migrated: its rooms cannot hold two parses of a
+ * session, so the shipper refuses to write rather than overwrite. `memhouse migrate-rooms`
+ * moves it to 2.
+ */
+const SCHEMA_VERSION = 2;
+const MIGRATIONS = {
+  2: '0100-epoch-key',
+};
+
+/**
  * The sorting key each room MUST have, as the column list ClickHouse reports in
  * `system.tables.sorting_key`. Canonical here because three places check it — the shipper
  * before every pass, `doctor`, and the room rebuild — and they disagreed once already: the
@@ -133,6 +157,25 @@ function assertUsableName(name, what = 'name') {
   if (RESERVED_DBS.has(name.toLowerCase())) {
     throw new Error(`'${name}' cannot be a ${what} — it is ClickHouse's own`);
   }
+}
+
+/**
+ * One table's CREATE statement, lifted verbatim out of the schema template and renamed.
+ *
+ * Used by the room rebuild, which cannot construct the DDL from a column list: the
+ * sorting key IS the thing being changed, and the text indexes on `messages` carry a
+ * syntax (`TYPE text(tokenizer = ngrams(3))`) that no column-level reconstruction would
+ * reproduce. Taking the statement whole means a migrated room is byte-for-byte the room a
+ * fresh install would create.
+ */
+function createStatement(tpl, table, asName) {
+  // `(?:--[^\n]*\n\s*)*` between the column list and ENGINE: the template comments the
+  // engine choice on some tables, and a pattern demanding `) ENGINE` silently matched
+  // nothing for those — which reads as "the template has no such table".
+  const m = tpl.match(new RegExp(
+    `CREATE TABLE IF NOT EXISTS ${table}\\s*\\([\\s\\S]*?\\n\\)\\s*(?:--[^\\n]*\\n\\s*)*ENGINE[\\s\\S]*?;`, 'm'));
+  if (!m) throw new Error(`the schema template declares no table '${table}'`);
+  return m[0].replace(`CREATE TABLE IF NOT EXISTS ${table}`, `CREATE TABLE ${asName || table}`);
 }
 
 /**
@@ -246,6 +289,8 @@ function roomNames(user) {
   out.sessions = 'sessions';
   out.messages = currentParse('messages');
   out.tool_calls = currentParse('tool_calls');
+  // The house's own record of itself — plain names, nothing to filter.
+  for (const t of META_TYPES) { out[t] = t; out[`${t}_raw`] = t; }
   out.sessions_v = sessionsRollup(out);
   return out;
 }
@@ -264,7 +309,8 @@ async function resolveRooms(client) {
 }
 
 module.exports = {
-  ROOM_TYPES, ROOM_KEYS, keyProblem, READ_SETTINGS, MEMBER_PIN,
+  ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MIGRATIONS, ROOM_KEYS, keyProblem,
+  READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
-  sessionsRollup, currentParse, roomNames, currentUser, resolveRooms,
+  sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,
 };

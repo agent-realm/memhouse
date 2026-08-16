@@ -290,6 +290,77 @@ async function main() {
       `${rows.length} physical rows for a 4-message session — appending must not fork the session`);
   });
 
+  // ── the house's record of itself ──────────────────────────────────────────────
+  await test('the house records its schema generation and who ships into it, once', async () => {
+    const meta = new Map((await raw('SELECT key, value FROM house_meta FINAL')).map((r) => [r.key, r.value]));
+    assert.strictEqual(meta.get('schema_version'), '2', 'the house does not know its schema generation');
+    assert.strictEqual(meta.get(`client_version:${USER}`), require(path.join(ROOT, 'package.json')).version);
+
+    const before = (await raw('SELECT count() AS n FROM house_events'))[0].n;
+    assert.ok(Number(before) >= 2, `expected a schema and a version event, got ${before}`);
+    // Written only on CHANGE. A row per pass would make this a heartbeat log — 288 a day
+    // per machine under --loop — and bury the one question it exists to answer.
+    await ship.runShip(client);
+    const after = (await raw('SELECT count() AS n FROM house_events'))[0].n;
+    assert.strictEqual(Number(after), Number(before), 'an unchanged pass wrote another event');
+  });
+
+  // ── migrating a house built by 0.9.0 ──────────────────────────────────────────
+  await test('migrate-rooms rebuilds a pre-epoch house without losing a row or restamping one', async () => {
+    const db = 'oldhouse';
+    const exec = async (sql, settings = '') => {
+      const res = await fetch(`${process.env.MEMHOUSE_URL}/?database=${db}${settings}`, { method: 'POST', body: sql });
+      const text = await res.text();
+      if (!res.ok) throw new Error(text.trim().split('\n')[0]);
+      return text.trim();
+    };
+    await fetch(`${process.env.MEMHOUSE_URL}/`, { method: 'POST', body: `CREATE DATABASE IF NOT EXISTS ${db}` });
+    // 0.9.0's shape: origin in the key, no epoch anywhere.
+    await exec(`CREATE TABLE messages (
+        session_id String, seq UInt32, source LowCardinality(String), host LowCardinality(String),
+        ts DateTime64(3,'UTC'), role LowCardinality(String), model LowCardinality(String) DEFAULT '',
+        input_tokens UInt64 DEFAULT 0, output_tokens UInt64 DEFAULT 0,
+        cache_read_tokens UInt64 DEFAULT 0, cache_write_tokens UInt64 DEFAULT 0,
+        text String, project String DEFAULT '', folder String DEFAULT '',
+        is_subagent Bool DEFAULT false, extra JSON, line_hash UInt64,
+        origin LowCardinality(String) DEFAULT 'ship',
+        user_id String MATERIALIZED currentUser(),
+        ingested_at DateTime64(3,'UTC') DEFAULT now64(3)
+      ) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (session_id, user_id, origin, seq)`);
+    await exec("CREATE TABLE sessions (session_id String, source LowCardinality(String), host LowCardinality(String), name String DEFAULT '', mode LowCardinality(String) DEFAULT '', folder String DEFAULT '', project String DEFAULT '', git_branch String DEFAULT '', created_at Nullable(DateTime64(3,'UTC')), last_updated_at Nullable(DateTime64(3,'UTC')), message_count UInt32 DEFAULT 0, path String DEFAULT '', extra JSON, origin LowCardinality(String) DEFAULT 'ship', user_id String MATERIALIZED currentUser(), ingested_at DateTime64(3,'UTC') DEFAULT now64(3)) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (session_id, user_id)");
+    await exec("CREATE TABLE tool_calls (session_id String, seq UInt32, idx UInt32, source LowCardinality(String), host LowCardinality(String), tool_name LowCardinality(String), args String DEFAULT '{}', ts DateTime64(3,'UTC'), project String DEFAULT '', folder String DEFAULT '', origin LowCardinality(String) DEFAULT 'ship', user_id String MATERIALIZED currentUser(), ingested_at DateTime64(3,'UTC') DEFAULT now64(3)) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (session_id, user_id, origin, idx)");
+    // Two writers, and one of them is NOT the account running the migration. user_id is
+    // MATERIALIZED currentUser(), so a naive INSERT SELECT would rewrite every one of
+    // these rows to say `default` — silently reassigning who said what in a shared house.
+    await exec(`INSERT INTO messages (session_id, seq, source, host, ts, role, text, line_hash, extra, user_id) VALUES
+      ('old:1', 0, 'claude', 'h', now64(3), 'user', 'mine', 0, '{}', 'default'),
+      ('old:1', 1, 'claude', 'h', now64(3), 'user', 'also mine', 0, '{}', 'default'),
+      ('old:2', 0, 'codex', 'h', now64(3), 'user', 'a housemate wrote this', 0, '{}', 'housemate')`,
+    '&insert_allow_materialized_columns=1');
+
+    const out = execFileSync(process.execPath,
+      [path.join(ROOT, 'bin', 'memhouse.js'), 'migrate-rooms', '--yes'],
+      { encoding: 'utf-8', env: { ...process.env, MEMHOUSE_DB: db } });
+    assert.match(out, /house is at schema 2/, out);
+
+    const key = await exec("SELECT sorting_key FROM system.tables WHERE database = 'oldhouse' AND name = 'messages'");
+    assert.strictEqual(key, 'session_id, user_id, origin, epoch, seq');
+    const rows = (await exec('SELECT user_id, text FROM messages FINAL ORDER BY session_id, seq FORMAT JSONEachRow'))
+      .split('\n').map((l) => JSON.parse(l));
+    assert.strictEqual(rows.length, 3, 'the migration lost a row');
+    assert.strictEqual(rows[2].user_id, 'housemate', 'the migration restamped a housemate\'s rows as its own');
+    // Nothing deleted: the old room is still there, under a name that says what it is.
+    const keptRows = await exec("SELECT count() FROM messages_pre_epoch");
+    assert.strictEqual(keptRows, '3');
+    const ev = await exec("SELECT status FROM house_events WHERE kind = 'migration' AND id = '0100-epoch-key' ORDER BY event_at DESC LIMIT 1");
+    assert.strictEqual(ev, 'applied');
+    // And it is idempotent: a second run finds nothing to do rather than rebuilding again.
+    const again = execFileSync(process.execPath,
+      [path.join(ROOT, 'bin', 'memhouse.js'), 'migrate-rooms', '--yes'],
+      { encoding: 'utf-8', env: { ...process.env, MEMHOUSE_DB: db } });
+    assert.match(again, /already carries the schema 2 sorting key/, again);
+  });
+
   await client.close();
   fs.rmSync(home, { recursive: true, force: true });
   console.log(`\n${passed} passed, ${failed} failed  (${IMAGE})`);

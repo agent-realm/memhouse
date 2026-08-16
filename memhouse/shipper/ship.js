@@ -59,7 +59,13 @@ const selfUpdate = require('../self-update');
 // Captured at require time, which is as close to "what this process booted with" as it
 // gets. Taking it later would record whatever an upgrade had already replaced.
 const selfSnap = selfUpdate.snapshot(__filename);
-const { resolveRooms, READ_SETTINGS, ROOM_TYPES, keyProblem } = require('../house/house');
+const {
+  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, keyProblem,
+} = require('../house/house');
+// Rooms plus the house's own record of itself. Every table the template declares, which
+// is what the column healer and the drift warning have to cover — a column added to
+// house_events would otherwise roll out to nobody.
+const ALL_TABLES = [...ROOM_TYPES, ...META_TYPES];
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -281,7 +287,7 @@ function makeClient() {
  */
 function templateColumns(tpl) {
   const out = {};
-  for (const t of ROOM_TYPES) {
+  for (const t of ALL_TABLES) {
     const re = new RegExp(`CREATE TABLE IF NOT EXISTS ${t}\\s*\\(([\\s\\S]*?)\\n\\)`, 'm');
     const m = tpl.match(re);
     if (!m) continue;
@@ -323,7 +329,7 @@ async function warnMissingColumns(client, rooms) {
   catch { return; }
   const want = templateColumns(tpl);
   const missing = [];
-  for (const t of ROOM_TYPES) {
+  for (const t of ALL_TABLES) {
     try {
       const rs = await client.query({
         query: 'SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {n:String}',
@@ -445,7 +451,7 @@ async function ensureSchema(client) {
   // It also made the grant a lie: rooms.js and INSTALL.md both say ALTER ADD COLUMN is
   // granted "for ensureSchema's rollout", and no rollout of anything but `origin` existed.
   const wantCols = templateColumns(tpl);
-  for (const t of ROOM_TYPES) {
+  for (const t of ALL_TABLES) {
     let have = new Set();
     try {
       const rs = await client.query({
@@ -469,34 +475,71 @@ async function ensureSchema(client) {
         }
       }
     }
-    try {
-      await client.command({
-        query: `ALTER TABLE ${rooms[`${t}_raw`]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
-        // 25.11 refuses ANY alter on a table carrying the messages text indexes unless
-        // this is set — including an ADD COLUMN that has nothing to do with them
-        // (Code: 344, SUPPORT_IS_DISABLED). Without it the backfill fails silently and
-        // the guard ends up missing on precisely the houses that need upgrading. A no-op
-        // on 26.x, and query-scoped, so it needs no server config.
-        clickhouse_settings: { allow_experimental_full_text_index: 1 },
-      });
-    } catch (e) {
-      // No rights to alter is genuinely not fatal — a member on someone else's house
-      // cannot roll a column out and does not need to. But this used to swallow
-      // EVERYTHING, including the 25.11 Code 344 this call carries a setting to avoid, and
-      // `schema ensured` printed regardless. Name anything that is not a permissions
-      // problem, and keep going.
-      const m = e && e.message ? e.message : String(e);
-      if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
-        console.error(`[memhouse] could not add the 'origin' column to ${rooms[`${t}_raw`]}: ${m}`);
-        console.error('[memhouse] the room still works; a house that predates 0.4.4 needs rebuilding — memhouse doctor');
-      }
-    }
   }
+  // There used to be a second, hardcoded `ADD COLUMN … origin` here, from when the healer
+  // above could only add that one column. It is redundant now that the generic loop reads
+  // the template correctly — and it would have been actively wrong once this loop covered
+  // house_meta and house_events, which have no origin and want none.
 
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
   return stmts.length;
+}
+
+/**
+ * Keep the house's record of itself current: which schema generation it is at, and which
+ * memhouse version is writing into it.
+ *
+ * Written only when something CHANGED. A row per pass would turn house_events into a
+ * heartbeat log — under `--loop` at the default interval that is 288 rows a day per
+ * machine, and the one question the table exists to answer ("when did this house move,
+ * and who moved it") would be buried in noise.
+ *
+ * Entirely best-effort. A member on someone else's house may hold no rights on these
+ * tables, or the house may predate them; none of that is a reason to stop shipping, so
+ * every failure here is swallowed. The rooms are the product, this is the paperwork.
+ */
+async function recordHouseState(client, rooms, host) {
+  const version = require('../../package.json').version;
+  try {
+    const rs = await client.query({
+      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', {ck:String})`,
+      query_params: { ck: `client_version:${rooms.user}` }, format: 'JSONEachRow',
+    });
+    const have = new Map((await rs.json()).map((r) => [r.key, String(r.value)]));
+    const events = [];
+    const metas = [];
+    if (have.get('schema_version') !== String(SCHEMA_VERSION)) {
+      // The rooms are at this generation — assertRoomKeys ran before this and refuses to
+      // let a pass reach here otherwise, so recording it is a statement of fact, not a
+      // claim about what someone intends to do.
+      metas.push({ key: 'schema_version', value: String(SCHEMA_VERSION), host });
+      events.push({
+        kind: 'schema', status: 'observed', host,
+        from_version: have.get('schema_version') || '', to_version: String(SCHEMA_VERSION),
+        detail: 'rooms carry the current sorting keys',
+      });
+    }
+    const clientKey = `client_version:${rooms.user}`;
+    if (have.get(clientKey) !== version) {
+      metas.push({ key: clientKey, value: version, host });
+      events.push({
+        kind: 'version', status: 'observed', host,
+        from_version: have.get(clientKey) || '', to_version: version,
+        detail: `${rooms.user} shipping from ${host}`,
+      });
+    }
+    if (!metas.length) return;
+    await client.insert({
+      table: rooms.house_meta_raw, values: metas, format: 'JSONEachRow',
+      clickhouse_settings: { async_insert: 0 },
+    });
+    await client.insert({
+      table: rooms.house_events_raw, values: events, format: 'JSONEachRow',
+      clickhouse_settings: { async_insert: 0 },
+    });
+  } catch { /* the house's paperwork is never worth failing a pass over */ }
 }
 
 // Incremental state: what the house already holds, keyed by session_id. We compare
@@ -820,6 +863,7 @@ async function runShip(client, opts = {}) {
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
+  await recordHouseState(client, rooms, host);
   const existing = await loadExisting(client, rooms);
   const chats = getAllChats();
 
