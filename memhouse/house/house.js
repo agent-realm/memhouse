@@ -136,6 +136,52 @@ function assertUsableName(name, what = 'name') {
 }
 
 /**
+ * A transcript room restricted to the CURRENT parse of each session — SQL text, usable
+ * wherever the table name would go.
+ *
+ * The shipper keeps superseded parses (see the epoch column in schema.sql.tpl), so the
+ * physical room can hold a session twice: five messages at epoch 0, three at epoch 1.
+ * Reading that raw does not merely show stale rows, it makes every aggregate wrong —
+ * `total_msgs`, token sums, cost, model counts — which is a worse failure than the stale
+ * tail the epoch replaced. The filter is therefore not optional, and it is not left to
+ * each query to remember: `roomNames()` hands out THIS for `messages` / `tool_calls`, and
+ * the bare table only under `messages_raw` / `tool_calls_raw`. A read path nobody thought
+ * to update is correct; a write path nobody updated fails loudly on an insert into a
+ * subquery.
+ *
+ * `origin != 'ship'` first, and it carries the weight: epochs belong to the shipper, and
+ * an imported row sits at epoch 0 forever. Filtering it against the shipper's current
+ * epoch would hide the entire import behind any session that had been compacted once —
+ * the same class of loss as the delete this design removed, arriving as a read that
+ * silently returns less.
+ *
+ * The projection is deliberate: `*` omits MATERIALIZED columns, and the ones this schema
+ * has are all load-bearing. `user_id` is what every consumer scopes by (the rollup JOINs
+ * on it) and `text_ngram` / `text_word` are what `memhouse search` matches against — a
+ * bare `SELECT *` drops all three, and the search fails with `Unknown identifier`.
+ * Listing them costs nothing where they are unused: ClickHouse prunes unread columns out
+ * of a subquery.
+ */
+const ROOM_MATERIALIZED = {
+  messages: ['user_id', 'text_ngram', 'text_word'],
+  tool_calls: ['user_id'],
+};
+
+function currentParse(table) {
+  const extra = (ROOM_MATERIALIZED[table] || ['user_id']).join(', ');
+  return `(
+    SELECT *, ${extra}
+    FROM ${table} FINAL
+    WHERE origin != 'ship'
+       OR (session_id, user_id, epoch) IN (
+            SELECT session_id, user_id, max(epoch)
+            FROM ${table}
+            WHERE origin = 'ship'
+            GROUP BY session_id, user_id)
+  )`;
+}
+
+/**
  * The session rollup as SQL text, usable in the same `FROM ... AS c` position a view name
  * would occupy. Groups by (session_id, user_id): two housemates' rows never merge, even
  * on a colliding session_id.
@@ -170,7 +216,7 @@ function sessionsRollup({ sessions, messages }) {
         coalesce(sumIf(length(m.text), m.role = 'assistant'), 0) AS assistant_chars,
         coalesce(substring(argMinIf(m.text, m.seq, m.role = 'user' AND m.text != ''), 1, 200), '') AS first_prompt
     FROM ${sessions} AS s FINAL
-    LEFT JOIN ${messages} AS m FINAL ON m.session_id = s.session_id AND m.user_id = s.user_id
+    LEFT JOIN ${messages} AS m ON m.session_id = s.session_id AND m.user_id = s.user_id
     GROUP BY s.session_id, s.user_id
     SETTINGS join_use_nulls = 1
   )`;
@@ -192,7 +238,14 @@ const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
  */
 function roomNames(user) {
   const out = { member: user, user };
-  for (const t of ROOM_TYPES) out[t] = t;
+  // The raw table names — for INSERT, for DDL, and for the shipper's own bookkeeping
+  // reads, which have to see every epoch to decide which one to write next.
+  for (const t of ROOM_TYPES) out[`${t}_raw`] = t;
+  // What everything else gets. `sessions` is unfiltered: it is one metadata row per
+  // session by construction, latest-wins, and carries no epoch anyone may read.
+  out.sessions = 'sessions';
+  out.messages = currentParse('messages');
+  out.tool_calls = currentParse('tool_calls');
   out.sessions_v = sessionsRollup(out);
   return out;
 }
@@ -213,5 +266,5 @@ async function resolveRooms(client) {
 module.exports = {
   ROOM_TYPES, ROOM_KEYS, keyProblem, READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
-  sessionsRollup, roomNames, currentUser, resolveRooms,
+  sessionsRollup, currentParse, roomNames, currentUser, resolveRooms,
 };

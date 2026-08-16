@@ -242,6 +242,42 @@ async function main() {
       'a ship pass removed rows it did not write');
   });
 
+  await test('a session that was forked settles again — the next pass skips it', async () => {
+    // The epoch is bookkeeping the SHIPPER has to read back correctly, and getting it
+    // wrong is not visible as an error: if the skip predicate counted rows across all
+    // epochs, `intact` would never be true again and every compacted session would
+    // re-ship on every pass forever, growing the house by one parse each time.
+    const id = 'shrink-1';
+    const first = await ship.runShip(client);
+    assert.strictEqual(first.bumped, 0, 'an unchanged source forked the session again');
+    const second = await ship.runShip(client);
+    assert.strictEqual(second.bumped, 0);
+    const epochs = await raw(
+      `SELECT DISTINCT epoch FROM messages FINAL WHERE session_id = {s:String} ORDER BY epoch`,
+      { s: `claude:${id}` });
+    assert.deepStrictEqual(epochs.map((r) => Number(r.epoch)), [0, 1],
+      'the house grew an epoch for a source that never changed');
+  });
+
+  await test('a compacted session — same length, rewritten head — keeps both parses', async () => {
+    // Claude Code compaction rewrites a transcript in place. Bumping on shrink alone
+    // would preserve the tail and still overwrite the rewritten head: the same loss,
+    // through the merge instead of the delete.
+    const id = 'compact-1';
+    fixture.chats = [chat(id, ['c1 original', 'c2 original', 'c3 original'])];
+    await ship.runShip(client, { full: true });
+    fixture.chats = [chat(id, ['[compacted summary]', 'c2 original', 'c3 original'], { updatedAt: T0 + 60000 })];
+    const r = await ship.runShip(client);
+    assert.strictEqual(r.bumped, 1, 'a rewritten message did not fork the session');
+
+    const kept = new Set((await raw(`SELECT text FROM messages FINAL WHERE session_id = {s:String}`,
+      { s: `claude:${id}` })).map((x) => x.text));
+    assert.ok(kept.has('c1 original'), 'the rewritten message destroyed the original');
+    const shown = (await read(`SELECT text FROM {{messages}} WHERE session_id = {s:String} ORDER BY seq`,
+      { s: `claude:${id}` })).map((x) => x.text);
+    assert.deepStrictEqual(shown, ['[compacted summary]', 'c2 original', 'c3 original']);
+  });
+
   // ── the common case must stay free ────────────────────────────────────────────
   await test('growth re-ships in place — an unchanged prefix costs no extra rows', async () => {
     const id = 'grow-1';

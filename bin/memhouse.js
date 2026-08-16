@@ -786,11 +786,11 @@ async function sortingKeyProblem(cfg) {
     const rooms = await roomsFor(cfg);
     const wrong = [];
     for (const t of ROOM_TYPES) {
-      const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[t]}'`, { database: '' });
+      const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[`${t}_raw`]}'`, { database: '' });
       const key = r[0]?.k;
       if (!key) continue;
       const problem = keyProblem(t, key);
-      if (problem) wrong.push(`${rooms[t]} ${problem}`);
+      if (problem) wrong.push(`${rooms[`${t}_raw`]} ${problem}`);
     }
     return wrong.length ? wrong.join('; ') : null;
   } catch { return null; }  // unreachable house is a different check's problem
@@ -953,7 +953,7 @@ async function cmdInstall({ interactive }) {
   // the step reports what is missing and names the command that fixes it.
   const r = await roomsFor(cfg);
   // Three rooms. The session rollup is a saved query over them, not a fourth object.
-  const want = ROOM_TYPES.map((t) => r[t]);
+  const want = ROOM_TYPES.map((t) => r[`${t}_raw`]);
   const present = async () => {
     const list = `'${want.join("','")}'`;
     return (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${list})`, { database: '' })).map((x) => x.name);
@@ -1256,7 +1256,7 @@ async function cmdDoctor() {
   }
   // "rooms for X" means the NAMES resolved, not that the rooms exist — and it printed a
   // green tick immediately above `✗ schema: 0/3 rooms`, contradicting the next line.
-  if (rooms) add(true, `member is '${rooms.member}' — rooms would be ${ROOM_TYPES.map((ty) => rooms[ty]).join(', ')}`);
+  if (rooms) add(true, `member is '${rooms.member}' — rooms would be ${ROOM_TYPES.map((ty) => rooms[`${ty}_raw`]).join(', ')}`);
   // Every check below reads a room NAME, so none of them can run without `rooms`.
   // Reaching into a null here is how doctor used to print a raw
   // "Cannot read properties of null (reading 'sessions')" as its hint — a stack-trace
@@ -1268,7 +1268,7 @@ async function cmdDoctor() {
     try {
       // Three rooms. The session rollup every read path goes through is a saved query over
       // exactly these, so if they are here it is too — there is no fourth object to lose.
-      const objects = ROOM_TYPES.map((t) => rooms[t]);
+      const objects = ROOM_TYPES.map((t) => rooms[`${t}_raw`]);
       const want = objects.map((n) => `'${n}'`).join(',');
       const t = (await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name IN (${want})`, { database: '' })).length;
       // Name what is MISSING. The parenthesised list used to be what should exist, so
@@ -1298,19 +1298,19 @@ async function cmdDoctor() {
       const wrong = [];
       let roomsSeen = 0;
       for (const ty of ROOM_TYPES) {
-        const cols = await chRows(cfg, `SELECT name, type, default_kind FROM system.columns WHERE database = '${cfg.db}' AND table = '${rooms[ty]}'`, { database: '' });
+        const cols = await chRows(cfg, `SELECT name, type, default_kind FROM system.columns WHERE database = '${cfg.db}' AND table = '${rooms[`${ty}_raw`]}'`, { database: '' });
         if (!cols.length) continue;
         roomsSeen++;
         const byName = new Map(cols.map((r) => [r.name, r]));
         for (const c of (want[ty] || [])) {
           const got = byName.get(c.name);
-          if (!got) { missing.push(`${rooms[ty]}.${c.name}`); continue; }
+          if (!got) { missing.push(`${rooms[`${ty}_raw`]}.${c.name}`); continue; }
           // The template's declaration is `<type> [DEFAULT x | MATERIALIZED x]`; compare
           // the type word and, when the template says MATERIALIZED, that the column still is.
           const wantType = c.type.replace(/\s+(DEFAULT|MATERIALIZED|ALIAS|EPHEMERAL)\b[\s\S]*$/i, '').trim();
           const wantKind = /\bMATERIALIZED\b/i.test(c.type) ? 'MATERIALIZED' : null;
-          if (wantType && got.type !== wantType) wrong.push(`${rooms[ty]}.${c.name} is ${got.type}, template says ${wantType}`);
-          else if (wantKind && got.default_kind !== 'MATERIALIZED') wrong.push(`${rooms[ty]}.${c.name} lost its MATERIALIZED clause`);
+          if (wantType && got.type !== wantType) wrong.push(`${rooms[`${ty}_raw`]}.${c.name} is ${got.type}, template says ${wantType}`);
+          else if (wantKind && got.default_kind !== 'MATERIALIZED') wrong.push(`${rooms[`${ty}_raw`]}.${c.name} lost its MATERIALIZED clause`);
         }
       }
       const bad2 = missing.length + wrong.length;
@@ -1329,7 +1329,7 @@ async function cmdDoctor() {
       const wrongKeys = [];
       let checked = 0;
       for (const t of ROOM_TYPES) {
-        const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[t]}'`, { database: '' });
+        const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[`${t}_raw`]}'`, { database: '' });
         const key = r[0]?.k;
         if (!key) continue;
         checked++;
@@ -1337,7 +1337,7 @@ async function cmdDoctor() {
         // disagreeing about what a correct room looks like is how a house gets shipped
         // into after doctor called it healthy.
         const problem = keyProblem(t, key);
-        if (problem) wrongKeys.push(`${rooms[t]} ${problem}`);
+        if (problem) wrongKeys.push(`${rooms[`${t}_raw`]} ${problem}`);
       }
       // `checked` matters: every room name that resolved to nothing was skipped by the
       // `continue` above, so on an empty house this printed a green "sorting keys carry
@@ -1369,7 +1369,7 @@ async function cmdDoctor() {
       // every identity-bound path at once, including its owner's own reset.
       let total = 0; let blank = 0;
       for (const ty of ROOM_TYPES) {
-        const r = (await chRows(cfg, `SELECT count() AS c, countIf(user_id = '') AS blank FROM ${rooms[ty]} FINAL`))[0] || {};
+        const r = (await chRows(cfg, `SELECT count() AS c, countIf(user_id = '') AS blank FROM ${rooms[`${ty}_raw`]} FINAL`))[0] || {};
         total += Number(r.c || 0); blank += Number(r.blank || 0);
       }
       add(blank === 0,
@@ -1492,9 +1492,9 @@ async function cmdDoctor() {
     // from memory-house, which is a fact about the past, not an adapter that needs fixing.
     // Naming them alongside a live adapter gap makes the real one easy to dismiss.
     const zero = await chRows(cfg,
-      `SELECT source, count() AS n FROM ${rooms.messages} FINAL WHERE role = 'assistant' AND origin = 'ship' GROUP BY source HAVING sum(input_tokens) + sum(output_tokens) = 0 ORDER BY source`);
+      `SELECT source, count() AS n FROM ${rooms.messages_raw} FINAL WHERE role = 'assistant' AND origin = 'ship' GROUP BY source HAVING sum(input_tokens) + sum(output_tokens) = 0 ORDER BY source`);
     const zeroImported = await chRows(cfg,
-      `SELECT count() AS n FROM ${rooms.messages} FINAL WHERE role = 'assistant' AND origin != 'ship' AND input_tokens = 0 AND output_tokens = 0`);
+      `SELECT count() AS n FROM ${rooms.messages_raw} FINAL WHERE role = 'assistant' AND origin != 'ship' AND input_tokens = 0 AND output_tokens = 0`);
     const impN = Number(zeroImported[0]?.n || 0);
     add(zero.length === 0,
       zero.length === 0
@@ -1866,12 +1866,12 @@ async function cmdPlugins() {
 async function cmdReset() {
   const cfg = requireConfig(resolveConfig(), 'reset');
   const r = await roomsFor(cfg);
-  const targets = ROOM_TYPES.map((t) => r[t]);
+  const targets = ROOM_TYPES.map((t) => r[`${t}_raw`]);
 
   // Imported rows are NOT the shipper's to remove, and reset is a re-ship: whatever it
   // deletes has to be something re-shipping puts back. An import cannot be — it came from
   // an older house, another product, or a machine that no longer exists. Scoped to
-  // origin='ship' by default, therefore, exactly like the shipper's per-session clear.
+  // origin='ship' by default, therefore, exactly like the shipper, which supersedes only its own rows.
   //
   // This path was missed when that clear was fixed, and it is the one place the 0.4.4 data
   // loss survived: `reset --yes` took a house from 2 imported rows to 0 while the prompt

@@ -327,11 +327,11 @@ async function warnMissingColumns(client, rooms) {
     try {
       const rs = await client.query({
         query: 'SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {n:String}',
-        query_params: { n: rooms[t] }, format: 'JSONEachRow',
+        query_params: { n: rooms[`${t}_raw`] }, format: 'JSONEachRow',
       });
       const have = new Set((await rs.json()).map((r) => r.name));
       if (!have.size) continue;
-      for (const c of (want[t] || [])) if (!have.has(c.name)) missing.push(`${rooms[t]}.${c.name}`);
+      for (const c of (want[t] || [])) if (!have.has(c.name)) missing.push(`${rooms[`${t}_raw`]}.${c.name}`);
     } catch { /* unreadable rooms are assertRoomsExist's problem */ }
   }
   if (missing.length) {
@@ -344,11 +344,11 @@ async function warnMissingColumns(client, rooms) {
 async function assertRoomsExist(client, rooms) {
   const rs = await client.query({
     query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ({n:Array(String)})`,
-    query_params: { n: ROOM_TYPES.map((t) => rooms[t]) },
+    query_params: { n: ROOM_TYPES.map((t) => rooms[`${t}_raw`]) },
     format: 'JSONEachRow',
   });
   const have = new Set((await rs.json()).map((r) => r.name));
-  const missing = ROOM_TYPES.map((t) => rooms[t]).filter((n) => !have.has(n));
+  const missing = ROOM_TYPES.map((t) => rooms[`${t}_raw`]).filter((n) => !have.has(n));
   if (!missing.length) return;
   throw new Error(
     `'${rooms.member}' has no ${missing.join(', ')} in this house.\n`
@@ -370,13 +370,13 @@ async function assertRoomKeys(client, rooms) {
   for (const t of ROOM_TYPES) {
     const rs = await client.query({
       query: `SELECT sorting_key FROM system.tables WHERE database = currentDatabase() AND name = {n:String}`,
-      query_params: { n: rooms[t] }, format: 'JSONEachRow',
+      query_params: { n: rooms[`${t}_raw`] }, format: 'JSONEachRow',
     });
     const row = (await rs.json())[0];
     // A room that does not exist at all is assertRoomsExist's job and is reported there.
     if (!row) continue;
     const problem = keyProblem(t, row.sorting_key);
-    if (problem) wrong.push(`${rooms[t]} ${problem}`);
+    if (problem) wrong.push(`${rooms[`${t}_raw`]} ${problem}`);
   }
   if (wrong.length) {
     throw new Error(
@@ -427,10 +427,11 @@ async function ensureSchema(client) {
     console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);
     console.error('[memhouse] creating or replacing a ROOM is the house owner\'s job; adding a missing COLUMN is not.');
   }
-  // A house created before origin existed has no such column, and the clear binds it —
-  // an unguarded DELETE there would be the old destructive behaviour, and a guarded one
-  // would error. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
-  // pre-existing row reads as 'ship', which is what it was.
+  // A house created before origin existed has no such column, and every read and write
+  // scopes by it. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
+  // pre-existing row reads as 'ship', which is what it was. (Having the COLUMN is not
+  // having it in the sorting KEY — that is assertRoomKeys' refusal and migrate-rooms'
+  // job, because ORDER BY cannot be altered.)
   //
   // EVERY column the template declares, not just `origin`.
   //
@@ -449,7 +450,7 @@ async function ensureSchema(client) {
     try {
       const rs = await client.query({
         query: 'SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {n:String}',
-        query_params: { n: rooms[t] }, format: 'JSONEachRow',
+        query_params: { n: rooms[`${t}_raw`] }, format: 'JSONEachRow',
       });
       have = new Set((await rs.json()).map((r) => r.name));
     } catch { /* unreadable: the checks above already reported why */ }
@@ -457,20 +458,20 @@ async function ensureSchema(client) {
       if (have.size && have.has(col.name)) continue;
       try {
         await client.command({
-          query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
+          query: `ALTER TABLE ${rooms[`${t}_raw`]} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
           clickhouse_settings: { allow_experimental_full_text_index: 1 },
         });
-        if (have.size) console.log(`[memhouse] added missing column ${rooms[t]}.${col.name}`);
+        if (have.size) console.log(`[memhouse] added missing column ${rooms[`${t}_raw`]}.${col.name}`);
       } catch (e) {
         const m = e && e.message ? e.message : String(e);
         if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
-          console.error(`[memhouse] could not add ${rooms[t]}.${col.name}: ${m}`);
+          console.error(`[memhouse] could not add ${rooms[`${t}_raw`]}.${col.name}: ${m}`);
         }
       }
     }
     try {
       await client.command({
-        query: `ALTER TABLE ${rooms[t]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
+        query: `ALTER TABLE ${rooms[`${t}_raw`]} ADD COLUMN IF NOT EXISTS origin LowCardinality(String) DEFAULT 'ship'`,
         // 25.11 refuses ANY alter on a table carrying the messages text indexes unless
         // this is set — including an ADD COLUMN that has nothing to do with them
         // (Code: 344, SUPPORT_IS_DISABLED). Without it the backfill fails silently and
@@ -486,7 +487,7 @@ async function ensureSchema(client) {
       // problem, and keep going.
       const m = e && e.message ? e.message : String(e);
       if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
-        console.error(`[memhouse] could not add the 'origin' column to ${rooms[t]}: ${m}`);
+        console.error(`[memhouse] could not add the 'origin' column to ${rooms[`${t}_raw`]}: ${m}`);
         console.error('[memhouse] the room still works; a house that predates 0.4.4 needs rebuilding — memhouse doctor');
       }
     }
@@ -505,11 +506,11 @@ async function ensureSchema(client) {
 // must be decidable WITHOUT calling getMessages on every chat.
 async function loadExisting(client, rooms) {
   const rs = await client.query({
-    query: `SELECT session_id, last_updated_at, message_count, extra FROM ${rooms.sessions} FINAL WHERE user_id = currentUser()`,
+    query: `SELECT session_id, last_updated_at, message_count, extra FROM ${rooms.sessions_raw} FINAL WHERE user_id = currentUser()`,
     format: 'JSONEachRow',
   });
-  // Actual message rows per session: an interrupted re-ship (crash between the
-  // clear-DELETE and the inserts, or mid-flush on a large transcript) leaves a
+  // Actual message rows per session: an interrupted re-ship (a crash mid-flush on a
+  // large transcript, or between the sessions insert and the messages one) leaves a
   // fresh-looking session row with a missing or PARTIAL transcript — the skip
   // must compare the real row count against the recorded message_count, not
   // merely check that some row exists.
@@ -520,12 +521,26 @@ async function loadExisting(client, rooms) {
   // on every pass — no data lost, but the incremental skip silently stops existing.
   // Measured: adding one origin='import' row to a settled session made it re-ship
   // every pass; removing it froze the session again.
+  //
+  // GROUPED BY EPOCH, and only the newest epoch's rows count. A session whose parse was
+  // superseded still holds every older parse — that is the point of the epoch — so a
+  // plain count would exceed message_count forever, `intact` would never be true, and the
+  // incremental skip would quietly stop existing for exactly the sessions that have been
+  // through a compaction. One row per (session, epoch); epochs are rare, so this stays
+  // the same size as the per-session grouping it replaces.
   const mr = await client.query({
-    query: `SELECT session_id, countIf(origin = 'ship') AS n FROM ${rooms.messages} FINAL WHERE user_id = currentUser() GROUP BY session_id`,
+    query: `SELECT session_id, epoch, count() AS n, max(seq) AS max_seq FROM ${rooms.messages_raw} FINAL
+            WHERE user_id = currentUser() AND origin = 'ship' GROUP BY session_id, epoch`,
     format: 'JSONEachRow',
   });
-  const msgCounts = new Map();
-  for (const r of await mr.json()) msgCounts.set(r.session_id, toInt(r.n));
+  // { session_id → { epoch, n, maxSeq } } for the CURRENT epoch only.
+  const msgState = new Map();
+  for (const r of await mr.json()) {
+    const epoch = toInt(r.epoch);
+    const cur = msgState.get(r.session_id);
+    if (cur && cur.epoch >= epoch) continue;
+    msgState.set(r.session_id, { epoch, n: toInt(r.n), maxSeq: toInt(r.max_seq) });
+  }
   // The tool_calls room needs the same check, and used to have none. shipSession writes
   // sessions, then messages, then tool_calls — so a pass that fails during the LAST of
   // those three leaves a session whose message count matches perfectly. The next pass
@@ -534,11 +549,17 @@ async function loadExisting(client, rooms) {
   // Reproduced by dropping the room mid-pass; any transient — a ClickHouse restart, a
   // quota rejection, a network blip — reaches the same state.
   const tr = await client.query({
-    query: `SELECT session_id, countIf(origin = 'ship') AS n FROM ${rooms.tool_calls} FINAL WHERE user_id = currentUser() GROUP BY session_id`,
+    query: `SELECT session_id, epoch, count() AS n, max(idx) AS max_idx FROM ${rooms.tool_calls_raw} FINAL
+            WHERE user_id = currentUser() AND origin = 'ship' GROUP BY session_id, epoch`,
     format: 'JSONEachRow',
   });
-  const toolCounts = new Map();
-  for (const r of await tr.json()) toolCounts.set(r.session_id, toInt(r.n));
+  const toolState = new Map();
+  for (const r of await tr.json()) {
+    const epoch = toInt(r.epoch);
+    const cur = toolState.get(r.session_id);
+    if (cur && cur.epoch >= epoch) continue;
+    toolState.set(r.session_id, { epoch, n: toInt(r.n), maxIdx: toInt(r.max_idx) });
+  }
   const map = new Map();
   for (const r of await rs.json()) {
     // DateTime64 comes back as 'YYYY-MM-DD HH:MM:SS.mmm' — re-parse as UTC.
@@ -549,9 +570,20 @@ async function loadExisting(client, rooms) {
     // have tool calls re-ship exactly once and then record it. Self-correcting, and
     // cheaper than a branch that has to be remembered forever.
     const toolCount = toInt(r.extra && r.extra.toolCallCount);
-    const intact = (msgCounts.get(r.session_id) || 0) === count
-      && (toolCounts.get(r.session_id) || 0) === toolCount;
-    map.set(r.session_id, { ms, count, bc, intact });
+    const msgs = msgState.get(r.session_id);
+    const tools = toolState.get(r.session_id);
+    const intact = (msgs ? msgs.n : 0) === count && (tools ? tools.n : 0) === toolCount;
+    // The session's current epoch is whatever its ROWS say, never what the sessions row
+    // says: sessions is latest-wins with no origin in its key, so an import writing that
+    // row after a bump would hand the next pass a 0 and make it overwrite the current
+    // parse. The column there is for people, not for this.
+    const epoch = Math.max(msgs ? msgs.epoch : 0, tools ? tools.epoch : 0);
+    map.set(r.session_id, {
+      ms, count, bc, intact, epoch,
+      maxSeq: msgs ? msgs.maxSeq : -1,
+      maxIdx: tools ? tools.maxIdx : -1,
+      hasRows: Boolean(msgs || tools),
+    });
   }
   return map;
 }
@@ -672,16 +704,118 @@ function rowsForChat(chat, host) {
   return { session, msgRows, toolRows };
 }
 
+/**
+ * Which parse epoch this re-ship belongs to, and why.
+ *
+ * THE RULE: the shipper never writes over stored content that differs from what it is
+ * writing. If the new parse can be laid on top of the old one without changing or
+ * orphaning anything, it reuses the epoch and ReplacingMergeTree dedupes it exactly as
+ * before — the common case, free. Otherwise it moves to a new epoch, where the new rows
+ * cannot collide with the old ones, and the old parse stays whole.
+ *
+ * Two things make a parse un-overwritable, and both are ordinary:
+ *
+ *   SHRINK. A re-parse with fewer messages leaves the old higher-seq rows with nothing
+ *   written over them. That stale tail is what the DELETE this replaces was written to
+ *   remove — and the delete could not tell a fixed adapter bug (junk, worth removing)
+ *   from a compacted or user-deleted transcript (irreplaceable), because from outside
+ *   they look identical.
+ *
+ *   DIVERGENCE. Claude Code COMPACTS a session in place: same session, rewritten
+ *   shorter, with different content at low seq numbers. Bumping on shrink alone would
+ *   preserve the tail and still overwrite the rewritten head — the same loss, reached
+ *   through the merge instead of the delete. line_hash is already stored per row, so
+ *   comparing is a lookup, not a re-read of the source.
+ *
+ * Tool calls carry no hash, so they are compared on (tool_name, args) directly. They are
+ * derived from `m._toolCalls`, which can change while the assistant text does not.
+ *
+ * Pure, and exported: this is the decision the whole redesign rests on, and it is unit
+ * tested without a server.
+ *
+ * @param {object|null} stored  { epoch, maxSeq, maxIdx, hashes: Map<seq,string>,
+ *                                tools: Map<idx,{tool_name,args}> } — null when the
+ *                                session is not in the house yet.
+ * @param {object} incoming     { msgRows, toolRows } as built by rowsForChat.
+ * @returns {{ epoch: number, reason: string|null }} reason is null when nothing moved.
+ */
+function decideEpoch(stored, incoming) {
+  if (!stored) return { epoch: 0, reason: null };
+  const epoch = toInt(stored.epoch);
+  const bump = (reason) => ({ epoch: epoch + 1, reason });
+
+  const maxSeq = Number.isFinite(stored.maxSeq) ? stored.maxSeq : -1;
+  const maxIdx = Number.isFinite(stored.maxIdx) ? stored.maxIdx : -1;
+  if (incoming.msgRows.length - 1 < maxSeq) {
+    return bump(`${maxSeq + 1} messages stored, ${incoming.msgRows.length} parsed`);
+  }
+  if (incoming.toolRows.length - 1 < maxIdx) {
+    return bump(`${maxIdx + 1} tool calls stored, ${incoming.toolRows.length} parsed`);
+  }
+
+  // A seq the house does not hold is a gap, not a disagreement — there is nothing there
+  // to destroy, so it is not a reason to fork the session.
+  const hashes = stored.hashes || new Map();
+  for (const row of incoming.msgRows) {
+    if (row.seq > maxSeq) break;
+    const was = hashes.get(row.seq);
+    if (was !== undefined && was !== String(row.line_hash)) {
+      return bump(`message ${row.seq} was rewritten`);
+    }
+  }
+  const tools = stored.tools || new Map();
+  for (const row of incoming.toolRows) {
+    if (row.idx > maxIdx) break;
+    const was = tools.get(row.idx);
+    if (was !== undefined && (was.tool_name !== row.tool_name || was.args !== row.args)) {
+      return bump(`tool call ${row.idx} was rewritten`);
+    }
+  }
+  return { epoch, reason: null };
+}
+
+/**
+ * What the house currently holds for ONE session, at its current epoch — the input
+ * decideEpoch needs to tell an append from a rewrite.
+ *
+ * Read only for sessions actually being re-shipped, which the incremental skip has
+ * already narrowed to a handful; it replaces the two DELETE mutations that used to run
+ * per re-shipped session, so a normal pass does strictly less work than before.
+ *
+ * `toString(line_hash)`: the client is configured with
+ * output_format_json_quote_64bit_integers = 0, so a UInt64 arrives as a JSON number and
+ * everything above 2^53 comes back rounded. Comparing rounded hashes would report
+ * divergence on identical rows and fork a session on every single pass.
+ */
+async function loadStoredParse(client, rooms, id, uid, epoch) {
+  const params = { id, uid, e: epoch };
+  const mr = await client.query({
+    query: `SELECT seq, toString(line_hash) AS line_hash FROM ${rooms.messages_raw} FINAL
+            WHERE session_id = {id:String} AND user_id = {uid:String} AND origin = 'ship' AND epoch = {e:UInt32}`,
+    query_params: params, format: 'JSONEachRow',
+  });
+  const hashes = new Map();
+  for (const r of await mr.json()) hashes.set(toInt(r.seq), String(r.line_hash));
+  const tr = await client.query({
+    query: `SELECT idx, tool_name, args FROM ${rooms.tool_calls_raw} FINAL
+            WHERE session_id = {id:String} AND user_id = {uid:String} AND origin = 'ship' AND epoch = {e:UInt32}`,
+    query_params: params, format: 'JSONEachRow',
+  });
+  const tools = new Map();
+  for (const r of await tr.json()) tools.set(toInt(r.idx), { tool_name: r.tool_name, args: r.args });
+  return { hashes, tools };
+}
+
 // One shipping pass. Incremental unless opts.full: a chat is skipped when the house
 // already has it at least as fresh (last_updated_at) and at least as large
 // (extra.bubbleCount) — both readable without parsing the chat.
 async function runShip(client, opts = {}) {
   const { full = false } = opts;
   const host = hostId();
-  // Always load what the house holds — even with --full. The skip decision uses it
-  // only in incremental mode, but re-shipping a KNOWN session must clear its old
-  // message/tool rows first (a shrunken re-parse leaves stale higher-seq rows
-  // otherwise: ReplacingMergeTree collapses same-key rows only).
+  // Always load what the house holds — even with --full. The skip decision uses it only
+  // in incremental mode, but re-shipping a KNOWN session needs its current epoch and row
+  // shape: writing at the wrong epoch either forks a session that did not change, or
+  // overwrites a stored parse that did.
   const rooms = await resolveRooms(client);
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
@@ -702,7 +836,7 @@ async function runShip(client, opts = {}) {
   const flush = async (table) => {
     if (!batches[table].length) return;
     await client.insert({
-      table: rooms[table],
+      table: rooms[`${table}_raw`],
       values: batches[table],
       format: 'JSONEachRow',
       clickhouse_settings: { async_insert: 0 }, // binding: user_id stamping breaks otherwise
@@ -715,7 +849,7 @@ async function runShip(client, opts = {}) {
   };
 
   const seen = new Set(); // adapters must not double-ship a session id within a pass
-  let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0, unreadable = 0;
+  let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0, unreadable = 0, bumped = 0;
   for (const chat of chats) {
     if (chat.encrypted) continue;
     // Same canonical '<source>:<adapter-local id>' as rowsForChat: dedup and
@@ -743,11 +877,13 @@ async function runShip(client, opts = {}) {
     }
 
     // rowsForChat returns null only when getMessages() *throws*. An adapter that
-    // swallows its own failure returns [] instead, which would look like a session
-    // that genuinely has no messages — and for a known session the re-ship below
-    // deletes the old transcript before inserting that emptiness. So treat a
-    // failure recorded while reading THIS chat as unreadable too: write nothing,
-    // delete nothing, retry next pass.
+    // swallows its own failure returns [] instead, which would look like a session that
+    // genuinely has no messages — and for a known session that is a maximal shrink, so
+    // the pass would fork it to a new, EMPTY epoch and every read would show nothing
+    // where a transcript used to be. Nothing is destroyed any more, but a house that
+    // reports empty sessions after a locked SQLite file is still wrong. So treat a
+    // failure recorded while reading THIS chat as unreadable: write nothing, retry next
+    // pass.
     const errsBefore = adapterErrorSink.recorded().length;
     const rows = rowsForChat(chat, host);
     const failedHere = adapterErrorSink.recorded().slice(errsBefore).some((e) => e.source === chat.source);
@@ -762,43 +898,40 @@ async function runShip(client, opts = {}) {
     // the skip predicate entirely, so every pass retries it and re-reports it until
     // the underlying store is readable.
     if (!rows || failedHere) { unreadable++; continue; }
-    if (prev) {
-      // Known session being re-shipped: clear its old rows BEFORE inserting so a
-      // shorter re-parse can't leave stale seq/idx tails. A crash between the
-      // delete and the inserts is repaired by the next pass: the skip predicate
-      // refuses to skip a non-empty session whose message rows are missing.
-      // user_id is BOUND, not `= currentUser()`. A DELETE is a mutation, and a mutation
-      // does not necessarily evaluate currentUser() in the caller's context — it matches
-      // nothing at all, so the delete silently removes zero rows and the stale tail this
-      // code exists to clear survives forever. Measured on ClickHouse 25.11 —
-      // the identical predicate with the literal value deleted 2000 rows where
-      // currentUser() deleted 0. The value is the same identity either way: it is read
-      // from the server over this very connection.
-      // origin='ship' is the third bind, and it is not cosmetic. This clear exists so a
-      // shorter re-parse cannot leave a stale seq tail behind — but scoped to
-      // (session_id, user_id) alone it deletes EVERY row for the session, including rows
-      // the adapters did not write and cannot rewrite. Measured, on a real house: an
-      // import of 135,307 messages lost 27,948 of them to one ship pass, because
-      // memory-house had captured more per session than the adapters emit. The rows the
-      // shipper owns are the only rows it may remove.
-      for (const t of ['messages', 'tool_calls']) {
-        await client.command({
-          query: `DELETE FROM ${rooms[t]} WHERE session_id = {id:String} AND user_id = {uid:String} AND origin = 'ship'`,
-          query_params: { id, uid: rooms.user },
-          clickhouse_settings: { async_insert: 0 },
-        });
+
+    // Which parse this belongs to. A known session whose stored rows the new parse
+    // cannot be laid over — shorter, or rewritten at an overlapping position — moves to
+    // a new epoch instead of overwriting anything. See decideEpoch.
+    //
+    // This is where a DELETE used to be. It removed the session's shipped rows before
+    // re-inserting them, which is the only way to clear a stale seq tail in a
+    // ReplacingMergeTree — and it destroyed content that existed nowhere else, because
+    // Claude Code compacts transcripts and deletes them after cleanupPeriodDays (30 by
+    // default), so a shorter re-parse is at least as likely to mean "the source lost it"
+    // as "the adapter was fixed". The house is supposed to outlive the source.
+    let epoch = 0;
+    if (prev && prev.hasRows) {
+      const stored = await loadStoredParse(client, rooms, id, rooms.user, prev.epoch);
+      const d = decideEpoch({ ...prev, ...stored }, rows);
+      epoch = d.epoch;
+      if (d.reason) {
+        bumped++;
+        console.log(`[memhouse] ${id} → epoch ${epoch} (${d.reason}); the previous parse is kept`);
       }
+    } else if (prev) {
+      epoch = toInt(prev.epoch);
     }
+    rows.session.epoch = epoch;
     await push('sessions', scrub(rows.session));
     sessions++;
-    for (const r of rows.msgRows) { await push('messages', scrub(r)); msgRows++; }
-    for (const r of rows.toolRows) { await push('tool_calls', scrub(r)); toolRows++; }
+    for (const r of rows.msgRows) { r.epoch = epoch; await push('messages', scrub(r)); msgRows++; }
+    for (const r of rows.toolRows) { r.epoch = epoch; await push('tool_calls', scrub(r)); toolRows++; }
   }
   for (const table of Object.keys(batches)) await flush(table);
   // Anything that only failed while reading messages — the sink is reset by the
   // next getAllChats(), so unreported here means never reported at all.
   reportAdapterErrors(warned);
-  return { sessions, skipped, msgRows, toolRows, unreadable };
+  return { sessions, skipped, msgRows, toolRows, unreadable, bumped };
 }
 
 // Warn once per adapter per pass. `warned` carries across the two call sites so one
@@ -879,7 +1012,7 @@ async function main() {
       let failed = false;
       try {
         const r = await runShip(client, { full });
-        console.log(`[memhouse] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}) → ` +
+        console.log(`[memhouse] shipped ${r.sessions} sessions (${r.skipped} skipped${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}${r.bumped ? `, ${r.bumped} kept an earlier parse` : ''}) → ` +
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         failed = true;
@@ -930,7 +1063,7 @@ async function main() {
   }
 }
 
-module.exports = { runShip, ensureSchema, templateColumns };
+module.exports = { runShip, ensureSchema, templateColumns, decideEpoch };
 
 if (require.main === module) {
   main().catch((e) => {

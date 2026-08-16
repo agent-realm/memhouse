@@ -28,13 +28,40 @@ function test(name, fn) {
 // ── the house's rooms ───────────────────────────────────────────────────────────
 test('rooms are plain shared tables — the database is the boundary', () => {
   const r = rooms.roomNames('alice');
-  assert.strictEqual(r.sessions, 'sessions');
-  assert.strictEqual(r.messages, 'messages');
-  assert.strictEqual(r.tool_calls, 'tool_calls');
-  // The identity still travels with the names: writers BIND it (ship.js's clear), and
-  // readers scope by it. Losing it here silently un-scopes every consumer.
+  assert.strictEqual(r.sessions_raw, 'sessions');
+  assert.strictEqual(r.messages_raw, 'messages');
+  assert.strictEqual(r.tool_calls_raw, 'tool_calls');
+  // The identity still travels with the names: writers BIND it (the shipper's inserts and
+  // its epoch bookkeeping), and readers scope by it. Losing it here silently un-scopes
+  // every consumer.
   assert.strictEqual(r.member, 'alice');
   assert.strictEqual(r.user, 'alice');
+});
+
+test('the transcript rooms read as the CURRENT parse, and only the raw name is the table', () => {
+  // The safety property of the whole epoch design, and it is a property of THIS function:
+  // a read path that names a room the ordinary way gets the filtered form whether or not
+  // its author knew epochs exist. Only `_raw` reaches the physical table, and an INSERT
+  // into a subquery fails loudly — so the danger is moved off the read side, where a
+  // mistake silently over-counts, onto the write side, where it cannot be missed.
+  const r = rooms.roomNames('alice');
+  for (const t of ['messages', 'tool_calls']) {
+    assert.ok(r[t].startsWith('('), `${t} must resolve to a subquery, got '${r[t]}'`);
+    assert.match(r[t], /max\(epoch\)/, `${t} must restrict to the newest epoch`);
+    assert.match(r[t], /origin != 'ship'/,
+      `${t} must leave non-shipped rows alone — an import sits at epoch 0 forever, and`
+      + ' filtering it against the shipper\'s epoch would hide the whole import');
+    assert.match(r[t], /GROUP BY session_id, user_id/,
+      `${t} must take the epoch PER SESSION AND USER — a house-wide max would blank every`
+      + ' session that had not been compacted');
+  }
+  // user_id is MATERIALIZED, so `SELECT *` drops it and every consumer that scopes by it
+  // breaks. text_ngram/text_word are what `memhouse search` matches on.
+  assert.match(r.messages, /SELECT \*, user_id, text_ngram, text_word/);
+  assert.match(r.tool_calls, /SELECT \*, user_id/);
+  // sessions is one metadata row per session by construction; there is nothing to filter,
+  // and its epoch column is for people only.
+  assert.strictEqual(r.sessions, 'sessions');
 });
 
 test('the session rollup is a QUERY, not a fourth object', () => {
@@ -42,7 +69,7 @@ test('the session rollup is a QUERY, not a fourth object', () => {
   // SQL text, substituted into the same `FROM ... AS c` position a view name would hold.
   assert.ok(r.sessions_v.startsWith('('), 'the rollup must be a subquery');
   assert.ok(r.sessions_v.includes('FROM sessions AS s'), r.sessions_v);
-  assert.ok(r.sessions_v.includes('LEFT JOIN messages AS m'), 'the LEFT JOIN must survive');
+  assert.ok(r.sessions_v.includes('AS m ON m.session_id'), 'the LEFT JOIN must survive');
   // Shared tables make this the load-bearing line: two housemates' rows must never merge,
   // even on a colliding session_id.
   assert.match(r.sessions_v, /GROUP BY s\.session_id, s\.user_id/, 'rollup must group by user too');
@@ -58,7 +85,11 @@ test('the rollup is self-contained — it needs nothing from the caller', () => 
   assert.match(v, /SETTINGS join_use_nulls = 1/, 'rollup must carry join_use_nulls itself');
   // Alias BEFORE final: `FROM t FINAL AS s` is a syntax error, `FROM t AS s FINAL` is not.
   assert.match(v, /FROM sessions AS s FINAL/, 'sessions must be read FINAL');
-  assert.match(v, /LEFT JOIN messages AS m FINAL/, 'messages must be read FINAL');
+  // The messages side carries its FINAL INSIDE the current-parse subquery instead —
+  // `FROM (SELECT …) AS m FINAL` does not parse, and appending FINAL to whatever the room
+  // resolved to is exactly the trap the raw/filtered split exists to remove.
+  assert.match(v, /LEFT JOIN \(\s*\n\s*SELECT \*/, 'messages must join as the current-parse subquery');
+  assert.match(v, /FROM messages FINAL/, 'the current-parse subquery must read FINAL');
   // READ_SETTINGS still applies to DIRECT room reads, which carry no FINAL of their own.
   assert.strictEqual(rooms.READ_SETTINGS.join_use_nulls, 1);
   assert.strictEqual(rooms.READ_SETTINGS.final, 1);
@@ -76,23 +107,96 @@ test('names that would need quoting, and ClickHouse-owned databases, are refused
   assert.doesNotThrow(() => rooms.assertUsableName('default'));
 });
 
-test('the shipper clear must bind origin, or it deletes imported history', () => {
-  // Regression, and an expensive one. The clear exists so a shorter re-parse cannot leave
-  // a stale seq tail; scoped to (session_id, user_id) alone it removed EVERY row for the
-  // session, including imported rows the adapters cannot reproduce. On a real house that
-  // cost 27,948 of 135,307 messages in a single ship pass.
+test('the shipper issues no destructive statement, in any form', () => {
+  // This test used to assert that the shipper's per-session DELETE was correctly SCOPED —
+  // it had to bind session_id, user_id and origin='ship', because an unscoped version once
+  // destroyed 27,948 of 135,307 imported messages in a single pass. The delete is gone
+  // instead: a re-parse that cannot be laid over the stored one is written under a new
+  // epoch (decideEpoch), so nothing has to be removed to make room for it.
   //
-  // Asserted against the source text because the delete is one line inside a loop with no
-  // seam to call — and a seam invented purely for a test is a worse guarantee than reading
-  // the statement that actually runs.
+  // Asserted against the source text on purpose. The property is "this file contains no
+  // statement that can lose a row", and only reading the file can say that — a seam
+  // invented for the test would be a weaker guarantee than the text itself.
   const src = require('fs').readFileSync(
     require('path').join(__dirname, '..', 'memhouse', 'shipper', 'ship.js'), 'utf-8');
-  const del = src.match(/DELETE FROM \$\{rooms\[t\]\}[^`]*/);
-  assert.ok(del, 'the per-session clear was not found in ship.js');
-  assert.ok(/session_id = \{id:String\}/.test(del[0]), 'clear must bind the session');
-  assert.ok(/user_id = \{uid:String\}/.test(del[0]), 'clear must bind the user');
-  assert.ok(/origin = 'ship'/.test(del[0]),
-    "clear must bind origin='ship' — without it, re-shipping a session destroys imported rows");
+  // Comments explain the removed delete at length; strip them before looking for verbs.
+  const code = src.replace(/^\s*(\/\/|\*|\/\*).*$/gm, '');
+  // Case-sensitive: SQL in this repo is written in caps, and `truncate()` is also the name
+  // of the string helper that keeps a lone surrogate out of an insert.
+  for (const verb of [/\bDELETE\s+FROM\b/, /\bALTER\s+TABLE\s+\S+\s+DELETE\b/,
+    /\bTRUNCATE\s+TABLE\b/, /\bDROP\s+(TABLE|DATABASE|COLUMN)\b/, /\bALTER\s+TABLE\s+\S+\s+UPDATE\b/]) {
+    assert.ok(!verb.test(code),
+      `ship.js contains ${verb} — the shipper is insert-only, and the grant it documents `
+      + 'no longer includes ALTER DELETE');
+  }
+});
+
+test('a re-parse that only grows reuses its epoch — the common case must stay free', () => {
+  const { decideEpoch } = require('../memhouse/shipper/ship');
+  const stored = {
+    epoch: 0, maxSeq: 1, maxIdx: -1,
+    hashes: new Map([[0, '111'], [1, '222']]),
+    tools: new Map(),
+  };
+  const grown = {
+    msgRows: [{ seq: 0, line_hash: '111' }, { seq: 1, line_hash: '222' }, { seq: 2, line_hash: '333' }],
+    toolRows: [],
+  };
+  assert.deepStrictEqual(decideEpoch(stored, grown), { epoch: 0, reason: null });
+  // Re-shipping the identical parse is the most common case of all (a --full pass over a
+  // settled house): same epoch, and RMT collapses it to nothing.
+  const same = { msgRows: grown.msgRows.slice(0, 2), toolRows: [] };
+  assert.strictEqual(decideEpoch(stored, same).epoch, 0);
+  // A session the house has never seen starts at 0 rather than inventing one.
+  assert.deepStrictEqual(decideEpoch(null, grown), { epoch: 0, reason: null });
+});
+
+test('a shrunken or rewritten re-parse moves to a new epoch instead of overwriting', () => {
+  const { decideEpoch } = require('../memhouse/shipper/ship');
+  const stored = {
+    epoch: 2, maxSeq: 4, maxIdx: 1,
+    hashes: new Map([[0, '111'], [1, '222'], [2, '333'], [3, '444'], [4, '555']]),
+    tools: new Map([[0, { tool_name: 'Read', args: '{}' }], [1, { tool_name: 'Edit', args: '{}' }]]),
+  };
+  const shorter = {
+    msgRows: [{ seq: 0, line_hash: '111' }, { seq: 1, line_hash: '222' }, { seq: 2, line_hash: '333' }],
+    toolRows: [{ idx: 0, tool_name: 'Read', args: '{}' }, { idx: 1, tool_name: 'Edit', args: '{}' }],
+  };
+  const shrunk = decideEpoch(stored, shorter);
+  assert.strictEqual(shrunk.epoch, 3, 'a shorter parse must not be written over the longer one');
+  assert.match(shrunk.reason, /5 messages stored, 3 parsed/);
+
+  // Compaction: same length or longer, but rewritten at a seq the house already holds.
+  // Bumping on shrink alone would keep the tail and still lose this — the same data loss,
+  // reached through the merge instead of the delete.
+  const rewritten = {
+    msgRows: [{ seq: 0, line_hash: '111' }, { seq: 1, line_hash: 'DIFFERENT' },
+      { seq: 2, line_hash: '333' }, { seq: 3, line_hash: '444' }, { seq: 4, line_hash: '555' }],
+    toolRows: shorter.toolRows,
+  };
+  assert.strictEqual(decideEpoch(stored, rewritten).epoch, 3);
+  assert.match(decideEpoch(stored, rewritten).reason, /message 1 was rewritten/);
+
+  // Tool calls carry no line_hash and are compared directly: they come from _toolCalls,
+  // which can change while the assistant's text does not.
+  const retooled = {
+    msgRows: [{ seq: 0, line_hash: '111' }, { seq: 1, line_hash: '222' }, { seq: 2, line_hash: '333' },
+      { seq: 3, line_hash: '444' }, { seq: 4, line_hash: '555' }],
+    toolRows: [{ idx: 0, tool_name: 'Read', args: '{"path":"a"}' }, { idx: 1, tool_name: 'Edit', args: '{}' }],
+  };
+  assert.match(decideEpoch(stored, retooled).reason, /tool call 0 was rewritten/);
+
+  // A seq the house does not hold is a gap, not a disagreement: there is nothing there to
+  // destroy, so it must not fork the session.
+  const gapped = {
+    epoch: 0, maxSeq: 4, maxIdx: -1,
+    hashes: new Map([[0, '111'], [4, '555']]), tools: new Map(),
+  };
+  assert.strictEqual(decideEpoch(gapped, {
+    msgRows: [{ seq: 0, line_hash: '111' }, { seq: 1, line_hash: 'new' },
+      { seq: 2, line_hash: 'new' }, { seq: 3, line_hash: 'new' }, { seq: 4, line_hash: '555' }],
+    toolRows: [],
+  }).epoch, 0);
 });
 
 test('every room type carries an origin column defaulting to ship', () => {
