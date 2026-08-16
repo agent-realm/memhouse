@@ -305,6 +305,41 @@ async function main() {
     assert.strictEqual(Number(after), Number(before), 'an unchanged pass wrote another event');
   });
 
+  // ── the dashboard's own query layer ───────────────────────────────────────────
+  await test('every dashboard query runs against the filtered rooms and counts one parse', async () => {
+    // The read seam replaced a table NAME with a subquery in ~20 queries at once — joins,
+    // aggregates, an IN-subquery filter, and a text search that matches on a MATERIALIZED
+    // column `SELECT *` does not return. A syntax error in any of them would only show up
+    // in the browser, so exercise the real module here.
+    const queries = require(path.join(ROOT, 'memhouse/server/queries'));
+    const overview = await queries.getOverview({});
+    assert.ok(overview.totalChats > 0, 'the dashboard sees no sessions at all');
+
+    await queries.getDailyActivity({});
+    await queries.getDashboardStats({});
+    await queries.getProjects({});
+    await queries.getDeepAnalytics({});
+    await queries.getToolCalls({});
+    await queries.getCostAnalytics({});
+    await queries.countChats({});
+
+    // shrink-1 is the session that was forked: 5 messages at epoch 0, 3 at epoch 1. The
+    // dashboard must report 3 — an unfiltered read would say 8, which is worse than the
+    // stale tail this design replaced.
+    const chats = await queries.getChats({ chatId: 'claude:shrink-1' });
+    assert.strictEqual(chats.length, 1, `expected one session row, got ${chats.length}`);
+    assert.strictEqual(Number(chats[0].bubbleCount), 3,
+      `the dashboard counts ${chats[0].bubbleCount} messages for a 3-message session`);
+    // Cost is derived from the token sums, so a superseded parse would inflate money as
+    // well as counts: one assistant turn at 100 in / 50 out, not two.
+    assert.ok(chats[0].cost > 0 && chats[0].cost < 0.002, `cost reads ${chats[0].cost}`);
+
+    const chat = await queries.getChat(chats[0].id);
+    assert.strictEqual(chat.messages.length, 3, 'the transcript view shows a superseded parse');
+    assert.ok(!chat.messages.some((m) => m.content.includes('SECRET draft')),
+      'the transcript view shows rows from an earlier parse');
+  });
+
   // ── migrating a house built by 0.9.0 ──────────────────────────────────────────
   await test('migrate-rooms rebuilds a pre-epoch house without losing a row or restamping one', async () => {
     const db = 'oldhouse';

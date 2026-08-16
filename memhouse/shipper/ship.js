@@ -484,6 +484,10 @@ async function ensureSchema(client) {
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
+  // The rooms are at this schema generation — the assertion above is what makes that a
+  // fact rather than a claim. Recording it here means a house built by `install` is
+  // already stamped, instead of looking un-migrated until its first ship pass.
+  await recordHouseState(client, rooms, hostId());
   return stmts.length;
 }
 

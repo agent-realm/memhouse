@@ -134,7 +134,12 @@ Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
 - Reads see one parse per session. `roomNames()` resolves `messages`/`tool_calls` to a
   current-epoch subquery and the bare tables only as `*_raw`, so retention cannot silently
   inflate a rollup, and a read path written by someone who has never heard of epochs is
-  still correct.
+  still correct. Measured cost of the filter: **+10 ms** across the dashboard's queries on
+  a real 66k-message house (all of them under 200 ms), and **+13–37 ms** on a synthetic
+  1M-message / 20k-session one. The single shape that grows is a one-session read
+  (5 ms → 18 ms at 1M rows): the `IN` aggregates the whole room regardless of the outer
+  session filter. If that ever matters, the answer is a small materialized current-epoch
+  table maintained by the shipper — never a filter each caller has to remember.
 - **A mutation predicate must bind the user, never call `currentUser()`.** No mutation
   survives in the shipper, but the finding outlives it — `migrate-rooms` and `reset` still
   run statements where it applies. A mutation does not evaluate `currentUser()` in the

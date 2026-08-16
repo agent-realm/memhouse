@@ -1331,6 +1331,7 @@ async function cmdDoctor() {
 
     // The sorting keys the shipper refuses to write into. doctor is where a house should
     // learn it needs rebuilding, not the middle of a ship pass.
+    let keysCorrect = false;
     try {
       const wrongKeys = [];
       let checked = 0;
@@ -1359,8 +1360,11 @@ async function cmdDoctor() {
       else if (checked < ROOM_TYPES.length) {
         add(false, `sorting keys: only ${checked}/${ROOM_TYPES.length} rooms are MergeTree — the rest have no sorting key at all`,
           'a room was replaced by a Merge/View/Log engine; rebuild it from the schema template as the house owner');
-      } else add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ` carry origin and epoch correctly (${checked}/${ROOM_TYPES.length} rooms)`}`,
-        'those rooms predate the epoch key, so the shipper refuses to write into them.\n     rebuild them (nothing is deleted): memhouse migrate-rooms');
+      } else {
+        keysCorrect = wrongKeys.length === 0;
+        add(keysCorrect, `sorting keys${keysCorrect ? ` carry origin and epoch correctly (${checked}/${ROOM_TYPES.length} rooms)` : `: wrong on ${wrongKeys.join(', ')}`}`,
+          'those rooms predate the epoch key, so the shipper refuses to write into them.\n     rebuild them (nothing is deleted): memhouse migrate-rooms');
+      }
     } catch (e) { add(false, 'sorting keys', e.message); }
     // What the house says about ITSELF — its schema generation and whether a rebuild was
     // left half-done. A migration that failed between the copy and the swap leaves rooms
@@ -1374,12 +1378,19 @@ async function cmdDoctor() {
         `SELECT id, argMax(status, event_at) AS status, formatDateTime(max(event_at), '%Y-%m-%d %H:%i') AS at
          FROM house_events WHERE kind = 'migration' GROUP BY id ORDER BY max(event_at) DESC LIMIT 1`))[0];
       const stuck = last && last.status !== 'applied';
-      add(!stuck && at === String(SCHEMA_VERSION),
+      // The ROOMS are the truth; this table is the paperwork. A house whose keys are
+      // already current but whose record is missing — a fresh install by an older client,
+      // or a member with no rights on house_meta — is not un-migrated, and telling it to
+      // run migrate-rooms sends the pilot to rebuild rooms that are already correct.
+      const recorded = at === String(SCHEMA_VERSION);
+      add(!stuck && (recorded || keysCorrect),
         stuck ? `house record: migration ${last.id} is ${last.status} (last touched ${last.at})`
-          : at === String(SCHEMA_VERSION) ? `house record: schema ${at}, no migration pending`
-            : `house record: schema ${at || 'unrecorded'}, this memhouse expects ${SCHEMA_VERSION}`,
+          : recorded ? `house record: schema ${at}, no migration pending`
+            : keysCorrect ? `house record: rooms are at schema ${SCHEMA_VERSION}, unrecorded`
+              : `house record: schema ${at || 'unrecorded'}, this memhouse expects ${SCHEMA_VERSION}`,
         stuck ? 're-run it — it is restartable and removes nothing: memhouse migrate-rooms'
-          : 'bring the rooms up to this version: memhouse migrate-rooms');
+          : keysCorrect ? 'record it: memhouse ship --ensure-schema'
+            : 'bring the rooms up to this version: memhouse migrate-rooms');
     } catch {
       // A house from before these tables existed, or a member without rights on them.
       // Neither is a fault: the rooms are the product, and the sorting-key check above
