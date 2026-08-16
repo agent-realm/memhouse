@@ -42,9 +42,9 @@ all — but when it does (the same `~/.claude` on two synced machines), both shi
 the same `(session_id, user_id)`. The keys deliberately do NOT include `host`, so the
 rows collapse to the LAST shipper's copy: one logical session stays one session, with
 `host` recording who shipped it most recently. Keying on host instead would duplicate
-every such session and double what the rollup counts. An interleaved clear+insert
-between the two shippers can transiently drop rows; the next pass's skip predicate sees
-the count mismatch and re-ships — self-healing, at the price of churn. Truly parallel
+every such session and double what the rollup counts. Two shippers interleaving can no
+longer drop rows — neither of them deletes anything — but they can disagree about the
+epoch and fork a session that did not change; the next pass settles it. Truly parallel
 shippers per user are the deferred "ephemeral fingerprint" expert feature, not today's.
 
 ## The rollup is a saved query, not an object
@@ -69,6 +69,41 @@ product does not have:
   housemates are collaborators, and groups that are not do not share a database.
 
 The origin story that survives: rows carry `origin` (in the messages/tool_calls sorting
-keys, deliberately NOT in sessions'), the shipper's clear binds
-`(session_id, user_id, origin='ship')`, and imported history survives every re-ship.
+keys, deliberately NOT in sessions'), so ReplacingMergeTree cannot collapse an imported
+row against a shipped one and imported history survives every re-ship.
+
+## One session, more than one parse
+
+`messages` and `tool_calls` also key on `epoch`. The shipper is insert-only: when a
+re-parse is SHORTER than what the house holds, or differs from it at a `seq` the house
+already has, it writes the new parse under `epoch + 1` and leaves the old one intact.
+Both are ordinary — Claude Code compacts a transcript in place and deletes it after
+`cleanupPeriodDays` (30 by default), so the house is routinely the only surviving copy.
+An unchanged re-ship reuses the epoch and costs nothing.
+
+Reads must therefore take the newest epoch per `(session_id, user_id)` for `origin='ship'`
+rows and leave every other origin alone (an import sits at epoch 0 forever). Nobody writes
+that filter by hand: `roomNames()` resolves `messages` and `tool_calls` to a subquery that
+already applies it, and hands out the bare tables only as `messages_raw` / `tool_calls_raw`
+for writes and DDL.
+
+## The house's own record
+
+Two tables that are not rooms:
+
+- `house_meta` — house-wide key/value, latest-wins: `schema_version`, and the memhouse
+  version each member last shipped with.
+- `house_events` — append-only: migrations (`pending` → `applied` | `failed`), version
+  changes, schema observations, each with actor, host and row counts. Nothing is updated
+  in place, so a migration that failed and was retried reads as exactly that.
+
+What lives there is what `system.tables` and `system.users` cannot say — intent, sequence,
+outcome. Which rooms and users exist is read live from `system.*`, never mirrored.
+
+Sorting keys cannot be altered, so a schema generation change is a room rebuild:
+`memhouse migrate-rooms` copies each room into one with the current key, swaps it in with
+a single `RENAME`, and keeps the old room as `<room>_pre_epoch`. It deletes nothing and
+carries `user_id` across explicitly, so a housemate's rows are not restamped as the
+migrator's.
+
 See the comments in `schema.sql.tpl` — they are the authority on the keys.

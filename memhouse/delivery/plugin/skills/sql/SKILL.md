@@ -11,12 +11,30 @@ allowed-tools: Bash
 If the user gives SQL, run it (append `FORMAT PrettyCompact` if no FORMAT
 given). If they give a question, write the SQL yourself from the schema below.
 
-**Read-only rule:** the shipper (`ship.js`) is the only writer. Never INSERT/ALTER/DROP
-from here. A member credential holds `SELECT, INSERT, ALTER UPDATE, ALTER DELETE, ALTER ADD
-COLUMN, OPTIMIZE` on its **own three rooms** — enough to destroy the rows, though not
-the rooms — and nothing at all on anyone else's. Reads need no scoping
-clause: the rooms you can name are already only yours, and there is no policy to work
-around.
+**Read-only rule:** the shipper (`ship.js`) is the only writer, and it is INSERT-ONLY: it
+never deletes and never mutates, because a re-parse that shrank or was rewritten is
+written under a new `epoch` instead of over the stored one. Never INSERT/ALTER/DROP from
+here. What memhouse itself needs is `SELECT, INSERT, ALTER ADD COLUMN, OPTIMIZE` — the
+`ALTER DELETE` this line used to list was there for the per-session clear that no longer
+exists. Most houses grant `ALL` on the database, which is broader; nothing memhouse runs
+uses the destructive half of it. Reads need no scoping clause: the house you can name is
+already yours, and there is no policy to work around.
+
+**One session can be in `messages` twice.** A session that Claude Code compacted, or that
+shrank for any other reason, keeps its earlier parse — that is the whole point of `epoch`,
+and it is why nothing is ever deleted. Ad-hoc SQL must filter to the current parse or it
+counts such a session twice:
+
+```sql
+WHERE origin != 'ship'
+   OR (session_id, user_id, epoch) IN (
+        SELECT session_id, user_id, max(epoch) FROM messages
+        WHERE origin = 'ship' GROUP BY session_id, user_id)
+```
+
+Drop the filter deliberately when you want the history — "what did this session say before
+it was compacted" is a question only the house can answer, because the transcript on disk
+is gone.
 
 The recipe below pins `readonly=1` on every request, so a write that slips past the rule
 is refused by the server (`Code: 164 … Cannot execute query in readonly mode`) rather
@@ -115,15 +133,19 @@ DIFFERENT memhouse version are the two ways this goes quietly wrong.
 
 | Object | Kind | Columns |
 |---|---|---|
-| `sessions` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, user_id, ingested_at` |
-| `messages` | table, 1 row/message | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /memhouse:search) |
-| `tool_calls` | table, 1 row/tool call | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, user_id, ingested_at` |
+| `sessions` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, origin, epoch, user_id, ingested_at` |
+| `messages` | table, 1 row/message **per parse** | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, origin, epoch, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /memhouse:search) |
+| `tool_calls` | table, 1 row/tool call **per parse** | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, origin, epoch, user_id, ingested_at` |
+| `house_meta` | table, house's own record | `key, value, updated_at, updated_by, host` — `schema_version`, per-member `client_version:<user>` |
+| `house_events` | append-only log | `event_at, kind, id, status, from_version, to_version, actor, host, rows_before, rows_after, detail` — migrations, version changes |
 | the rollup | **saved query**, not an object — `memhouse sessions-query` prints it | `session_id, source, host, name, mode, folder, project, git_branch, user_id, created_at, last_updated_at, started, ended, duration_sec, total_msgs, user_msgs, assistant_msgs, subagent_msgs, models, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, user_chars, assistant_chars, first_prompt` |
 
 Notes: `source` = editor id (`claude-code`, `codex`, `cursor`, `cursor-agent`,
 `vscode`, `zed`, `opencode`, `gemini-cli`, `windsurf`, `antigravity`, …);
 `seq` = message index within its session (0-based); `tool_calls.idx` = call
-index within the session; `user_id` is server-stamped (`currentUser()`);
+index within the session; `user_id` is server-stamped (`currentUser()`); `origin` is
+`ship` for rows the shipper wrote and anything else for imports; `epoch` is which parse
+of the session a row belongs to — see the filter above;
 `models` in the rollup is an `Array(String)`. Exclude `''` and
 `'<synthetic>'` from model aggregates.
 

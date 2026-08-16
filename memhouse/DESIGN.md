@@ -64,9 +64,10 @@ them free and further along; **bet 3 is the one nobody else attempts.**
    Physical typed columns (what memory-house derives in views) + `tool_calls`
    (memory-house has no tool table) + one `extra JSON` escape hatch per room so
    unnormalized adapter fields are never lost. `ReplacingMergeTree(ingested_at)`;
-   `messages` keyed `(session_id, user_id, origin, seq)` so a re-ship of a
-   grown/changed session replaces stale rows (latest-wins) and two housemates' rows
-   never collapse into one. FTS text indexes built in (CH ≥ 26.2).
+   `messages` keyed `(session_id, user_id, origin, epoch, seq)` so a re-ship of a
+   grown session replaces stale rows (latest-wins), two housemates' rows never
+   collapse into one, and a re-parse that SHRANK or was rewritten lands under a new
+   epoch instead of over what it replaces. FTS text indexes built in (CH ≥ 26.2).
 3. **Kernel-installable agency.** Joining any ClickHouse — a kernel's included — is a
    database plus a credential: `CREATE USER`, `GRANT ALL ON <house>.* `, done. The
    shipper is the resident that lands with it and creates its own rooms. Identity is
@@ -116,15 +117,34 @@ Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
 - Incremental shipping: read existing `(session_id, last_updated_at, message_count)`
   (FINAL) and skip chats that haven't grown/changed; a full re-ship must remain
   safe (ReplacingMergeTree collapses).
-- Re-shipping a known session **deletes its message/tool rows first**: `ReplacingMergeTree`
-  collapses same-key rows but cannot remove a row the new parse no longer produces, so a
-  shrunken re-parse would leave a stale `seq` tail forever.
-- **A mutation predicate must bind the user, never call `currentUser()`.** A mutation does
-  not evaluate it in the caller's context: measured on ClickHouse 25.11 and chdb, the same
-  `DELETE` matched 0 rows with `user_id = currentUser()` and 2000 with the value bound —
-  silently, both times. Read the identity once (`SELECT currentUser()`) and pass it as a
-  query parameter. This applies to `DELETE`/`ALTER … UPDATE`, not to `SELECT`, where
-  `currentUser()` behaves as expected.
+- **The shipper is insert-only, and nothing may reintroduce a destructive verb.**
+  `ReplacingMergeTree` collapses same-key rows but cannot remove a row the new parse no
+  longer produces, so a shrunken re-parse leaves a stale `seq` tail. The shipper used to
+  clear the session's rows first; that destroyed content held nowhere else, because
+  Claude Code compacts transcripts and deletes them after `cleanupPeriodDays` (30 by
+  default), and a shorter re-parse cannot be told apart from a fixed adapter bug. Instead
+  `decideEpoch` bumps the session's `epoch` when the new parse is shorter than the stored
+  one, or diverges from it at an overlapping `seq` (compared on the stored `line_hash`),
+  and writes underneath the old parse rather than over it.
+- **memhouse is an accumulator, not a mirror.** Absence of a session on disk is never a
+  signal: retention cleanup, a manual delete, a second laptop, an unmounted folder, a
+  locked SQLite file and a thrown adapter all produce the identical observation. A
+  session that disappears is never cleared and never re-inserted. **No `sync` and no
+  `prune` feature may be built here** — either would destroy the archive by design.
+- Reads see one parse per session. `roomNames()` resolves `messages`/`tool_calls` to a
+  current-epoch subquery and the bare tables only as `*_raw`, so retention cannot silently
+  inflate a rollup, and a read path written by someone who has never heard of epochs is
+  still correct.
+- **A mutation predicate must bind the user, never call `currentUser()`.** No mutation
+  survives in the shipper, but the finding outlives it — `migrate-rooms` and `reset` still
+  run statements where it applies. A mutation does not evaluate `currentUser()` in the
+  caller's context: measured on ClickHouse 25.11 and chdb, the same `DELETE` matched 0
+  rows with `user_id = currentUser()` and 2000 with the value bound — silently, both
+  times. Read the identity once (`SELECT currentUser()`) and pass it as a query parameter.
+  The same trap bites the other way in a rebuild: `user_id` is `MATERIALIZED
+  currentUser()`, so an `INSERT SELECT` that does not carry it explicitly (under
+  `insert_allow_materialized_columns=1`) restamps every copied row with whoever ran the
+  migration.
 - Costs are computed in the server from `pricing.js` (repo root) over per-model
   token sums; `<synthetic>` and empty models excluded from model lists.
 
