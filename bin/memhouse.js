@@ -23,7 +23,7 @@ const SHIP_JS = path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js');
 const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
-const { roomNames, ROOM_TYPES, MEMBER_PIN, installCommand } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
+const { roomNames, ROOM_TYPES, MEMBER_PIN, installCommand, keyProblem } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
@@ -779,9 +779,8 @@ function resolveMemberHandle() {
 }
 
 // Do the rooms' sorting keys match what the shipper will accept? Returns a description of
-// what is wrong, or null. `origin` belongs in the transcript rooms' keys (so an imported
-// row and a shipped one at the same seq stay two rows) and must NOT be in the sessions key
-// (so a session has exactly one metadata row).
+// what is wrong, or null. The keys themselves and what each column buys live on ROOM_KEYS
+// in memhouse/house/house.js — one definition, checked identically here and in the shipper.
 async function sortingKeyProblem(cfg) {
   try {
     const rooms = await roomsFor(cfg);
@@ -790,10 +789,8 @@ async function sortingKeyProblem(cfg) {
       const r = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${rooms[t]}'`, { database: '' });
       const key = r[0]?.k;
       if (!key) continue;
-      const want = t !== 'sessions';
-      if (/\borigin\b/.test(key) !== want) {
-        wrong.push(`${rooms[t]} (${key}) — origin ${want ? 'missing from' : 'must not be in'} the key`);
-      }
+      const problem = keyProblem(t, key);
+      if (problem) wrong.push(`${rooms[t]} ${problem}`);
     }
     return wrong.length ? wrong.join('; ') : null;
   } catch { return null; }  // unreachable house is a different check's problem
@@ -1336,8 +1333,11 @@ async function cmdDoctor() {
         const key = r[0]?.k;
         if (!key) continue;
         checked++;
-        const want = t !== 'sessions';
-        if (/\borigin\b/.test(key) !== want) wrongKeys.push(`${rooms[t]} (${key})`);
+        // One checker, in house.js beside the keys themselves — doctor and the shipper
+        // disagreeing about what a correct room looks like is how a house gets shipped
+        // into after doctor called it healthy.
+        const problem = keyProblem(t, key);
+        if (problem) wrongKeys.push(`${rooms[t]} ${problem}`);
       }
       // `checked` matters: every room name that resolved to nothing was skipped by the
       // `continue` above, so on an empty house this printed a green "sorting keys carry
@@ -1353,8 +1353,8 @@ async function cmdDoctor() {
       else if (checked < ROOM_TYPES.length) {
         add(false, `sorting keys: only ${checked}/${ROOM_TYPES.length} rooms are MergeTree — the rest have no sorting key at all`,
           'a room was replaced by a Merge/View/Log engine; rebuild it from the schema template as the house owner');
-      } else add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ` carry origin correctly (${checked}/${ROOM_TYPES.length} rooms)`}`,
-        `rebuild those rooms from the schema template, then: memhouse ship --full\n     template: ${path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl')}`);
+      } else add(wrongKeys.length === 0, `sorting keys${wrongKeys.length ? `: wrong on ${wrongKeys.join(', ')}` : ` carry origin and epoch correctly (${checked}/${ROOM_TYPES.length} rooms)`}`,
+        'those rooms predate the epoch key, so the shipper refuses to write into them.\n     rebuild them (nothing is deleted): memhouse migrate-rooms');
     } catch (e) { add(false, 'sorting keys', e.message); }
     try {
       // countIf, not any(). `any()` returns an arbitrary row's value, so on a house with

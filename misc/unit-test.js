@@ -103,6 +103,65 @@ test('every room type carries an origin column defaulting to ship', () => {
     `origin must be on all ${rooms.ROOM_TYPES.length} room types, found ${n}`);
 });
 
+// ── sorting keys ────────────────────────────────────────────────────────────────
+test('the template declares exactly the sorting keys the shipper enforces', () => {
+  // The two halves of this used to be able to drift: the keys were written in the
+  // template and re-derived by a regex in the shipper and a second regex in doctor. A
+  // house built from a template the guard disagrees with is a house that fails at ship
+  // time, after install said it was ready.
+  const tpl = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
+  for (const t of rooms.ROOM_TYPES) {
+    const m = tpl.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${t}\\s*\\([\\s\\S]*?\\nORDER BY \\(([^)]*)\\)`, 'm'));
+    assert.ok(m, `no ORDER BY found for room '${t}'`);
+    assert.strictEqual(rooms.keyProblem(t, m[1]), null,
+      `the template's key for '${t}' is (${m[1]}), which the shipper would refuse`);
+  }
+});
+
+test('a room missing epoch from its key is refused — that key cannot retain a superseded parse', () => {
+  // 0.9.0's keys. Writing a new parse into them means RMT collapses it against the old
+  // one, which is the data loss the epoch exists to prevent — so the shipper must refuse
+  // rather than write.
+  assert.ok(rooms.keyProblem('messages', 'session_id, user_id, origin, seq'));
+  assert.ok(rooms.keyProblem('tool_calls', 'session_id, user_id, origin, idx'));
+  // And the pre-0.4.4 shape, where an import and a ship collapse into one row.
+  assert.ok(rooms.keyProblem('messages', 'session_id, user_id, seq'));
+  // sessions must stay one row per session: neither origin nor epoch belongs in its key.
+  assert.ok(rooms.keyProblem('sessions', 'session_id, user_id, origin'));
+  assert.ok(rooms.keyProblem('sessions', 'session_id, user_id, epoch'));
+  assert.strictEqual(rooms.keyProblem('sessions', 'session_id, user_id'), null);
+  // A room that exists but reports no sorting key at all is not a MergeTree. Treating
+  // that as "nothing to check" printed a green tick over a house where ship then died on
+  // `DELETE query is not supported for table …`.
+  assert.ok(rooms.keyProblem('messages', ''));
+});
+
+test('the schema template parser reads the rooms it actually creates', () => {
+  // It matched `<type>_{{MEMBER}}` for a whole release after the rooms became plain
+  // shared tables, so it returned NOTHING and three surfaces reported success over an
+  // empty comparison: ensureSchema's column healer had nothing to add, warnMissingColumns
+  // had nothing to warn about, and doctor printed "✓ columns: every room matches the
+  // schema template" having compared zero columns.
+  const { templateColumns } = require('../memhouse/shipper/ship');
+  const tpl = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
+  const cols = templateColumns(tpl);
+  for (const t of rooms.ROOM_TYPES) {
+    const names = (cols[t] || []).map((c) => c.name);
+    assert.ok(names.length > 5, `room '${t}' parsed ${names.length} columns`);
+    for (const required of ['session_id', 'origin', 'epoch', 'user_id', 'ingested_at']) {
+      assert.ok(names.includes(required), `room '${t}' lost '${required}' from the parse`);
+    }
+    // The clauses are the point: adding user_id without MATERIALIZED gives every row an
+    // empty, unforgeable-by-nobody identity.
+    const uid = (cols[t] || []).find((c) => c.name === 'user_id');
+    assert.match(uid.type, /MATERIALIZED currentUser\(\)/, `'${t}'.user_id lost its stamp`);
+    // INDEX declarations are not columns — an ADD COLUMN built from one is a syntax error.
+    assert.ok(!names.some((n) => /^(INDEX|idx_)/i.test(n)), `room '${t}' parsed an index as a column`);
+  }
+});
+
 // ── env file ────────────────────────────────────────────────────────────────────
 test('shell quoting round-trips, including quotes and backslashes', () => {
   for (const v of ["ab'cd", 'ab\\ef', "ab'cd\\ef", 'plain', 'a b c', '$(rm -rf /)', '']) {

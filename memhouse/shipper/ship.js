@@ -14,11 +14,18 @@
 //   - DateTime64 values travel as 'YYYY-MM-DD HH:MM:SS.mmm' UTC strings (plain
 //     format; ISO 'T'/'Z' forms parse unreliably under JSONEachRow). Nullable → null.
 //   - Int64-bound values are integer-coerced (some adapters emit fractional ms).
+//   - INSERT-ONLY. The shipper never deletes and never mutates. A re-parse that shrinks
+//     or diverges from what is stored is written under a NEW epoch, so the superseded
+//     parse survives intact — Claude Code compacts transcripts and deletes them after
+//     cleanupPeriodDays (30 by default), which makes the house the only remaining copy.
+//     memhouse is an accumulator, not a mirror: absence of a session is never a signal,
+//     and no "sync" or "prune" feature may ever be built here.
 //   - Re-shipping is always safe: ReplacingMergeTree(ingested_at) collapses to
-//     latest-wins at FINAL. Keyed (session_id, user_id, origin, seq) on messages and
-//     (session_id, user_id, origin, idx) on tool_calls, so an imported row and a shipped
-//     one at the same seq are two rows, not one. sessions is (session_id, user_id) with
-//     NO origin — one metadata row per session is what every read path assumes.
+//     latest-wins at FINAL. Keyed (session_id, user_id, origin, epoch, seq) on messages
+//     and (…, epoch, idx) on tool_calls, so an imported row and a shipped one at the same
+//     seq are two rows, and so are two parses of the same session. sessions is
+//     (session_id, user_id) with NO origin and NO epoch — one metadata row per session is
+//     what every read path assumes.
 //
 // CLI:  node ship.js                one incremental pass
 //       node ship.js --loop [sec]   repeat every sec seconds (default 300)
@@ -52,7 +59,7 @@ const selfUpdate = require('../self-update');
 // Captured at require time, which is as close to "what this process booted with" as it
 // gets. Taking it later would record whatever an upgrade had already replaced.
 const selfSnap = selfUpdate.snapshot(__filename);
-const { resolveRooms, READ_SETTINGS, ROOM_TYPES } = require('../house/house');
+const { resolveRooms, READ_SETTINGS, ROOM_TYPES, keyProblem } = require('../house/house');
 
 const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
 const TEXT_MAX = 50000;    // messages.text truncation
@@ -263,11 +270,19 @@ function makeClient() {
  *
  * MATERIALIZED and DEFAULT clauses are kept: `user_id String MATERIALIZED currentUser()`
  * has to be added exactly that way or the identity stamp does not happen.
+ *
+ * The room name in this pattern is the LITERAL table name. It used to be
+ * `<type>_{{MEMBER}}`, from the per-member layout, and nobody updated it when the rooms
+ * became plain shared tables — so it matched nothing, and every consumer silently got an
+ * empty column list. That took out three surfaces at once, all of them reporting success:
+ * the column healer in ensureSchema had nothing to add, warnMissingColumns had nothing to
+ * warn about, and doctor's column check printed "✓ columns: every room matches the schema
+ * template" having compared zero columns. A regression test now pins it (misc/unit-test.js).
  */
 function templateColumns(tpl) {
   const out = {};
   for (const t of ROOM_TYPES) {
-    const re = new RegExp(`CREATE TABLE IF NOT EXISTS ${t}_\\{\\{MEMBER\\}\\}\\s*\\(([\\s\\S]*?)\\n\\)`, 'm');
+    const re = new RegExp(`CREATE TABLE IF NOT EXISTS ${t}\\s*\\(([\\s\\S]*?)\\n\\)`, 'm');
     const m = tpl.match(re);
     if (!m) continue;
     const cols = [];
@@ -343,7 +358,14 @@ async function assertRoomsExist(client, rooms) {
     + '  A house from before 0.4 reaches this too — its rooms have different names.');
 }
 
-async function assertOriginKeyed(client, rooms) {
+/**
+ * Refuse to write into rooms whose sorting key is not the one the shipper's safety
+ * depends on. What each column buys is written out on ROOM_KEYS in ../house/house.js;
+ * this is the enforcement, run at the top of EVERY pass rather than only in
+ * `--ensure-schema`, because a plain `memhouse ship` never calls ensureSchema and a guard
+ * living only there is a guard that never runs on the path that does the damage.
+ */
+async function assertRoomKeys(client, rooms) {
   const wrong = [];
   for (const t of ROOM_TYPES) {
     const rs = await client.query({
@@ -351,32 +373,19 @@ async function assertOriginKeyed(client, rooms) {
       query_params: { n: rooms[t] }, format: 'JSONEachRow',
     });
     const row = (await rs.json())[0];
-    const key = (row || {}).sorting_key || '';
-    // A room that EXISTS but has no sorting key is not a MergeTree — a Merge, a View, a Log
-    // engine standing where the shipper expects to DELETE and INSERT. Skipping it here let
-    // the pass sail past its own guard and die later on
-    // `DELETE query is not supported for table …`, which is exactly what this refusal is
-    // meant to prevent. (A room that does not exist at all is assertRoomsExist's job and is
-    // reported there.)
-    if (row && !key) { wrong.push(`${rooms[t]} — not a MergeTree, so it cannot be shipped to`); continue; }
-    if (!key) continue;
-    const keyed = /\borigin\b/.test(key);
-    // sessions is one row per session and must NOT key on origin; the transcript rooms
-    // hold many rows per session and must.
-    const want = t !== 'sessions';
-    if (keyed !== want) {
-      wrong.push(`${rooms[t]} (${key}) — origin ${want ? 'missing from' : 'must not be in'} the key`);
-    }
+    // A room that does not exist at all is assertRoomsExist's job and is reported there.
+    if (!row) continue;
+    const problem = keyProblem(t, row.sorting_key);
+    if (problem) wrong.push(`${rooms[t]} ${problem}`);
   }
   if (wrong.length) {
     throw new Error(
       'these rooms have the wrong sorting key, so a ship pass would corrupt them:\n'
       + wrong.map((s) => `    ${s}`).join('\n')
-      + '\n  ORDER BY cannot be altered in place. Rebuild each room, then re-ship:'
-      + '\n    RENAME TABLE <room> TO <room>_old;'
-      + `\n    -- recreate from ${path.join(__dirname, '..', 'house', 'schema.sql.tpl')}`
-      + '\n    INSERT INTO <room> SELECT * FROM <room>_old;'
-      + '\n  (add `, \'ship\' AS origin` to the SELECT only if <room>_old has no origin column)'
+      + '\n  ORDER BY cannot be altered in place — the rooms have to be rebuilt:'
+      + '\n    memhouse migrate-rooms'
+      + '\n  It copies each room into one with the current key, swaps them atomically, and'
+      + '\n  keeps the old one as <room>_pre_epoch for you to drop. Nothing is deleted.'
       + '\n  A house with no imported rows can also just be re-shipped from scratch.');
   }
 }
@@ -484,7 +493,7 @@ async function ensureSchema(client) {
   }
 
   await assertRoomsExist(client, rooms);
-  await assertOriginKeyed(client, rooms);
+  await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
   return stmts.length;
 }
@@ -675,7 +684,7 @@ async function runShip(client, opts = {}) {
   // otherwise: ReplacingMergeTree collapses same-key rows only).
   const rooms = await resolveRooms(client);
   await assertRoomsExist(client, rooms);
-  await assertOriginKeyed(client, rooms);
+  await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
   const existing = await loadExisting(client, rooms);
   const chats = getAllChats();

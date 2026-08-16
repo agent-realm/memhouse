@@ -33,6 +33,53 @@
 
 const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
 
+/**
+ * The sorting key each room MUST have, as the column list ClickHouse reports in
+ * `system.tables.sorting_key`. Canonical here because three places check it — the shipper
+ * before every pass, `doctor`, and the room rebuild — and they disagreed once already: the
+ * shipper's guard lived only in `--ensure-schema`, so 137 sessions shipped straight past
+ * it into a stale-key house.
+ *
+ * Two of the five columns are the whole data-safety story, and both were bought with
+ * measured losses:
+ *
+ *   origin — an imported row and a shipped row at the same seq must be TWO rows.
+ *            Without it RMT collapses them and the import loses; 27,948 messages went
+ *            that way on a real house.
+ *   epoch  — a superseded parse and its replacement must be TWO rows, so a re-parse that
+ *            shrinks or diverges can be written WITHOUT deleting what it replaces. This is
+ *            what removed the shipper's DELETE.
+ *
+ * `sessions` is deliberately keyed on neither: it holds exactly one metadata row per
+ * session, and a second one makes sessions_v join messages twice and over-report (measured
+ * on a real house — one duplicate row inflated the totals by 1,764 messages and 655M
+ * tokens).
+ */
+const ROOM_KEYS = {
+  sessions: ['session_id', 'user_id'],
+  messages: ['session_id', 'user_id', 'origin', 'epoch', 'seq'],
+  tool_calls: ['session_id', 'user_id', 'origin', 'epoch', 'idx'],
+};
+
+/**
+ * What is wrong with a room's sorting key, or null when nothing is. `sortingKey` is the
+ * raw `system.tables.sorting_key` value; pass '' for a table that reports none.
+ *
+ * An EXISTING room reporting no sorting key at all is not a MergeTree — a Merge, a View, a
+ * Log engine standing where a room belongs. Skipping that case let a ship pass sail past
+ * its own guard and die later on `DELETE query is not supported for table …`, and let
+ * doctor print "✓ sorting keys carry origin correctly (2/3 rooms)" over a broken house.
+ */
+function keyProblem(type, sortingKey) {
+  const want = ROOM_KEYS[type];
+  if (!want) return `'${type}' is not a room type`;
+  const key = String(sortingKey || '').trim();
+  if (!key) return 'not a MergeTree, so it cannot be shipped to';
+  const have = key.split(',').map((s) => s.trim()).filter(Boolean);
+  if (have.length === want.length && have.every((c, i) => c === want[i])) return null;
+  return `(${key}) — expected (${want.join(', ')})`;
+}
+
 // The one server-side setting a member carries, applied directly on the user with
 // ADD SETTING (bare `ALTER USER … SETTINGS` REPLACES the user's whole list — measured, it
 // wiped an operator-set ceiling; ADD SETTING merges and upserts). There is no settings
@@ -164,7 +211,7 @@ async function resolveRooms(client) {
 }
 
 module.exports = {
-  ROOM_TYPES, READ_SETTINGS, MEMBER_PIN,
+  ROOM_TYPES, ROOM_KEYS, keyProblem, READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
   sessionsRollup, roomNames, currentUser, resolveRooms,
 };

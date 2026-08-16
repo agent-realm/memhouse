@@ -39,7 +39,13 @@ CREATE TABLE IF NOT EXISTS sessions
     -- messages and tool_calls are the opposite case and DO key on origin -- see there.
     origin LowCardinality(String) DEFAULT 'ship',
     user_id String MATERIALIZED currentUser(),
-    ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
+    ingested_at DateTime64(3, 'UTC') DEFAULT now64(3),
+    -- The session's CURRENT parse epoch, for people and for `doctor` — never for reads.
+    -- The read filter is computed from the messages room itself (see there), because an
+    -- IMPORT writes a sessions row too, and this room is latest-wins with no origin in the
+    -- key: an import landing after a shipped epoch bump would hand every reader a 0 and
+    -- hide the current transcript. Observability only.
+    epoch UInt32 DEFAULT 0
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (session_id, user_id);
@@ -63,18 +69,35 @@ CREATE TABLE IF NOT EXISTS messages
     is_subagent Bool DEFAULT false,
     extra JSON,
     line_hash UInt64,
-    -- Who put this row here. The shipper CLEARS a session before re-inserting it (a
-    -- shorter re-parse must not leave a stale seq tail), and that clear used to remove
-    -- every row for the session regardless of origin -- destroying imported history the
-    -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
-    -- survives a re-ship of the same session.
-    -- IN THE SORTING KEY, and that is the load-bearing half. Guarding the DELETE alone
-    -- is not enough: ReplacingMergeTree collapses on the sorting key, so an imported row
-    -- and a shipped row sharing (session_id, user_id, seq) are the SAME row and the newer
-    -- ingested_at wins. Measured: 3 imported + 2 shipped rows became 3, and the two
-    -- imported ones the shipper happened to overlap were gone. Same loss as the
-    -- unguarded delete, reached through the merge instead.
+    -- Who put this row here, IN THE SORTING KEY. ReplacingMergeTree collapses on the
+    -- sorting key, so an imported row and a shipped row sharing (session_id, user_id, seq)
+    -- would be the SAME row and the newer ingested_at would win. Measured: 3 imported +
+    -- 2 shipped rows became 3, and the two imported ones the shipper overlapped were gone.
+    -- A whole import of 135,307 messages once lost 27,948 of them this way.
     origin LowCardinality(String) DEFAULT 'ship',
+    -- Which PARSE of the session this row belongs to, also in the sorting key.
+    --
+    -- The shipper used to DELETE a session's rows before re-inserting them, because a
+    -- re-parse that yields fewer messages leaves the old higher-seq rows with nothing
+    -- written over them -- a stale tail, and RMT is a dedupe engine, not a diff engine.
+    -- That delete destroyed content that existed nowhere else: Claude Code deletes
+    -- transcripts after cleanupPeriodDays (30 by default) and COMPACTS them before that,
+    -- rewriting a session shorter and different. A shorter re-parse and a fixed adapter
+    -- bug are indistinguishable from outside, and the house is supposed to outlive the
+    -- source.
+    --
+    -- So the shipper never overwrites diverging content. When a re-parse is shorter than
+    -- what is stored, or any overlapping seq hashes differently, it bumps the epoch and
+    -- writes the new parse under it. The old rows keep their epoch, cannot collide with
+    -- the new ones, and stay complete. An unchanged re-ship reuses the epoch and dedupes
+    -- exactly as before, so the common case costs nothing extra. Insert-only: no DELETE,
+    -- no ALTER DELETE grant, no tombstones.
+    --
+    -- Reads see ONE parse: the read layer resolves this room to the current epoch per
+    -- (session_id, user_id) for origin='ship' rows, and leaves every other origin alone
+    -- (see house.js roomNames). Without that filter the retained rows would over-count
+    -- every rollup -- worse than the stale tail this replaces.
+    epoch UInt32 DEFAULT 0,
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3),
     text_ngram String MATERIALIZED lower(text),
@@ -83,7 +106,7 @@ CREATE TABLE IF NOT EXISTS messages
     INDEX idx_text_word  text_word  TYPE text(tokenizer = splitByNonAlpha) GRANULARITY 1
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, user_id, origin, seq);
+ORDER BY (session_id, user_id, origin, epoch, seq);
 
 CREATE TABLE IF NOT EXISTS tool_calls
 (
@@ -97,23 +120,17 @@ CREATE TABLE IF NOT EXISTS tool_calls
     ts DateTime64(3, 'UTC'),
     project String DEFAULT '',
     folder String DEFAULT '',
-    -- Who put this row here. The shipper CLEARS a session before re-inserting it (a
-    -- shorter re-parse must not leave a stale seq tail), and that clear used to remove
-    -- every row for the session regardless of origin -- destroying imported history the
-    -- adapters cannot reproduce. The clear now binds origin='ship', so anything imported
-    -- survives a re-ship of the same session.
-    -- IN THE SORTING KEY, and that is the load-bearing half. Guarding the DELETE alone
-    -- is not enough: ReplacingMergeTree collapses on the sorting key, so an imported row
-    -- and a shipped row sharing (session_id, user_id, seq) are the SAME row and the newer
-    -- ingested_at wins. Measured: 3 imported + 2 shipped rows became 3, and the two
-    -- imported ones the shipper happened to overlap were gone. Same loss as the
-    -- unguarded delete, reached through the merge instead.
+    -- Who put this row here, and which parse it belongs to -- both in the sorting key,
+    -- for the reasons written out at length on the messages room above. The tool room
+    -- shrinks the same way a transcript does: a re-parse with fewer assistant turns emits
+    -- fewer tool calls, and the old higher-idx rows have nothing written over them.
     origin LowCardinality(String) DEFAULT 'ship',
+    epoch UInt32 DEFAULT 0,
     user_id String MATERIALIZED currentUser(),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (session_id, user_id, origin, idx);
+ORDER BY (session_id, user_id, origin, epoch, idx);
 
 -- NO sessions_v HERE, deliberately. The session rollup is a SAVED QUERY substituted
 -- with these room names and run under the caller's own credential (see rooms.js
