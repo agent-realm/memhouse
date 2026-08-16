@@ -1,0 +1,265 @@
+#!/usr/bin/env node
+// House test — the shipper against a REAL, throwaway ClickHouse.
+//
+// `npm test` is pure JS: a syntax gate and unit tests over logic that needs no server.
+// Nothing in it can see the class of defect that actually loses data here, because that
+// class lives in the interaction between what the shipper writes and how
+// ReplacingMergeTree collapses it. The stale-tail bug and its DELETE "fix" are both
+// invisible to a test that never merges a part.
+//
+// So: one container, one house, fixture adapters, and assertions read back out of SQL.
+//
+//   node misc/house-test.js                     (defaults to 25.11)
+//   MEMHOUSE_TEST_IMAGE=clickhouse/clickhouse-server:26.7 node misc/house-test.js
+//   npm run test:house
+//
+// SAFETY, non-negotiable: this file NEVER connects to a house it did not start. The URL
+// is built from a container port this process allocated, MEMHOUSE_HOME is a temp dir, and
+// the container is removed with `-v` — the image declares a VOLUME on /var/lib/clickhouse
+// and omitting -v orphans an anonymous volume per run.
+
+const assert = require('assert');
+const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const ROOT = path.join(__dirname, '..');
+const IMAGE = process.env.MEMHOUSE_TEST_IMAGE || 'clickhouse/clickhouse-server:25.11';
+const NAME = `memhouse-house-test-${process.pid}`;
+const DB = 'testhouse';
+const USER = 'default';
+
+// ── container lifecycle ─────────────────────────────────────────────────────────
+function docker(args, opts = {}) {
+  return execFileSync('docker', args, { encoding: 'utf-8', ...opts }).trim();
+}
+
+function startHouse() {
+  // Host port 0 = "let the kernel pick". A fixed port would eventually collide with a
+  // real house — the pilot's own live at 8123 and 18999 — and this suite must be
+  // incapable of reaching one.
+  // CLICKHOUSE_SKIP_USER_SETUP=1: recent images mint a RANDOM password for `default`
+  // unless told otherwise, and the entrypoint refuses to re-create `default` from
+  // CLICKHOUSE_USER. Skipping user setup leaves the stock passwordless `default`, which is
+  // right for a container reachable only on 127.0.0.1 and destroyed at the end of the run.
+  docker(['run', '-d', '--name', NAME, '-p', '127.0.0.1:0:8123',
+    '-e', `CLICKHOUSE_DB=${DB}`, '-e', 'CLICKHOUSE_SKIP_USER_SETUP=1',
+    IMAGE], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const mapped = docker(['port', NAME, '8123']).split('\n')[0].trim();
+  const port = Number(mapped.split(':').pop());
+  assert.ok(port > 0 && port !== 8123 && port !== 18999, `refusing port ${port}`);
+  return `http://127.0.0.1:${port}`;
+}
+
+async function waitReady(url) {
+  for (let i = 0; i < 120; i++) {
+    try {
+      const r = await fetch(`${url}/ping`);
+      if (r.ok && (await r.text()).trim() === 'Ok.') return;
+    } catch { /* still booting */ }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`${IMAGE} did not answer /ping in 60s`);
+}
+
+function stopHouse() {
+  try { docker(['rm', '-f', '-v', NAME], { stdio: 'ignore' }); } catch { /* already gone */ }
+}
+
+// ── fixture adapters ────────────────────────────────────────────────────────────
+// Substituted into require.cache BEFORE ship.js is loaded: ship.js DESTRUCTURES
+// getAllChats/getMessages at require time, so a stub installed afterwards is never seen.
+const fixture = { chats: [] };
+const editorsPath = require.resolve(path.join(ROOT, 'editors'));
+require.cache[editorsPath] = {
+  id: editorsPath, filename: editorsPath, loaded: true, children: [], paths: [],
+  exports: {
+    getAllChats: () => fixture.chats,
+    getMessages: (chat) => chat._messages,
+    getAdapterErrors: () => [],
+    resetCaches: () => {},
+    editors: [], editorLabels: {},
+  },
+};
+
+const T0 = Date.parse('2026-08-16T09:00:00Z');
+
+/**
+ * One fixture session. `texts` become messages alternating user/assistant; an assistant
+ * message carries a tool call so the tool_calls room is exercised by the same shrink.
+ */
+function chat(id, texts, { updatedAt = T0 + texts.length * 1000 } = {}) {
+  return {
+    source: 'claude',
+    composerId: id,
+    name: `fixture ${id}`,
+    mode: 'agent',
+    folder: '/tmp/fixture-project',
+    createdAt: T0,
+    lastUpdatedAt: updatedAt,
+    bubbleCount: texts.length,
+    _fullPath: `/tmp/fixture-${id}.jsonl`,
+    _messages: texts.map((t, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: t,
+      _ts: T0 + i * 1000,
+      _model: i % 2 === 0 ? '' : 'claude-opus-5',
+      _inputTokens: i % 2 === 0 ? 0 : 100,
+      _outputTokens: i % 2 === 0 ? 0 : 50,
+      ...(i % 2 === 1 ? { _toolCalls: [{ name: `Tool${i}`, args: { seq: i } }] } : {}),
+    })),
+  };
+}
+
+// ── test harness ────────────────────────────────────────────────────────────────
+let passed = 0, failed = 0;
+const only = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+async function test(name, fn) {
+  if (only.length && !only.some((o) => name.includes(o))) return;
+  try { await fn(); passed++; console.log(`ok    ${name}`); }
+  catch (e) { failed++; console.error(`FAIL  ${name}\n      ${e.message}`); }
+}
+
+async function main() {
+  if (!process.env.MEMHOUSE_TEST_URL) {
+    console.log(`[house-test] starting ${IMAGE} as ${NAME}`);
+    process.env.MEMHOUSE_URL = startHouse();
+  } else {
+    process.env.MEMHOUSE_URL = process.env.MEMHOUSE_TEST_URL; // an already-running throwaway
+  }
+  await waitReady(process.env.MEMHOUSE_URL);
+
+  // MEMHOUSE_HOME holds the host fingerprint the shipper mints. A temp one keeps the
+  // pilot's real ~/.memhouse untouched and gives every run a fresh host id.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'memhouse-house-test-'));
+  process.env.MEMHOUSE_HOME = home;
+  process.env.MEMHOUSE_USER = USER;
+  process.env.MEMHOUSE_PASSWORD = '';
+  process.env.MEMHOUSE_DB = DB;
+
+  const { createClient } = require('@clickhouse/client');
+  const { roomNames, READ_SETTINGS } = require(path.join(ROOT, 'memhouse/house/house'));
+  const ship = require(path.join(ROOT, 'memhouse/shipper/ship'));
+
+  const client = createClient({
+    url: process.env.MEMHOUSE_URL, username: USER, password: '', database: DB,
+    clickhouse_settings: { output_format_json_quote_64bit_integers: 0 },
+  });
+  const rooms = roomNames(USER);
+
+  // Raw reads — the physical rows, whatever the read layer chooses to show.
+  const raw = async (sql, params = {}) => (await (await client.query({
+    query: sql, query_params: params, format: 'JSONEachRow',
+  })).json());
+  // Read-layer reads — exactly what a consumer sees, through the same room resolution
+  // and settings the dashboard and MCP server use.
+  const read = async (sql, params = {}) => (await (await client.query({
+    query: sql.replace(/\{\{([a-z_]+)\}\}/g, (_, n) => rooms[n]),
+    query_params: params, format: 'JSONEachRow', clickhouse_settings: READ_SETTINGS,
+  })).json());
+
+  await ship.ensureSchema(client);
+
+  // ── the bug this task exists for ──────────────────────────────────────────────
+  await test('a shorter re-parse must not destroy the content only the house still has', async () => {
+    const id = 'shrink-1';
+    fixture.chats = [chat(id, ['m1', 'm2', 'm3', 'SECRET draft I later deleted', 'another removed line'])];
+    await ship.runShip(client, { full: true });
+
+    const before = await raw(`SELECT text FROM messages FINAL WHERE session_id = {s:String} ORDER BY seq`,
+      { s: `claude:${id}` });
+    assert.strictEqual(before.length, 5, `first ship stored ${before.length} rows, expected 5`);
+
+    // The source shrinks AND is rewritten in place — what Claude Code's compaction does.
+    fixture.chats = [chat(id, ['m1 v2', 'm2 v2', 'm3 v2'], { updatedAt: T0 + 60000 })];
+    await ship.runShip(client);
+
+    const kept = new Set((await raw(
+      `SELECT text FROM messages FINAL WHERE session_id = {s:String}`, { s: `claude:${id}` },
+    )).map((r) => r.text));
+    for (const gone of ['SECRET draft I later deleted', 'another removed line', 'm1', 'm2', 'm3']) {
+      assert.ok(kept.has(gone), `'${gone}' is not in the house any more — it exists nowhere else`);
+    }
+  });
+
+  await test('the read layer shows the current parse only — one row per message, no stale tail', async () => {
+    const id = 'shrink-1'; // continues from the test above
+    const rows = await read(`SELECT seq, text FROM {{messages}} WHERE session_id = {s:String} ORDER BY seq`,
+      { s: `claude:${id}` });
+    assert.deepStrictEqual(rows.map((r) => r.text), ['m1 v2', 'm2 v2', 'm3 v2'],
+      `read layer returned ${rows.length} rows: ${JSON.stringify(rows.map((r) => r.text))}`);
+
+    const roll = (await read(`SELECT total_msgs, input_tokens FROM {{sessions_v}} AS c WHERE session_id = {s:String}`,
+      { s: `claude:${id}` }))[0];
+    assert.strictEqual(Number(roll.total_msgs), 3, 'the rollup counts the superseded parse');
+    assert.strictEqual(Number(roll.input_tokens), 100, 'token totals double-count the superseded parse');
+
+    const sess = (await read(`SELECT message_count FROM {{sessions}} WHERE session_id = {s:String}`,
+      { s: `claude:${id}` }))[0];
+    assert.strictEqual(Number(sess.message_count), 3, 'message_count disagrees with the source');
+  });
+
+  await test('a shorter re-parse must not destroy superseded tool calls either', async () => {
+    const id = 'shrink-1';
+    const kept = (await raw(`SELECT tool_name FROM tool_calls FINAL WHERE session_id = {s:String}`,
+      { s: `claude:${id}` })).map((r) => r.tool_name);
+    assert.ok(kept.includes('Tool3'), `Tool3 was destroyed by the re-ship (kept: ${kept.join(',')})`);
+    const shown = (await read(`SELECT tool_name FROM {{tool_calls}} WHERE session_id = {s:String} ORDER BY idx`,
+      { s: `claude:${id}` })).map((r) => r.tool_name);
+    assert.deepStrictEqual(shown, ['Tool1'], `read layer shows stale tool calls: ${shown.join(',')}`);
+  });
+
+  await test('the shipper runs no mutation — nothing it does needs ALTER DELETE', async () => {
+    const muts = (await raw(`SELECT count() AS n FROM system.mutations WHERE database = {d:String}`, { d: DB }))[0];
+    assert.strictEqual(Number(muts.n), 0, `${muts.n} mutation(s) ran — the shipper is still deleting`);
+  });
+
+  // ── the regression guard: 27,948 imported messages, lost once already ──────────
+  await test('an imported row at an overlapping seq survives a re-ship', async () => {
+    const id = 'import-1';
+    const sid = `claude:${id}`;
+    await client.insert({
+      table: 'messages',
+      values: [0, 1, 2].map((seq) => ({
+        session_id: sid, seq, source: 'claude', host: 'imported-host',
+        ts: '2026-08-01 00:00:00.000', role: 'user', text: `imported ${seq}`,
+        origin: 'import', line_hash: '0', extra: {},
+      })),
+      format: 'JSONEachRow',
+      clickhouse_settings: { async_insert: 0 },
+    });
+
+    fixture.chats = [chat(id, ['s1', 's2', 's3', 's4'])];
+    await ship.runShip(client, { full: true });
+    fixture.chats = [chat(id, ['s1', 's2'], { updatedAt: T0 + 60000 })];
+    await ship.runShip(client);
+
+    const imported = await raw(
+      `SELECT text FROM messages FINAL WHERE session_id = {s:String} AND origin = 'import' ORDER BY seq`,
+      { s: sid });
+    assert.deepStrictEqual(imported.map((r) => r.text), ['imported 0', 'imported 1', 'imported 2'],
+      'a ship pass removed rows it did not write');
+  });
+
+  // ── the common case must stay free ────────────────────────────────────────────
+  await test('growth re-ships in place — an unchanged prefix costs no extra rows', async () => {
+    const id = 'grow-1';
+    fixture.chats = [chat(id, ['g1', 'g2'])];
+    await ship.runShip(client, { full: true });
+    fixture.chats = [chat(id, ['g1', 'g2', 'g3', 'g4'], { updatedAt: T0 + 60000 })];
+    await ship.runShip(client);
+    const rows = await raw(`SELECT seq FROM messages FINAL WHERE session_id = {s:String}`, { s: `claude:${id}` });
+    assert.strictEqual(rows.length, 4,
+      `${rows.length} physical rows for a 4-message session — appending must not fork the session`);
+  });
+
+  await client.close();
+  fs.rmSync(home, { recursive: true, force: true });
+  console.log(`\n${passed} passed, ${failed} failed  (${IMAGE})`);
+  process.exitCode = failed ? 1 : 0;
+}
+
+process.on('exit', stopHouse);
+process.on('SIGINT', () => { stopHouse(); process.exit(130); });
+main().catch((e) => { console.error(e); stopHouse(); process.exit(1); });
