@@ -337,7 +337,10 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              status               daemons, connection, counts, freshness (--json)
              doctor               diagnose the whole pipeline
 
-Agents       plugins              list | install claude [--target DIR] | remove claude
+Agents       mcp                  MCP server on stdio (2026-07-28 revision, plus the
+                                  legacy initialize handshake) — read-only tools:
+                                  search, timeline, get_session, stats, resume_command, sql
+             plugins              list | install claude [--target DIR] | remove claude
                                   acts on EVERY Claude config dir found (~/.claude,
                                   CLAUDE_CONFIG_DIR, ~/.claude-playbooks/*), all
                                   selected by default; --yes takes them all unasked
@@ -2094,6 +2097,24 @@ async function cmdUninstall() {
     case 'doctor': process.exitCode = await cmdDoctor(); break;
     case 'search': process.exitCode = await cmdSearch(); break;
     case 'resume': process.exitCode = await cmdResume(); break;
+    case 'mcp': {
+      // Resolve the house exactly like every other command and stamp the env
+      // BEFORE the server loads — queries.js snapshots MEMHOUSE_* at require time.
+      // Deliberately NOT requireConfig(): an unconfigured server must still start
+      // and answer server/discover and tools/list, so the client can show the
+      // tools; each tools/call then refuses with the standard message as a tool
+      // result. requireConfig() would exit(2) here and the client would only ever
+      // see "server failed".
+      const cfg = resolveConfig();
+      if (cfg.stated) {
+        Object.assign(process.env, {
+          MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
+          MEMHOUSE_DB: cfg.db, MEMHOUSE_HOME: HOME_DIR,
+        });
+      }
+      require(path.join(REPO_ROOT, 'memhouse', 'mcp', 'stdio'));
+      break;
+    }
     case 'update': process.exitCode = await cmdUpdate(); break;
     // The session rollup is a saved query, not an object, so there is no name an agent
     // or a skill can put in a FROM clause. This prints it, resolved for whoever the

@@ -26,7 +26,7 @@
     "start": "node bin/memhouse.js",
     "build": "cd ui && npm install && npm run build",
     "dev": "cd ui && npm run dev",
-    "test": "node misc/syntax-check.js && node misc/unit-test.js",
+    "test": "node misc/syntax-check.js && node misc/unit-test.js && node misc/mcp-unit-test.js",
     "prepack": "cd ui && npm install --no-audit --no-fund && npm run build"
   },
   "keywords": [

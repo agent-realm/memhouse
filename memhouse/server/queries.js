@@ -967,6 +967,180 @@ async function schema() {
   };
 }
 
+// ── MCP read surface (memhouse/mcp/tools.js) ────────────────────────────────────
+// Every value that originates as an MCP tool argument is BOUND, never spliced into
+// the SQL text. A CLI argument comes from the pilot's own shell; an MCP argument
+// arrives from whatever model a client is running and must be treated as
+// attacker-shaped. The LIKE escape below is pattern semantics (%, _, \ are LIKE
+// metacharacters inside the bound VALUE), not injection defense — the binding is
+// the injection defense.
+
+function clampLimit(v, dflt, max) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), max) : dflt;
+}
+
+// The compact index: one row per matching session, never transcript text. The
+// second query prices the expansion of each hit over the WHOLE session (char/4 —
+// the stored token columns are usage counters, not transcript size), so the model
+// can weigh `est_expand_tokens` before asking get_session for anything.
+async function searchSessions(needleRaw, limit) {
+  const lim = clampLimit(limit, 10, 100);
+  const needle = '%' + String(needleRaw).toLowerCase().replace(/[%_\\]/g, '\\$&') + '%';
+  const hits = await q(`
+    SELECT session_id, user_id, any(source) AS source, any(project) AS project,
+           formatDateTime(max(ts), '%Y-%m-%d %H:%i') AS at, max(ts) AS mts,
+           count() AS hits, substring(any(text), 1, 150) AS snippet
+    FROM {{messages}}
+    WHERE text_ngram LIKE {needle:String}
+    GROUP BY session_id, user_id
+    ORDER BY mts DESC LIMIT {lim:UInt32}`, { needle, lim });
+  if (!hits.length) return [];
+  const ids = hits.map((h) => h.session_id);
+  const est = await q(`
+    SELECT session_id, user_id, intDiv(sum(length(text)), 4) AS est
+    FROM {{messages}} WHERE session_id IN {ids:Array(String)}
+    GROUP BY session_id, user_id`, { ids });
+  const key = (r) => `${r.session_id} ${r.user_id}`;
+  const emap = new Map(est.map((r) => [key(r), Number(r.est)]));
+  return hits.map((h) => ({
+    session_id: h.session_id, user_id: h.user_id, source: h.source,
+    project: h.project || '', at: h.at, hits: Number(h.hits),
+    snippet: (h.snippet || '').replace(/\s+/g, ' '),
+    est_expand_tokens: emap.get(key(h)) ?? null,
+  }));
+}
+
+const TIMELINE_COLS = `session_id, user_id, source, project, name,
+    formatDateTime(started, '%Y-%m-%d %H:%i') AS started,
+    formatDateTime(ended, '%Y-%m-%d %H:%i') AS ended,
+    total_msgs, models, substring(first_prompt, 1, 120) AS first_prompt`;
+
+// Sessions nearest an anchor moment — a date, or another session's last activity.
+// Nearest-by-time rather than a fixed window, so a sparse house still answers.
+async function timelineSessions(opts = {}) {
+  const lim = clampLimit(opts.limit, 20, 100);
+  let anchor;
+  if (opts.session_id) {
+    const row = await q1(`
+      SELECT formatDateTime(max(ended), '%Y-%m-%d %H:%i:%S') AS a
+      FROM {{sessions_v}} AS c WHERE session_id = {sid:String} AND total_msgs > 0`,
+      { sid: String(opts.session_id) });
+    if (!row || !row.a || row.a.startsWith('1970')) return { anchor: null, sessions: [] };
+    anchor = row.a;
+  } else if (opts.date) {
+    anchor = String(opts.date);
+  } else {
+    anchor = new Date().toISOString();
+  }
+  // Two layers because a `formatDateTime(ended, …) AS ended` alias SHADOWS the
+  // rollup's datetime column inside the same SELECT — dateDiff then receives the
+  // formatted String and refuses. The inner layer keeps raw names, the outer one
+  // formats.
+  const rows = await q(`
+    SELECT session_id, user_id, source, project, name,
+           formatDateTime(started_at, '%Y-%m-%d %H:%i') AS started,
+           formatDateTime(ended_at, '%Y-%m-%d %H:%i') AS ended,
+           total_msgs, models, first_prompt, dist
+    FROM (
+      SELECT session_id, user_id, source, project, name,
+             started AS started_at, ended AS ended_at, total_msgs, models,
+             substring(first_prompt, 1, 120) AS first_prompt,
+             abs(dateDiff('second', ended, parseDateTime64BestEffort({anchor:String}))) AS dist
+      FROM {{sessions_v}} AS c
+      WHERE total_msgs > 0
+      ORDER BY dist ASC LIMIT {lim:UInt32}
+    )`, { anchor, lim });
+  rows.sort((a, b) => (a.started < b.started ? -1 : a.started > b.started ? 1 : 0));
+  return { anchor, sessions: rows.map(({ dist, ...r }) => ({ ...r, total_msgs: Number(r.total_msgs) })) };
+}
+
+// One transcript (or a seq-range slice of it). The only MCP read that returns
+// message text, which is why it takes the (session_id, user_id) pair seriously:
+// in a shared house two members can hold the same canonical session_id, and
+// guessing between them would hand back the wrong person's copy. With no user_id
+// and several holders, the answer is the list of holders, not a guess.
+async function getSessionSlice(opts = {}) {
+  const sid = String(opts.session_id);
+  const holders = await q(`
+    SELECT ${TIMELINE_COLS}
+    FROM {{sessions_v}} AS c WHERE session_id = {sid:String} AND total_msgs > 0`, { sid });
+  if (!holders.length) return { found: false, session: null, messages: [] };
+  let header;
+  if (opts.user_id !== undefined) {
+    header = holders.find((h) => h.user_id === String(opts.user_id));
+    if (!header) return { found: false, session: null, messages: [], holders: holders.map((h) => h.user_id) };
+  } else if (holders.length === 1) {
+    header = holders[0];
+  } else {
+    return { found: false, ambiguous: true, holders: holders.map((h) => h.user_id), session: null, messages: [] };
+  }
+  const from = Math.max(0, Number(opts.seq_from) || 0);
+  const to = Number.isFinite(Number(opts.seq_to)) ? Number(opts.seq_to) : 4294967295;
+  const lim = clampLimit(opts.limit, 500, 1000);
+  const messages = await q(`
+    SELECT seq, formatDateTime(ts, '%Y-%m-%d %H:%i:%S') AS ts, role, model, is_subagent, text
+    FROM {{messages}}
+    WHERE session_id = {sid:String} AND user_id = {uid:String}
+      AND seq >= {from:UInt32} AND seq <= {to:UInt32}
+    ORDER BY seq LIMIT {lim:UInt32}`,
+    { sid, uid: header.user_id, from, to, lim });
+  return {
+    found: true,
+    session: { ...header, total_msgs: Number(header.total_msgs) },
+    messages: messages.map((m) => ({ ...m, seq: Number(m.seq) })),
+    truncated: messages.length >= lim,
+  };
+}
+
+// Per-source / per-user / per-host counts and freshness — the house at a glance.
+async function statsHouse() {
+  const rows = await q(`
+    SELECT source, user_id, host, count() AS sessions, sum(total_msgs) AS messages,
+           formatDateTime(max(ended), '%Y-%m-%d %H:%i') AS freshest
+    FROM {{sessions_v}} AS c WHERE total_msgs > 0
+    GROUP BY source, user_id, host ORDER BY sessions DESC`);
+  const breakdown = rows.map((r) => ({
+    source: r.source, user_id: r.user_id, host: r.host,
+    sessions: Number(r.sessions), messages: Number(r.messages), freshest: r.freshest,
+  }));
+  return {
+    total_sessions: breakdown.reduce((a, r) => a + r.sessions, 0),
+    total_messages: breakdown.reduce((a, r) => a + r.messages, 0),
+    breakdown,
+  };
+}
+
+// The stored row resumeFor() needs: source, folder, origin. Read, not guessed.
+async function sessionRowFor(sessionId, userId) {
+  const params = { sid: String(sessionId) };
+  let and = '';
+  if (userId !== undefined) { and = ' AND user_id = {uid:String}'; params.uid = String(userId); }
+  return q1(`
+    SELECT session_id, any(source) AS source, any(folder) AS folder, any(origin) AS origin
+    FROM {{sessions}} WHERE session_id = {sid:String}${and} GROUP BY session_id`, params);
+}
+
+// Free-form read-only SQL for the MCP `sql` tool. readonly=2 is the pinned,
+// server-enforced read gate (2, not 1: level 1 also refuses the per-query limit
+// settings this call itself sends). Everything else is rawQuery's self-protection
+// verbatim — q() buffers rows into JS, so ClickHouse has to stop sending.
+// There is deliberately NO SQL parser here: what this credential may read is the
+// pilot's GRANT choice, and the server's own refusal (Code 164/497) is passed
+// through as the answer.
+async function readonlySql(sql) {
+  const rows = await q(sql, {}, {
+    readonly: 2,
+    max_result_rows: RAW_MAX_ROWS,
+    max_result_bytes: RAW_MAX_BYTES,
+    result_overflow_mode: 'break',
+    max_execution_time: 30,
+    max_memory_usage: 8000000000,
+  });
+  const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+  return { columns, rows, count: rows.length, truncated: rows.length >= RAW_MAX_ROWS };
+}
+
 module.exports = {
   getClient, config,
   getOverview, getDailyActivity, getDashboardStats,
@@ -974,6 +1148,7 @@ module.exports = {
   getProjects, getDeepAnalytics, getToolCalls,
   estimateCosts, getCostAnalytics,
   rawQuery, schema,
+  searchSessions, timelineSessions, getSessionSlice, statsHouse, sessionRowFor, readonlySql,
   // Used only by the server's own guard to learn which database names are real. Not
   // reachable from any route.
   rawQueryUnguarded: (sql) => q(sql),

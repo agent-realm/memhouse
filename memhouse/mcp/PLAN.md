@@ -10,8 +10,25 @@ it differs from the handshake era), `ARCHITECTURE.md` (module layout and a worke
 stdio flow), `GRANTS.md` (what ClickHouse enforces, tested).
 
 Written 2026-08-16 against master `b78b342` (0.9.0); every line number cited below was
-verified there. Branch `claude/mcp-server`. No implementation code exists yet — this
-directory is currently plan only.
+verified there. Branch `claude/mcp-server`.
+
+**Status 2026-08-18: P3, P4, and P5 are BUILT and green.** `tools.js` (six tools),
+`rpc.js` (dual-era protocol), `stdio.js` (transport), `case 'mcp'` in the CLI, MCP
+read functions in `server/queries.js`. Gates passed: `npm test` (includes
+`misc/mcp-unit-test.js`, 8 protocol checks), `misc/mcp-test.js` (15 live checks over
+a throwaway house — including server-side readonly refusal, credential-leak grep,
+stdout purity under MEMHOUSE_DEBUG=1, and the no-house refusal), and the P5
+real-client gate: Claude Code itself, via `--mcp-config`, ran
+search → get_session → resume_command against a seeded fixture house and reported the
+right session, the right content, and the exact resume command. Remaining: P6
+(Streamable HTTP), P6b (credential surface, parent repo), P7 (resources, only if
+earned), P8 docs (README + CHANGELOG).
+
+One deviation from the letter of this plan, kept deliberately: `rpc.js` is
+**dual-era** — it also answers the legacy `initialize` handshake, because every
+client in the field today (Claude Code included) still opens with it. The spec
+blesses dual-era servers; our tools surface is identical under both, so legacy is a
+result shape, not a behavior. The P5 gate ran through that path.
 
 ## What the repo already gives us
 
