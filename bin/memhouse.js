@@ -327,7 +327,9 @@ Setup        onboard              interactive wizard: discover → configure →
                                   --credentials    also forget the house and its password
                                   --full-removal   all of ${HOME_DIR.replace(os.homedir(), '~')}, identity included
                                   no tier touches the house data
-             update               upgrade, restart the daemons, and check the house schema
+             update               upgrade, restart the daemons, migrate the house if it
+                                  needs it (asks; --migrate runs unasked; --no-install
+                                  skips npm when you already upgraded by hand)
                                   (--check to compare versions and change nothing)
              reset                clear the shipper's rows and re-ship everything (--yes to skip confirm)
                                   imported rows are kept; --all-origins removes those too
@@ -352,8 +354,9 @@ Agents       plugins              list | install claude [--target DIR] | remove 
 House        deploy --local       run ClickHouse in docker/podman, then install
              deploy --down        remove the local house (container + volume)
                                   [--house-port N] [--tag 25.11]  (--port is the dashboard)
-             migrate-rooms        rebuild rooms whose sorting key predates this version
-                                  (copies, swaps atomically, keeps <room>_pre_epoch)
+             migrate              run every migration this house still needs
+                                  [--dry-run] [--yes]  (copy + atomic swap; deletes nothing)
+             migrate-rooms        the same, scoped to the rooms
              service install      run the shipper as a user service (systemd / launchd)
              service uninstall | status
 
@@ -1728,7 +1731,13 @@ async function cmdUpdate() {
   try { svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { /* unsupported platform */ }
   const wasRunning = { shipper: !!pidOf('shipper'), dashboard: !!pidOf('dashboard') };
 
-  if (kind === 'checkout') {
+  if (flags['no-install'] === true) {
+    // The files were already replaced by other means — a hand-typed `npm i -g`, a tarball,
+    // a configuration manager. The npm/git half is exactly what such a pilot has already
+    // done, and the half a bare install leaves undone (restart, migrations, schema heal)
+    // is exactly what they came here for.
+    console.log(warn('--no-install: files assumed current; restarting and checking the house only'));
+  } else if (kind === 'checkout') {
     // The stale-UI case, and it is checkout-only: a published tarball ships public/ built by
     // prepack, but `git pull` updates ui/src and leaves the old bundle in public/ — so the
     // dashboard serves the previous release however many times it is restarted.
@@ -1774,11 +1783,45 @@ async function cmdUpdate() {
     console.log(warn('no daemons were running — start them with: memhouse start'));
   }
 
-  // A shipper from a newer release can need a column an older house does not have. The
-  // shipper reports the drift and prints the rebuild; running it here means the pilot
-  // learns at upgrade time rather than from a warning in a log nobody reads.
+  // The new release may need the HOUSE moved too, and upgrade time is when the pilot is
+  // watching — a migration named here beats one discovered as a refusing service in a log
+  // nobody reads. Three behaviours, chosen by the pilot:
+  //   memhouse update --migrate   run whatever is pending, unasked (--yes implies it)
+  //   interactive                 name what is pending and ask
+  //   non-interactive, no flag    name it and print the command; NEVER auto-run — a cron
+  //                               or CI invocation must not start a house-wide copy
   const cfg = resolveConfig();
   if (cfg.url && cfg.user) {
+    try {
+      const r = await roomsFor(cfg);
+      const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
+      const mig = require(path.join(REPO_ROOT, 'memhouse', 'house', 'migrate.js'));
+      const q = {
+        sql: (sql, settings) => ch(cfg, sql, { settings }),
+        rows: (sql, settings) => chRows(cfg, sql, settings ? { settings } : undefined),
+      };
+      const pending = await mig.detectPending(q, { db: cfg.db, tpl, rooms: r, member: r.member });
+      if (pending.length) {
+        console.log(warn(`this release needs ${pending.length} migration(s) the house has not had:`));
+        for (const x of pending) console.log(`     ${x.migration.id} (schema ${x.migration.toVersion}, ${x.migration.component})`);
+        let go = flags.migrate === true || flags.yes === true;
+        if (!go && process.stdin.isTTY) {
+          const a = (await ask('Run them now? (yes/no)', 'no')).toLowerCase();
+          go = a === 'yes' || a === 'y';
+        }
+        if (go) {
+          const code = await cmdMigrate({ quiet: true, assumeYes: true });
+          if (code !== 0) return code;
+        } else {
+          console.log(warn('until they run, the shipper REFUSES every pass (nothing is lost, nothing ships):'));
+          console.log('     memhouse migrate');
+        }
+      }
+    } catch (e) {
+      // An unreachable house is not an upgrade failure — the files are updated either way.
+      console.log(warn(`could not check the house for pending migrations: ${e.message.split('\n')[0]}`));
+    }
+    // The column healer half: additive drift the migrations above do not cover.
     const code = run(SHIP_JS, ['--ensure-schema'], cfg);
     if (code !== 0) { console.log(warn('the house schema needs attention — memhouse doctor')); return code; }
   }
@@ -2008,64 +2051,69 @@ async function houseMeta(cfg, key, value) {
 }
 
 /**
- * Rebuild rooms whose sorting key predates the current schema generation.
+ * `memhouse migrate [--dry-run] [--yes]` — run whatever migrations this house still
+ * needs, in order. `memhouse migrate-rooms` is the same runner filtered to the 'rooms'
+ * component; the name stays because other components (a daemon, config layouts) will
+ * carry their own migrations one day and "migrate-rooms" will then mean exactly what it
+ * says.
  *
- * ORDER BY cannot be altered in place, so a key change is a copy — and this is the one
- * command in memhouse that moves an entire room. Its rules follow from that:
- *
- *   NOTHING IS DELETED. The old room is renamed to `<room>_pre_epoch` and left for the
- *   pilot to drop when they are satisfied. The whole point of this release is that the
- *   house stops destroying what it cannot rebuild; a migration that dropped the source
- *   would be the same mistake at a larger scale.
- *
- *   PROVENANCE IS COPIED, NOT RESTAMPED. `user_id` is MATERIALIZED currentUser(), so an
- *   ordinary INSERT SELECT would stamp every row of a shared house with the identity of
- *   whoever ran the migration — silently rewriting who said what. The copy lists user_id
- *   explicitly under insert_allow_materialized_columns=1.
- *
- *   THE SWAP IS ONE STATEMENT. `RENAME TABLE a TO a_pre_epoch, tmp TO a` is atomic, so
- *   there is no window where the room does not exist.
- *
- *   WRITES DURING THE COPY ARE NOT LOST. A shipper running through the migration keeps
- *   writing into the old table right up to the rename; a second pass afterwards copies
- *   anything that arrived after the snapshot. ReplacingMergeTree makes that idempotent.
+ * The machinery — registry, detection, executors, and the invariants every migration
+ * inherits (nothing deleted, provenance never restamped, atomic swap, late writes
+ * survive, everything recorded) — lives in memhouse/house/migrate.js. This function is
+ * transport and conversation: build the q/ledger adapters, show the plan, ask, run.
  */
-async function cmdMigrateRooms() {
-  const cfg = requireConfig(resolveConfig(), 'migrate-rooms');
+async function cmdMigrate({ component = null, quiet = false, assumeYes = false } = {}) {
+  const cfg = requireConfig(resolveConfig(), component === 'rooms' ? 'migrate-rooms' : 'migrate');
   const r = await roomsFor(cfg);
   const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
   const host = require(path.join(REPO_ROOT, 'memhouse', 'host.js')).identity().id;
-  const migration = MIGRATIONS[SCHEMA_VERSION];
+  const mig = require(path.join(REPO_ROOT, 'memhouse', 'house', 'migrate.js'));
 
-  // The house's record of itself, created here if it does not exist yet — a house built
-  // by 0.9.0 has no such tables, and a migration is precisely the event they exist to
-  // record. Best-effort: a member without CREATE TABLE can still be the one who notices
-  // the rooms need rebuilding, and the rebuild matters more than the paperwork.
-  for (const t of META_TYPES) {
+  const q = {
+    sql: (sql, settings) => ch(cfg, sql, { settings }),
+    rows: (sql, settings) => chRows(cfg, sql, settings ? { settings } : undefined),
+  };
+  const ctx = { db: cfg.db, tpl, rooms: r, host, member: r.member };
+  const ledger = { event: (e) => houseEvent(cfg, e), meta: (k, v) => houseMeta(cfg, k, v) };
+  const ui = { ok: (m) => console.log(ok(m)), warn: (m) => console.log(warn(m)) };
+
+  // The house's record of itself, created here if absent — a pre-0.10 house has none,
+  // and a migration is precisely the event those tables exist to record. Best-effort: a
+  // member without CREATE TABLE can still be the one who notices the rooms need
+  // rebuilding, and the rebuild matters more than the paperwork.
+  const { META_TYPES: metas } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
+  for (const t of metas) {
     try {
       await ch(cfg, createStatement(tpl, t, t).replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
     } catch { /* no rights, or already there */ }
   }
 
-  const todo = [];
-  for (const t of ROOM_TYPES) {
-    const name = r[`${t}_raw`];
-    const rows = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${name}'`, { database: '' });
-    if (!rows.length) { console.log(warn(`${name} does not exist — run: memhouse install`)); continue; }
-    const problem = keyProblem(t, rows[0].k);
-    if (problem) todo.push({ t, name, key: rows[0].k });
-  }
-
-  if (!todo.length) {
-    console.log(ok(`every room already carries the schema ${SCHEMA_VERSION} sorting key`));
+  const pending = await mig.detectPending(q, ctx, { component });
+  if (!pending.length) {
+    if (!quiet) console.log(ok(`nothing to migrate — the house is at schema ${SCHEMA_VERSION}`));
     await houseMeta(cfg, 'schema_version', String(SCHEMA_VERSION));
     return 0;
   }
 
-  console.log(`These rooms predate schema ${SCHEMA_VERSION} and the shipper refuses to write into them:\n`);
-  for (const x of todo) console.log(`  ${x.name}  (${x.key})`);
-  console.log('\nEach is copied into a room with the current key, swapped in atomically, and the');
-  console.log(`old one kept as <room>_pre_epoch. Nothing is deleted — you drop those when ready.\n`);
+  for (const item of pending) {
+    for (const line of item.migration.plan(item.found)) console.log(line);
+    console.log('');
+  }
+  if (flags['dry-run'] === true) {
+    console.log(warn(`dry run — ${pending.length} migration(s) pending, nothing was changed`));
+    return 0;
+  }
+
+  // Another actor mid-copy: two concurrent rebuilds of one room end with one of them
+  // renaming the other's work.
+  for (const item of pending) {
+    const busy = await mig.unfinishedBy(q, ctx, item.migration.id);
+    if (busy) {
+      console.log(bad(`migration ${item.migration.id} is already pending by '${busy.actor}' (since ${busy.at})`));
+      console.log('  if that run is dead, its __migrating leftovers say so — inspect, clean, retry.');
+      return 1;
+    }
+  }
 
   const svc = shipperHealth();
   if (svc.running) {
@@ -2073,97 +2121,25 @@ async function cmdMigrateRooms() {
     console.log('  by a second pass, but stopping it first makes the migration a single, quiet copy:');
     console.log('  memhouse service stop   (or: memhouse stop)');
   }
-  if (flags.yes !== true) {
-    const a = (await ask(`Migrate ${todo.length} room(s) in '${cfg.db}'? (yes/no)`, 'no')).toLowerCase();
+  // assumeYes carries a consent ALREADY GIVEN one level up — `update` prompted (or took
+  // --migrate/--yes) before calling here, and asking twice teaches pilots that prompts
+  // are noise. It is never set on a direct `memhouse migrate`.
+  if (flags.yes !== true && !assumeYes) {
+    const what = pending.map((x) => x.migration.id).join(', ');
+    const a = (await ask(`Run ${pending.length} migration(s) (${what}) on '${cfg.db}'? (yes/no)`, 'no')).toLowerCase();
     if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
   }
 
-  for (const x of todo) {
-    const tmp = `${x.name}__migrating`;
-    const kept = `${x.name}_pre_epoch`;
-    // A leftover from an interrupted run is never cleared automatically: it may hold the
-    // only copy of rows that were mid-flight, and this command's entire premise is that
-    // it removes nothing.
-    for (const clash of [tmp, kept]) {
-      const exists = await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name = '${clash}'`, { database: '' });
-      if (exists.length) {
-        console.log(bad(`${clash} already exists — an earlier migration did not finish`));
-        console.log(`  inspect it, then rename or drop it yourself: DROP TABLE ${cfg.db}.${clash}`);
-        return 1;
-      }
-    }
-
-    const before = Number((await chRows(cfg, `SELECT count() AS c FROM ${x.name} FINAL`))[0]?.c || 0);
-    await houseEvent(cfg, {
-      kind: 'migration', id: migration, status: 'pending', host,
-      to_version: String(SCHEMA_VERSION), rows_before: before, detail: `${x.name} (${x.key})`,
-    });
-
+  for (const item of pending) {
     try {
-      // The columns both rooms have, minus the derived ones. text_ngram/text_word are
-      // MATERIALIZED from `text` and recompute on insert; user_id is MATERIALIZED too but
-      // must NOT recompute, so it is listed explicitly and carried across verbatim.
-      const oldCols = (await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${x.name}'`, { database: '' })).map((c) => c.name);
-      await ch(cfg, createStatement(tpl, x.t, tmp), { settings: { allow_experimental_full_text_index: 1 } });
-      const newCols = (await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${tmp}'`, { database: '' })).map((c) => c.name);
-      const carried = newCols.filter((c) => oldCols.includes(c) && !['text_ngram', 'text_word'].includes(c));
-      const list = carried.join(', ');
-      const copySettings = { insert_allow_materialized_columns: 1, allow_experimental_full_text_index: 1 };
-      // A room from before `origin` existed has no such column; the template's DEFAULT
-      // fills it as 'ship', which is what those rows were.
-      const started = (await chRows(cfg, "SELECT toString(now64(3, 'UTC')) AS t"))[0].t;
-
-      await ch(cfg, `INSERT INTO ${tmp} (${list}) SELECT ${list} FROM ${x.name} FINAL`, { settings: copySettings });
-      const copied = Number((await chRows(cfg, `SELECT count() AS c FROM ${tmp}`))[0]?.c || 0);
-      if (copied < before) throw new Error(`copied ${copied} of ${before} rows — refusing to swap`);
-
-      await ch(cfg, `RENAME TABLE ${x.name} TO ${kept}, ${tmp} TO ${x.name}`);
-      // Anything the shipper wrote into the old room while the copy ran.
-      const late = carried.includes('ingested_at')
-        ? await ch(cfg, `INSERT INTO ${x.name} (${list}) SELECT ${list} FROM ${kept} FINAL WHERE ingested_at >= toDateTime64('${started}', 3, 'UTC')`, { settings: copySettings }).then(() => true).catch(() => false)
-        : false;
-      const after = Number((await chRows(cfg, `SELECT count() AS c FROM ${x.name} FINAL`))[0]?.c || 0);
-
-      await houseEvent(cfg, {
-        kind: 'migration', id: migration, status: 'applied', host,
-        to_version: String(SCHEMA_VERSION), rows_before: before, rows_after: after,
-        detail: `${x.name}: old room kept as ${kept}${late ? '; late writes copied' : ''}`,
-      });
-      console.log(ok(`${x.name}: ${after} rows, old room kept as ${kept}`));
+      await mig.runMigration(q, ctx, item, { ledger, ui });
     } catch (e) {
-      await houseEvent(cfg, {
-        kind: 'migration', id: migration, status: 'failed', host,
-        to_version: String(SCHEMA_VERSION), rows_before: before, detail: `${x.name}: ${e.message}`,
-      });
-      console.log(bad(`${x.name}: ${e.message}`));
-      console.log(`  nothing was swapped; ${x.name} is untouched. The partial copy is in ${tmp}.`);
+      console.log(bad(`${item.migration.id}: ${e.message}`));
+      console.log('  nothing already swapped was touched; re-running is safe once the cause is fixed.');
       return 1;
     }
   }
 
-  // Heal the rooms the rebuild did NOT touch. `sessions` keeps its key across schema 2,
-  // so it is never in `todo` — but a 0.9.0 house's sessions room still lacks the new
-  // `epoch` column, and leaving it missing means the very next `ship` opens with a
-  // "fields are being DISCARDED" warning that sends the pilot to a second command. A
-  // migration should hand back a house with nothing left to heal.
-  try {
-    const { templateColumns } = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'));
-    const want = templateColumns(tpl);
-    for (const t of ROOM_TYPES) {
-      if (todo.some((x) => x.t === t)) continue; // rebuilt from the template — complete
-      const name = r[`${t}_raw`];
-      const have = new Set((await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${name}'`, { database: '' })).map((c) => c.name));
-      if (!have.size) continue;
-      for (const col of (want[t] || [])) {
-        if (have.has(col.name)) continue;
-        await ch(cfg, `ALTER TABLE ${name} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
-          { settings: { allow_experimental_full_text_index: 1 } });
-        console.log(ok(`${name}: added missing column ${col.name}`));
-      }
-    }
-  } catch (e) { console.log(warn(`could not heal columns on the untouched rooms: ${e.message} — memhouse ship --ensure-schema does the same`)); }
-
-  await houseMeta(cfg, 'schema_version', String(SCHEMA_VERSION));
   console.log(`\n${ok(`house is at schema ${SCHEMA_VERSION}`)}`);
   console.log('  verify with: memhouse doctor');
   console.log(`  then, when you are satisfied: DROP TABLE ${cfg.db}.<room>_pre_epoch`);
@@ -2366,7 +2342,8 @@ async function cmdUninstall() {
       }
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
-    case 'migrate-rooms': process.exitCode = await cmdMigrateRooms(); break;
+    case 'migrate': process.exitCode = await cmdMigrate({}); break;
+    case 'migrate-rooms': process.exitCode = await cmdMigrate({ component: 'rooms' }); break;
     case 'deploy': {
       const dep = require(path.join(REPO_ROOT, 'memhouse', 'deploy.js'));
       if (flags.down) {

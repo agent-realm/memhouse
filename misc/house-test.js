@@ -459,7 +459,12 @@ async function main() {
     const again = execFileSync(process.execPath,
       [path.join(ROOT, 'bin', 'memhouse.js'), 'migrate-rooms', '--yes'],
       { encoding: 'utf-8', env: { ...process.env, MEMHOUSE_DB: db } });
-    assert.match(again, /already carries the schema 2 sorting key/, again);
+    assert.match(again, /nothing to migrate — the house is at schema 2/, again);
+    // And the umbrella command agrees with the scoped one.
+    const umbrella = execFileSync(process.execPath,
+      [path.join(ROOT, 'bin', 'memhouse.js'), 'migrate', '--dry-run'],
+      { encoding: 'utf-8', env: { ...process.env, MEMHOUSE_DB: db } });
+    assert.match(umbrella, /nothing to migrate/, umbrella);
   });
 
   await client.close();

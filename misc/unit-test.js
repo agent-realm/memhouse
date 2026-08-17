@@ -257,6 +257,38 @@ test('loadExisting builds its (session, epoch) keys identically at all three sit
   assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(src), 'ship.js contains a raw control byte');
 });
 
+test('the migration registry is ordered, complete, and matches the schema version', () => {
+  const mig = require('../memhouse/house/migrate');
+  const list = mig.listMigrations();
+  assert.ok(list.length >= 1, 'no migrations registered');
+  // The registry's last word and house.js's SCHEMA_VERSION must agree — a version bump
+  // without a migration strands every existing house behind a refusal with no way
+  // forward, and a migration without the bump never runs.
+  assert.strictEqual(list[list.length - 1].toVersion, rooms.SCHEMA_VERSION,
+    'SCHEMA_VERSION moved without a migration to take houses there (or vice versa)');
+  // Every step names an executor that exists — an unknown op is found at 2am otherwise.
+  const fakeCtx = { rooms: Object.fromEntries(rooms.ROOM_TYPES.map((t) => [`${t}_raw`, t])) };
+  for (const m of list) {
+    const found = rooms.ROOM_TYPES.map((t) => ({ t, name: t, key: 'wrong' }));
+    for (const step of m.steps(found, fakeCtx)) {
+      assert.ok(mig.EXECUTORS[step.op], `migration '${m.id}' names unknown op '${step.op}'`);
+    }
+    assert.ok(Array.isArray(m.plan(found)), `migration '${m.id}' plan() must return lines`);
+  }
+});
+
+test('the epoch-key migration heals what it does not rebuild', () => {
+  // sessions keeps its sorting key across schema 2 and so is never rebuilt — but it
+  // still gains the epoch column. A migration that leaves it behind hands the pilot a
+  // "fields are being DISCARDED" warning on the very next ship.
+  const m = require('../memhouse/house/migrations/0100-epoch-key');
+  const ctx = { rooms: Object.fromEntries(rooms.ROOM_TYPES.map((t) => [`${t}_raw`, t])) };
+  const found = [{ t: 'messages', name: 'messages', key: 'old' }, { t: 'tool_calls', name: 'tool_calls', key: 'old' }];
+  const steps = m.steps(found, ctx);
+  assert.deepStrictEqual(steps.map((x) => x.op), ['rebuildRoom', 'rebuildRoom', 'healColumns']);
+  assert.strictEqual(steps[2].name, 'sessions');
+});
+
 test('the schema template parser reads the rooms it actually creates', () => {
   // It matched `<type>_{{MEMBER}}` for a whole release after the rooms became plain
   // shared tables, so it returned NOTHING and three surfaces reported success over an

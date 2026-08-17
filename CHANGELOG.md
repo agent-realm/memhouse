@@ -25,6 +25,20 @@ migration path is planned work, not a promise the old versions can cash.
   to a current-epoch subquery, and the bare tables only as `messages_raw` /
   `tool_calls_raw` for writes and DDL. Counts, tokens and cost are unchanged. Hand-written
   SQL needs the filter — `/memhouse:sql` carries it.
+- **`memhouse migrate`** — a migration runner, not a one-off. Migrations live in
+  `memhouse/house/migrations/<id>.js` (registry: id, component, toVersion, detect, plan,
+  steps); the runner detects what a house still needs FROM ITS ROOMS (never from the
+  record — a hand-migrated house has no record), shows the plan, and executes in order.
+  `--dry-run` prints and touches nothing; `--yes` skips the confirm. Every migration
+  inherits the invariants: nothing deleted, provenance never restamped, atomic swap,
+  late writes survive, everything recorded in `house_events`. `memhouse migrate-rooms`
+  is the same runner scoped to the rooms component.
+- **`memhouse update` names, asks, or runs pending migrations.** After the files update
+  it detects what the house needs: `--migrate` (or `--yes`) runs them unasked,
+  an interactive session is asked once (the inner confirm is not repeated), and a
+  non-interactive run only names them and prints the command — a cron must never start
+  a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
+  who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
 - **`memhouse migrate-rooms`** rebuilds rooms whose sorting key predates this version:
   copy, one atomic `RENAME`, old room kept as `<room>_pre_epoch` for the pilot to drop.
   Nothing is deleted, and `user_id` is carried across explicitly rather than restamped —
