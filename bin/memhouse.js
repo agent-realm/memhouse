@@ -854,7 +854,15 @@ async function cmdInstall({ interactive }) {
   if (keyProblem) {
     console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
     console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
-    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl')}, then: memhouse ship --full`);
+    // migrate-rooms, not "rebuild by hand from the template" — this advice predated the
+    // command and survived it, so an UPGRADING pilot (the main person who ever sees this)
+    // was pointed at a manual rebuild that the tool now does for them, atomically and
+    // without deleting anything.
+    // With the SAME connection flags — no config was written (see below), so a bare
+    // `memhouse migrate-rooms` here would answer "no house configured" and strand the
+    // pilot in a loop between two refusals.
+    console.log('  rebuild them (a copy + swap; nothing is deleted), then install again:');
+    console.log(`     memhouse migrate-rooms --url ${cfg.url} --db ${cfg.db} --user ${cfg.user} --password …`);
     console.log('  no config was written — nothing here reads as installed.');
     return 1;
   }
@@ -991,7 +999,15 @@ async function cmdInstall({ interactive }) {
   if (keyProblem) {
     console.log(bad(`the rooms are here, but their sorting keys are wrong: ${keyProblem}`));
     console.log('  a ship pass would corrupt them, so `memhouse ship` will refuse.');
-    console.log(`  rebuild them from ${path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl')}, then: memhouse ship --full`);
+    // migrate-rooms, not "rebuild by hand from the template" — this advice predated the
+    // command and survived it, so an UPGRADING pilot (the main person who ever sees this)
+    // was pointed at a manual rebuild that the tool now does for them, atomically and
+    // without deleting anything.
+    // With the SAME connection flags — no config was written (see below), so a bare
+    // `memhouse migrate-rooms` here would answer "no house configured" and strand the
+    // pilot in a loop between two refusals.
+    console.log('  rebuild them (a copy + swap; nothing is deleted), then install again:');
+    console.log(`     memhouse migrate-rooms --url ${cfg.url} --db ${cfg.db} --user ${cfg.user} --password …`);
     console.log('  no config was written — nothing here reads as installed.');
     return 1;
   }

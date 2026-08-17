@@ -1174,7 +1174,11 @@ if (require.main === module) {
     // advice to run `ship --ensure-schema`.
     const m = e && e.message ? e.message : String(e);
     if (/Not enough privileges|ACCESS_DENIED/i.test(m) && process.env.MEMHOUSE_QUIET_DENIED === '1') process.exit(1);
-    console.error(`[memhouse] ${/Not enough privileges|ACCESS_DENIED/i.test(m) ? 'refused' : 'fatal'}: ${m}`);
+    // The sorting-key refusal joins the permissions one: both are the shipper DECLINING
+    // to act, with the remediation already in the message. "fatal:" ahead of it made the
+    // most-seen line of the upgrade path — every `--ensure-schema` on a pre-epoch house —
+    // read like a crash.
+    console.error(`[memhouse] ${/Not enough privileges|ACCESS_DENIED|wrong sorting key/i.test(m) ? 'refused' : 'fatal'}: ${m}`);
     process.exit(1);
   });
 }
