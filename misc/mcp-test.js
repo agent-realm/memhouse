@@ -29,15 +29,15 @@ const URL = `http://127.0.0.1:${PORT}`;
 
 function sh(cmd, args, opts = {}) { return spawnSync(cmd, args, { encoding: 'utf8', ...opts }); }
 
-async function chq(sql, { retries = 0, db = 'mem' } = {}) {
+async function chq(sql, { retries = 0, db = 'mem', user = 'default', pass = PASS } = {}) {
   const res = await fetch(`${URL}/?allow_experimental_full_text_index=1${db ? `&database=${db}` : ''}`, {
     method: 'POST',
-    headers: { Authorization: 'Basic ' + Buffer.from(`default:${PASS}`).toString('base64') },
+    headers: { Authorization: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64') },
     body: sql,
   }).catch((e) => ({ ok: false, text: async () => String(e) }));
   const text = await res.text();
   if (!res.ok) {
-    if (retries > 0) { await new Promise((r) => setTimeout(r, 1000)); return chq(sql, { retries: retries - 1, db }); }
+    if (retries > 0) { await new Promise((r) => setTimeout(r, 1000)); return chq(sql, { retries: retries - 1, db, user, pass }); }
     throw new Error(`clickhouse refused: ${text.slice(0, 200)}`);
   }
   return text;
@@ -100,7 +100,8 @@ async function test(name, fn) {
   // ── the throwaway house ───────────────────────────────────────────────────────
   sh('docker', ['rm', '-f', '-v', NAME]);
   const up = sh('docker', ['run', '-d', '--name', NAME, '-p', `127.0.0.1:${PORT}:8123`,
-    '-e', `CLICKHOUSE_PASSWORD=${PASS}`, 'clickhouse/clickhouse-server:latest']);
+    '-e', `CLICKHOUSE_PASSWORD=${PASS}`, '-e', 'CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1',
+    'clickhouse/clickhouse-server:latest']);
   if (up.status !== 0) { console.error(`docker run failed: ${up.stderr}`); process.exit(1); }
 
   try {
@@ -217,6 +218,124 @@ async function test(name, fn) {
 
     await test('stdout is protocol-only, even with MEMHOUSE_DEBUG=1', async () => {
       for (const f of s.rawFrames) JSON.parse(f); // every line parses or this throws
+    });
+
+    // ── edges: the inputs a model will actually send ──────────────────────────────
+    await test('search: LIKE metacharacters in the needle are literal, not wildcards', async () => {
+      await chq(`INSERT INTO messages (session_id, seq, source, host, ts, role, text, origin, line_hash) VALUES
+        ('claude-code:11111111-2222-3333-4444-555555555555', 6, 'claude-code', 'mac1', '2026-08-12 10:03:00', 'user', 'progress: 100%_done today', 'memhouse', 6)`);
+      const out = parseTool(await s.rpc('tools/call', { name: 'search', arguments: { q: '100%_done' }, _meta: MODERN_META }));
+      assert.strictEqual(out.matches, 1, 'the escaped needle matches its literal occurrence');
+      // An unescaped % would have matched every session; an unescaped _ any char.
+      const none = parseTool(await s.rpc('tools/call', { name: 'search', arguments: { q: '100%Xdone' }, _meta: MODERN_META }));
+      assert.strictEqual(none.matches, 0, '_ did not act as a wildcard');
+    });
+
+    await test('search: no matches is an ordinary empty answer; absurd limit is clamped, not refused', async () => {
+      const none = parseTool(await s.rpc('tools/call', { name: 'search', arguments: { q: 'zzz-no-such-needle' }, _meta: MODERN_META }));
+      assert.deepStrictEqual(none, { matches: 0, results: [] });
+      const big = parseTool(await s.rpc('tools/call', { name: 'search', arguments: { q: 'readonly', limit: 5000 }, _meta: MODERN_META }));
+      assert.ok(big.matches <= 100);
+    });
+
+    await test('shared house: a second member\'s copy of the SAME session id is never guessed between', async () => {
+      await chq("CREATE USER IF NOT EXISTS alice IDENTIFIED BY 'alicepw'", { db: '' });
+      await chq('GRANT SELECT, INSERT ON mem.* TO alice', { db: '' });
+      await chq(`INSERT INTO sessions (session_id, source, host, name, folder, project, origin, message_count) VALUES
+        ('claude-code:11111111-2222-3333-4444-555555555555', 'claude-code', 'alice-mac', 'her copy', '/home/alice/proj', 'memhouse', 'ship', 1)`,
+        { user: 'alice', pass: 'alicepw' });
+      await chq(`INSERT INTO messages (session_id, seq, source, host, ts, role, text, origin, line_hash) VALUES
+        ('claude-code:11111111-2222-3333-4444-555555555555', 1, 'claude-code', 'alice-mac', '2026-08-12 11:00:00', 'user', 'alice copy of this session', 'memhouse', 10)`,
+        { user: 'alice', pass: 'alicepw' });
+      const amb = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: SID }, _meta: MODERN_META }));
+      assert.strictEqual(amb.found, false);
+      assert.strictEqual(amb.ambiguous, true);
+      assert.deepStrictEqual([...amb.holders].sort(), ['alice', 'default'], 'the answer is the holder list, not a guess');
+      const mine = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: SID, user_id: 'default' }, _meta: MODERN_META }));
+      assert.strictEqual(mine.found, true);
+      assert.ok(mine.messages.every((m) => !m.text.includes('alice copy')));
+      const hers = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: SID, user_id: 'alice' }, _meta: MODERN_META }));
+      assert.strictEqual(hers.messages.length, 1);
+      assert.ok(hers.messages[0].text.includes('alice copy'));
+    });
+
+    await test('get_session: absent session, wrong holder, inverted range, and the truncation flag', async () => {
+      const gone = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: 'claude-code:no-such' }, _meta: MODERN_META }));
+      assert.strictEqual(gone.found, false);
+      const wrong = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: SID, user_id: 'nobody' }, _meta: MODERN_META }));
+      assert.strictEqual(wrong.found, false);
+      assert.ok(wrong.holders.length >= 2, 'a wrong holder is told who the holders are');
+      const empty = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: SID, user_id: 'default', seq_from: 10, seq_to: 3 }, _meta: MODERN_META }));
+      assert.deepStrictEqual(empty.messages, []);
+      const cut = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: SID, user_id: 'default', limit: 2 }, _meta: MODERN_META }));
+      assert.strictEqual(cut.messages.length, 2);
+      assert.strictEqual(cut.truncated, true);
+    });
+
+    await test('sql: the result caps actually cut — 20000 rows come back as 10000, flagged', async () => {
+      const out = parseTool(await s.rpc('tools/call', { name: 'sql', arguments: { query: 'SELECT number FROM numbers(20000)' }, _meta: MODERN_META }));
+      assert.strictEqual(out.count, 10000);
+      assert.strictEqual(out.truncated, true);
+    });
+
+    await test('sql: a syntax error is the server\'s own message, and the process survives it', async () => {
+      const r = await s.rpc('tools/call', { name: 'sql', arguments: { query: 'SELEKT 1' }, _meta: MODERN_META });
+      assert.strictEqual(r.result.isError, true);
+      assert.ok(/syntax/i.test(r.result.content[0].text));
+      const alive = parseTool(await s.rpc('tools/call', { name: 'stats', arguments: {}, _meta: MODERN_META }));
+      assert.ok(alive.total_sessions >= 2);
+    });
+
+    await test('the scrub holds even when a result legitimately CONTAINS the password', async () => {
+      const r = await s.rpc('tools/call', { name: 'sql', arguments: { query: `SELECT '${PASS}' AS x` }, _meta: MODERN_META });
+      const frame = s.rawFrames[s.rawFrames.length - 1];
+      assert.ok(!frame.includes(PASS), 'the password never crosses stdout');
+      assert.ok(frame.includes('[redacted]'), 'redaction is visible, not silent');
+      assert.ok(r.result, 'and the call still answered');
+    });
+
+    await test('timeline: a date anchor works; a garbage date is a passed-through refusal, not a crash', async () => {
+      const ok = parseTool(await s.rpc('tools/call', { name: 'timeline', arguments: { date: '2026-08-12' }, _meta: MODERN_META }));
+      assert.ok(ok.sessions.length >= 2);
+      const bad = await s.rpc('tools/call', { name: 'timeline', arguments: { date: 'not-a-date' }, _meta: MODERN_META });
+      assert.strictEqual(bad.result.isError, true);
+      const alive = await s.rpc('tools/list', { _meta: MODERN_META });
+      assert.strictEqual(alive.result.tools.length, 6);
+    });
+
+    await test('resume_command: unverified editor and unknown session both refuse with a reason', async () => {
+      await chq(`INSERT INTO sessions (session_id, source, host, name, folder, origin, message_count) VALUES
+        ('goose:some-native-id', 'goose', 'mac1', 'a goose session', '/tmp/g', 'ship', 1)`);
+      const un = parseTool(await s.rpc('tools/call', { name: 'resume_command', arguments: { session_id: 'goose:some-native-id' }, _meta: MODERN_META }));
+      assert.strictEqual(un.ok, false);
+      assert.ok(un.reason.includes('no verified resume command'), un.reason);
+      const gone = parseTool(await s.rpc('tools/call', { name: 'resume_command', arguments: { session_id: 'claude-code:never-stored' }, _meta: MODERN_META }));
+      assert.strictEqual(gone.ok, false);
+      assert.ok(gone.reason.includes('no stored session'));
+    });
+
+    await test('ten concurrent calls all come home to their own ids', async () => {
+      const answers = await Promise.all(Array.from({ length: 10 }, (_, i) =>
+        s.rpc('tools/call', { name: i % 2 ? 'stats' : 'search', arguments: i % 2 ? {} : { q: 'readonly' }, _meta: MODERN_META })));
+      for (const a of answers) assert.ok(a.result && !a.error, 'every call resolved with a result');
+    });
+
+    await test('legacy era persists on this process: a version-less request still gets the legacy shape', async () => {
+      // initialize ran near the top of this file, so this long-lived process is
+      // era=legacy for any request that does not carry modern _meta.
+      const r = await s.rpc('tools/list', {});
+      assert.strictEqual(r.result.tools.length, 6);
+      assert.strictEqual(r.result.resultType, undefined);
+      assert.strictEqual(r.result.ttlMs, undefined);
+    });
+
+    await test('a non-JSON line gets -32700 and the stream keeps working', async () => {
+      s.proc.stdin.write('this is not json\n');
+      await new Promise((r) => setTimeout(r, 300));
+      const parseErr = s.rawFrames.map((f) => JSON.parse(f)).find((m) => m.error && m.error.code === -32700);
+      assert.ok(parseErr, 'the parse error was reported');
+      const alive = await s.rpc('ping', {});
+      assert.deepStrictEqual(alive.result, {});
     });
 
     await test('stdin EOF is a clean exit', async () => {

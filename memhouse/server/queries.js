@@ -1133,12 +1133,19 @@ async function readonlySql(sql) {
     readonly: 2,
     max_result_rows: RAW_MAX_ROWS,
     max_result_bytes: RAW_MAX_BYTES,
+    // 'break' cuts BETWEEN blocks, so a result that fits one block (default
+    // max_block_size is 65536 rows) sails past max_result_rows untouched — the
+    // server caps bound MEMORY, not the row count. The JS slice below is what
+    // makes the 10000-row contract exact; the server caps are what keep the
+    // slice from being asked to hold two billion rows first.
     result_overflow_mode: 'break',
     max_execution_time: 30,
     max_memory_usage: 8000000000,
   });
-  const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-  return { columns, rows, count: rows.length, truncated: rows.length >= RAW_MAX_ROWS };
+  const truncated = rows.length >= RAW_MAX_ROWS;
+  const kept = truncated ? rows.slice(0, RAW_MAX_ROWS) : rows;
+  const columns = kept.length > 0 ? Object.keys(kept[0]) : [];
+  return { columns, rows: kept, count: kept.length, truncated };
 }
 
 module.exports = {

@@ -104,6 +104,63 @@ test('notifications get no reply, and a cancelled id is remembered', async () =>
   assert.ok(s.cancelled.has(7));
 });
 
+// ── protocol edges ──────────────────────────────────────────────────────────────
+test('tools/call with no arguments object at all still reaches the tool', async () => {
+  // A sloppy client may omit `arguments` entirely; the handler gets {} and the
+  // tool's own validation (requireHouse first) answers — not a TypeError.
+  const r = await handle(req('tools/call', { name: 'stats', _meta: modernMeta }), newState());
+  assert.ok(r.result, 'a result, not a crash');
+  assert.strictEqual(r.result.isError, true); // no house in this runner
+});
+
+test('initialize twice: the second answer is as valid as the first (no handshake state to corrupt)', async () => {
+  const s = newState();
+  const a = await handle(req('initialize', { protocolVersion: '2025-06-18' }), s);
+  const b = await handle(req('initialize', { protocolVersion: '2025-11-25' }), s);
+  assert.strictEqual(a.result.protocolVersion, '2025-06-18');
+  assert.strictEqual(b.result.protocolVersion, '2025-11-25');
+});
+
+test('a modern-era ping still answers — a dual-era server does not punish leftovers', async () => {
+  const r = await handle(req('ping', { _meta: modernMeta }), newState());
+  assert.deepStrictEqual(r.result, {});
+});
+
+test('id 0 is a real id, not a notification', async () => {
+  // `id === undefined` is the notification test; a falsy-but-present id must
+  // round-trip. A client using 0-based ids would otherwise never get answer #0.
+  const r = await handle(req('tools/list', { _meta: modernMeta }, 0), newState());
+  assert.strictEqual(r.id, 0);
+  assert.strictEqual(r.result.tools.length, 6);
+});
+
+test('string ids round-trip untouched', async () => {
+  const r = await handle(req('server/discover', { _meta: modernMeta }, 'discover-1'), newState());
+  assert.strictEqual(r.id, 'discover-1');
+});
+
+test('a request with params missing entirely is still answered', async () => {
+  const r = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/list' }, newState());
+  assert.strictEqual(r.result.tools.length, 6);
+});
+
+test('jsonrpc 1.0 / missing jsonrpc field is refused as Invalid Request', async () => {
+  const s = newState();
+  assert.strictEqual((await handle({ jsonrpc: '1.0', id: 1, method: 'tools/list' }, s)).error.code, -32600);
+  assert.strictEqual((await handle({ id: 2, method: 'tools/list' }, s)).error.code, -32600);
+  // Junk with no id cannot be answered at all — null, not a throw.
+  assert.strictEqual(await handle({ jsonrpc: '1.0', method: 'x' }, s), null);
+  assert.strictEqual(await handle(null, s), null);
+});
+
+test('the version gate runs BEFORE method dispatch — even server/discover refuses a wrong version', async () => {
+  // discover is the version-negotiation RPC, but a request that names a version
+  // we do not speak gets -32022 with the supported list, per the spec's
+  // per-request model; the client retries with one of ours.
+  const r = await handle(req('server/discover', { _meta: { [`${META}protocolVersion`]: '2030-01-01' } }), newState());
+  assert.strictEqual(r.error.code, -32022);
+});
+
 test('no house: every tool refuses as an isError RESULT that names the fix — never a protocol error', async () => {
   const s = newState();
   for (const name of ['search', 'get_session', 'sql']) {
