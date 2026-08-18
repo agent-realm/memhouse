@@ -53,6 +53,9 @@ function startServer(env) {
   const rawFrames = [];
   let stderrBuf = '';
   let buf = '';
+  // Writing to a child that just exited emits EPIPE as an async stream 'error'
+  // event — expected in the kill-tests, fatal to the runner if unhandled.
+  proc.stdin.on('error', () => {});
   proc.stdout.on('data', (c) => {
     buf += c;
     let i;
@@ -338,8 +341,45 @@ async function test(name, fn) {
       assert.deepStrictEqual(alive.result, {});
     });
 
+    await test('cancellation is one-shot: a reused id answers again after suppressing once', async () => {
+      // JSON-RPC ids only have to be unique among in-flight requests. Cancel id
+      // 777, then use it: the first response is suppressed AND the id is
+      // forgotten, so the second use of 777 answers normally. (agy review
+      // finding: the set previously remembered ids forever, silently eating
+      // every later reuse.)
+      s.notify('notifications/cancelled', { requestId: 777 });
+      await new Promise((r) => setTimeout(r, 200));
+      const send777 = () => new Promise((resolve) => {
+        s.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 777, method: 'ping', params: {} }) + '\n');
+        const t = setTimeout(() => resolve(null), 1500);
+        const seen = s.rawFrames.length;
+        const poll = setInterval(() => {
+          const hit = s.rawFrames.slice(seen).map((f) => JSON.parse(f)).find((m) => m.id === 777);
+          if (hit) { clearTimeout(t); clearInterval(poll); resolve(hit); }
+        }, 50);
+      });
+      assert.strictEqual(await send777(), null, 'the cancelled id is suppressed once');
+      const again = await send777();
+      assert.ok(again && again.result, 'the reused id answers');
+    });
+
     await test('stdin EOF is a clean exit', async () => {
       await s.close();
+    });
+
+    await test('a single frame over the 64MB line cap is an exit(1), not an OOM', async () => {
+      const giant = startServer(env);
+      const code = await new Promise((resolve) => {
+        giant.proc.on('exit', (c) => resolve(c));
+        // 70MB with no newline: the framing can never resynchronize mid-line.
+        const chunk = 'x'.repeat(1024 * 1024);
+        for (let i = 0; i < 70 && !giant.proc.killed; i++) {
+          if (!giant.proc.stdin.writable) break;
+          try { giant.proc.stdin.write(chunk); } catch { break; }
+        }
+      });
+      assert.strictEqual(code, 1);
+      assert.ok(giant.stderr().includes('64'), 'stderr names the cap');
     });
 
     await test('no house: discovery answers, tools refuse per-call, and nothing dials localhost:8123', async () => {

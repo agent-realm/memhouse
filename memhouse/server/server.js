@@ -493,12 +493,21 @@ app.post('/mcp', async (req, res) => {
     });
   }
 
-  const state = mcp.newState();
-  if (!modern) state.era = 'legacy'; // over HTTP the version pair is decisive — no lenient-modern guess
-  const out = await mcp.handle(body, state);
-  if (!out) return res.status(202).end(); // notification accepted
-  const status = out.error ? (out.error.code === -32601 ? 404 : out.error.code === -32603 ? 500 : 400) : 200;
-  return send(status, out);
+  // handle() guards its own tool calls, but express 4 does not catch an async
+  // throw — an unexpected exception here would become an unhandled rejection,
+  // or worse, the default HTML error page with an UNSCRUBBED stack. Everything
+  // that leaves this route goes through send(), which scrubs.
+  try {
+    const state = mcp.newState();
+    if (!modern) state.era = 'legacy'; // over HTTP the version pair is decisive — no lenient-modern guess
+    const out = await mcp.handle(body, state);
+    if (!out) return res.status(202).end(); // notification accepted
+    const status = out.error ? (out.error.code === -32601 ? 404 : out.error.code === -32603 ? 500 : 400) : 200;
+    return send(status, out);
+  } catch (e) {
+    console.error(`[memhouse] /mcp: ${mcp.scrub(String(e && e.stack || e))}`);
+    return send(500, { jsonrpc: '2.0', id, error: { code: -32603, message: 'Internal error' } });
+  }
 });
 
 // The 2026-07-28 endpoint has no GET stream and no DELETE-to-end-session. This

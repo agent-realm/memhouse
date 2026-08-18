@@ -81,8 +81,14 @@ async function handle(msg, state) {
   const isNotification = id === undefined;
 
   // Cancellation (stdio): remember the id so an in-flight response is dropped.
+  // The transport deletes an id once it suppresses that response (one-shot);
+  // the clamp below covers cancellations for ids that never answer at all —
+  // without it a client spamming cancels for made-up ids grows the set forever.
   if (method === 'notifications/cancelled') {
-    if (params && params.requestId !== undefined) state.cancelled.add(params.requestId);
+    if (params && params.requestId !== undefined) {
+      if (state.cancelled.size >= 1000) state.cancelled.delete(state.cancelled.values().next().value);
+      state.cancelled.add(params.requestId);
+    }
     return null;
   }
   if (isNotification) return null; // notifications/initialized and anything else: accepted, no reply
