@@ -48,7 +48,10 @@ let stdoutBusy = false;
 // handled at the bottom of this file — a try/catch cannot reach it.
 function write(obj) {
   try {
-    if (!process.stdout.write(scrub(JSON.stringify(obj)) + '\n')) {
+    if (!process.stdout.write(scrub(JSON.stringify(obj)) + '\n') && !stdoutBusy) {
+      // One listener per congestion episode: in-flight responses finishing
+      // while the pipe is already full would otherwise stack a 'drain'
+      // listener each, and Node warns about the pile-up on stderr.
       stdoutBusy = true;
       process.stdout.once('drain', () => { stdoutBusy = false; flow(); });
     }
