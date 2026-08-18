@@ -360,7 +360,11 @@ async function main() {
   await test('the house records its schema generation and who ships into it, once', async () => {
     const meta = new Map((await raw('SELECT key, value FROM house_meta FINAL')).map((r) => [r.key, r.value]));
     assert.strictEqual(meta.get('schema_version'), '2', 'the house does not know its schema generation');
-    assert.strictEqual(meta.get(`client_version:${USER}`), require(path.join(ROOT, 'package.json')).version);
+    // Keyed per member@host — keyed by member alone, two machines of one member clobber
+    // each other's entry and the fleet view only ever shows the machine that shipped last.
+    const vKey = [...meta.keys()].find((k) => k.startsWith(`client_version:${USER}@`));
+    assert.ok(vKey, `no client_version recorded for ${USER}@<host>`);
+    assert.strictEqual(meta.get(vKey), require(path.join(ROOT, 'package.json')).version);
 
     const before = (await raw('SELECT count() AS n FROM house_events'))[0].n;
     assert.ok(Number(before) >= 2, `expected a schema and a version event, got ${before}`);
@@ -404,6 +408,35 @@ async function main() {
     assert.strictEqual(chat.messages.length, 3, 'the transcript view shows a superseded parse');
     assert.ok(!chat.messages.some((m) => m.content.includes('SECRET draft')),
       'the transcript view shows rows from an earlier parse');
+  });
+
+  await test('the house records each writer, and a too-new house is refused before any write', async () => {
+    // The forward half of the compatibility story. Every 0.10+ writer records what
+    // schema it supports and a heartbeat, keyed per member@host; and refuses a house
+    // whose record says it has moved past this release.
+    // Self-contained: give the pass something to ship and settle, whatever ran before.
+    fixture.chats = [chat('guard-1', ['g1', 'g2'])];
+    await ship.runShip(client);
+    const meta = new Map((await raw("SELECT key, value FROM house_meta FINAL")).map((r) => [r.key, String(r.value)]));
+    const writerKeys = [...meta.keys()].filter((k) => k.startsWith('client_schema:'));
+    assert.ok(writerKeys.length >= 1, 'no client_schema recorded for any writer');
+    assert.ok(writerKeys.every((k) => k.includes('@')), `writer keys must be member@host: ${writerKeys}`);
+    assert.strictEqual(meta.get(writerKeys[0]), '2');
+    assert.ok([...meta.keys()].some((k) => k.startsWith('last_ship:')), 'no heartbeat recorded');
+
+    await client.insert({
+      table: 'house_meta', values: [{ key: 'schema_version', value: '99' }],
+      format: 'JSONEachRow', clickhouse_settings: { async_insert: 0 },
+    });
+    await assert.rejects(() => ship.runShip(client), /schema 99.*supports 2/s,
+      'a shipper wrote into a house recorded as newer than anything it understands');
+    // Restore: latest-wins on the key.
+    await client.insert({
+      table: 'house_meta', values: [{ key: 'schema_version', value: '2' }],
+      format: 'JSONEachRow', clickhouse_settings: { async_insert: 0 },
+    });
+    const r = await ship.runShip(client);
+    assert.ok(r.skipped + r.sessions > 0, 'the house did not recover after the record was corrected');
   });
 
   // ── migrating a house built by 0.9.0 ──────────────────────────────────────────

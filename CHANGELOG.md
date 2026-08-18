@@ -39,6 +39,20 @@ migration path is planned work, not a promise the old versions can cash.
   non-interactive run only names them and prints the command — a cron must never start
   a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
   who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **Writer compatibility is enforced, both directions.** Each release declares which
+  schema generations it may write (`SUPPORTED_SCHEMAS`); every pass starts by reading the
+  house's own record and refuses — before touching a room — when the house is newer than
+  the shipper (`Update THIS machine: memhouse update`) or below the floor a migration set
+  (`house_meta['min_writer_schema']`). The room-shape checks stay: they catch what a
+  record cannot (a hand-built house with no record at all).
+- **The house knows its fleet.** Every writer records the schema it supports and a
+  per-pass heartbeat, keyed `member@host` (member-only keying let two machines of one
+  member clobber each other's entry). `memhouse status` shows the fleet — writer,
+  version, last ship — and `doctor` fails on the writers that matter: `legacy` (a
+  pre-0.10 memhouse, visible because its ROWS are in the house while it records nothing
+  about itself — its re-ships delete retained parses) and `outdated` (refusing every
+  pass until updated). Ground truth is the data, not the record, so a writer that
+  predates the record cannot hide.
 - **Mixed-version fleets: upgrade every machine of a member promptly.** A pre-0.10
   shipper on another machine keeps working against migrated rooms (its key check only
   looks for `origin`), but its delete-before-reinsert reaches every retained parse of a

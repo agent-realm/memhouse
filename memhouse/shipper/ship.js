@@ -60,7 +60,8 @@ const selfUpdate = require('../self-update');
 // gets. Taking it later would record whatever an upgrade had already replaced.
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
-  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, keyProblem,
+  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION,
+  SUPPORTED_SCHEMAS, keyProblem,
 } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
@@ -486,6 +487,7 @@ async function ensureSchema(client) {
   // the template correctly — and it would have been actively wrong once this loop covered
   // house_meta and house_events, which have no origin and want none.
 
+  await assertWriterSupported(client, rooms);
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
@@ -511,10 +513,14 @@ async function ensureSchema(client) {
  */
 async function recordHouseState(client, rooms, host) {
   const version = require('../../package.json').version;
+  const writer = `${rooms.user}@${host}`;
   try {
     const rs = await client.query({
-      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', {ck:String})`,
-      query_params: { ck: `client_version:${rooms.user}` }, format: 'JSONEachRow',
+      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', {ck:String}, {cs:String})`,
+      // Keyed per member AND host. Keyed by member alone, two machines of one member
+      // overwrote each other's entry on every pass, so the fleet view could only ever
+      // show the machine that shipped last — the exact machine that needs no attention.
+      query_params: { ck: `client_version:${writer}`, cs: `client_schema:${writer}` }, format: 'JSONEachRow',
     });
     const have = new Map((await rs.json()).map((r) => [r.key, String(r.value)]));
     const events = [];
@@ -530,7 +536,16 @@ async function recordHouseState(client, rooms, host) {
         detail: 'rooms carry the current sorting keys',
       });
     }
-    const clientKey = `client_version:${rooms.user}`;
+    const clientKey = `client_version:${writer}`;
+    // The schema this writer SUPPORTS, beside the marketing version — the fleet view
+    // judges on this, because a version string cannot be compared against a schema
+    // requirement (and a pre-release checkout may not have bumped package.json at all).
+    // Tracked on its own change, not the version's: tying it to a version bump left every
+    // already-recorded writer without one forever.
+    const mySchema = String(Math.max(...SUPPORTED_SCHEMAS));
+    if (have.get(`client_schema:${writer}`) !== mySchema) {
+      metas.push({ key: `client_schema:${writer}`, value: mySchema, host });
+    }
     if (have.get(clientKey) !== version) {
       metas.push({ key: clientKey, value: version, host });
       events.push({
@@ -539,16 +554,62 @@ async function recordHouseState(client, rooms, host) {
         detail: `${rooms.user} shipping from ${host}`,
       });
     }
-    if (!metas.length) return;
+    // The heartbeat, EVERY pass — the fleet view's health column. Latest-wins on the key,
+    // so it is one live row per writer however often it fires; version/schema above stay
+    // change-only so house_events remains a record of moves, not a pulse trace.
+    metas.push({ key: `last_ship:${writer}`, value: new Date().toISOString(), host });
     await client.insert({
       table: rooms.house_meta_raw, values: metas, format: 'JSONEachRow',
       clickhouse_settings: { async_insert: 0 },
     });
-    await client.insert({
-      table: rooms.house_events_raw, values: events, format: 'JSONEachRow',
-      clickhouse_settings: { async_insert: 0 },
-    });
+    if (events.length) {
+      await client.insert({
+        table: rooms.house_events_raw, values: events, format: 'JSONEachRow',
+        clickhouse_settings: { async_insert: 0 },
+      });
+    }
   } catch { /* the house's paperwork is never worth failing a pass over */ }
+}
+
+/**
+ * The forward half of the compatibility story: refuse a house whose RECORDED schema this
+ * release does not support, before any room is touched.
+ *
+ * Distinct from assertRoomKeys, which inspects key SHAPES — a future generation could be
+ * a data transform the keys do not show. This reads what the house says about itself:
+ * house_meta['schema_version'] (what generation the rooms are at) and
+ * house_meta['min_writer_schema'] (the floor `memhouse migrate` sets under writers).
+ * Too new -> the fix is on THIS machine: memhouse update. Below the floor -> same.
+ * (A house OLDER than this release is not an error here — the room checks catch it and
+ * name `memhouse migrate`; this guard must not fire on a pre-0.10 house that has no
+ * record at all.)
+ *
+ * Releases before 0.10.0 never read this — for them the floor is enforced by the
+ * pilot's GRANTs, not by code.
+ */
+async function assertWriterSupported(client, rooms) {
+  let have;
+  try {
+    const rs = await client.query({
+      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', 'min_writer_schema')`,
+      format: 'JSONEachRow',
+    });
+    have = new Map((await rs.json()).map((r) => [r.key, toInt(r.value)]));
+  } catch { return; } // no meta tables: a pre-0.10 house — the room checks own that case
+  const houseSchema = have.get('schema_version') || 0;
+  const floor = have.get('min_writer_schema') || 0;
+  const mine = Math.max(...SUPPORTED_SCHEMAS);
+  if (houseSchema > mine) {
+    throw new Error(
+      `this house is at schema ${houseSchema}; this memhouse (${require('../../package.json').version}) supports ${SUPPORTED_SCHEMAS.join(', ')}.\n`
+      + '  A newer release moved the house forward. Writing with this one could corrupt it, so it will not.\n'
+      + '  Update THIS machine:  memhouse update');
+  }
+  if (floor > mine) {
+    throw new Error(
+      `this house requires writers at schema ${floor}+; this memhouse supports ${SUPPORTED_SCHEMAS.join(', ')}.\n`
+      + '  Update THIS machine:  memhouse update');
+  }
 }
 
 // Incremental state: what the house already holds, keyed by session_id. We compare
@@ -893,6 +954,7 @@ async function runShip(client, opts = {}) {
   // shape: writing at the wrong epoch either forks a session that did not change, or
   // overwrites a stored parse that did.
   const rooms = await resolveRooms(client);
+  await assertWriterSupported(client, rooms);
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);

@@ -25,7 +25,7 @@ const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
 const {
   roomNames, ROOM_TYPES, MEMBER_PIN, installCommand, keyProblem,
-  SCHEMA_VERSION, MIGRATIONS, META_TYPES, createStatement,
+  SCHEMA_VERSION, MIN_WRITER_SCHEMA, MIGRATIONS, META_TYPES, createStatement,
 } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
@@ -1194,6 +1194,67 @@ function cmdStop() {
   if (!stopped) console.log(warn('nothing was running'));
 }
 
+/**
+ * Every writer this house has, judged. Ground truth is the DATA — distinct
+ * (user_id, host) over the messages room — because the one writer that matters most, a
+ * pre-0.10 memhouse, records nothing about itself: it predates the house record
+ * entirely. The record then annotates whoever it knows.
+ *
+ *   'legacy'    rows in the house, no record of a writer — a pre-0.10 memhouse. It still
+ *               deletes before re-inserting, and on migrated rooms that delete reaches
+ *               every retained parse it re-ships. The state worth shouting about.
+ *   'outdated'  recorded, but supports an older schema than the house is at — it is
+ *               refusing every pass right now and ships nothing until updated.
+ *   'stale'     no heartbeat for 48h — machine off, or shipper dead.
+ *   'ok'        current and beating.
+ *
+ * Null when the house is unreachable or holds no rows at all.
+ */
+async function fleetState(cfg) {
+  try {
+    const writers = new Map(); // 'member@host' -> row
+    for (const d of await chRows(cfg,
+      "SELECT user_id, host, formatDateTime(max(ingested_at), '%Y-%m-%dT%H:%i:%SZ') AS last_row FROM messages GROUP BY user_id, host")) {
+      writers.set(`${d.user_id}@${d.host}`, { writer: `${d.user_id}@${d.host}`, lastRow: d.last_row, version: null, schema: null, lastShip: null });
+    }
+    if (!writers.size) return null;
+    let houseSchema = 0;
+    try {
+      for (const r of await chRows(cfg,
+        "SELECT key, value FROM house_meta FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'")) {
+        if (r.key === 'schema_version') { houseSchema = Number(r.value) || 0; continue; }
+        const cut = r.key.indexOf(':');
+        const kind = r.key.slice(0, cut); const who = r.key.slice(cut + 1);
+        const w = writers.get(who) || { writer: who, lastRow: null, version: null, schema: null, lastShip: null };
+        if (kind === 'client_version') w.version = String(r.value);
+        if (kind === 'client_schema') w.schema = Number(r.value) || null;
+        if (kind === 'last_ship') w.lastShip = String(r.value);
+        writers.set(who, w);
+      }
+    } catch { /* pre-0.10 house: no record — every writer below reads as legacy, correctly */ }
+    const out = [];
+    for (const w of writers.values()) {
+      const beat = w.lastShip || (w.lastRow ? `${w.lastRow.replace(' ', 'T')}` : null);
+      const ageMs = beat ? Date.now() - Date.parse(beat) : null;
+      w.verdict = (w.schema === null && w.version === null) ? 'legacy'
+        : (w.schema !== null && houseSchema && w.schema < houseSchema) ? 'outdated'
+          : (ageMs !== null && ageMs > 48 * 3600 * 1000) ? 'stale' : 'ok';
+      w.ageMs = ageMs;
+      out.push(w);
+    }
+    return out.sort((a, b) => a.writer.localeCompare(b.writer));
+  } catch { return null; }
+}
+
+function fleetAge(ms) {
+  if (ms === null) return 'never';
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
 async function cmdStatus() {
   // requireConfig, not resolveConfig. `status` reads a house and reports its counts as
   // YOURS, which is exactly the answer that must not come from a guessed URL: with no
@@ -1221,6 +1282,7 @@ async function cmdStatus() {
     out.sessions = Number(s[0]?.sessions || 0);
     out.messages = Number(m[0]?.msgs || 0);
     out.freshest = m[0]?.freshest || null;
+    out.fleet = await fleetState(cfg);
   } catch (e) { out.connected = false; out.error = netReason(e); }
 
   if (JSON_OUT) { console.log(JSON.stringify(out, null, 2)); return out.connected ? 0 : 1; }
@@ -1234,6 +1296,16 @@ async function cmdStatus() {
   console.log(ok(`host: ${out.host.id}${out.host.renamed ? ` (this machine now answers to '${out.host.current_hostname}' — the id is kept so its history stays one machine)` : ''}`));
   if (out.connected && !out.messages) console.log(ok(`house: empty — ${out.sessions} sessions, 0 messages (nothing shipped yet)`));
   else if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
+  if (out.fleet && out.fleet.length) {
+    const badOnes = out.fleet.filter((f) => f.verdict !== 'ok');
+    console.log((badOnes.length ? warn : ok)(`fleet: ${out.fleet.length} writer(s) known to this house`));
+    for (const f of out.fleet) {
+      const mark = f.verdict === 'legacy' ? '  ⚠ pre-0.10 — upgrade it (or revoke its mutation grants); its re-ships delete retained parses'
+        : f.verdict === 'outdated' ? '  ⚠ supports an older schema — refusing every pass until updated'
+          : f.verdict === 'stale' ? '  • stale' : '';
+      console.log(`     ${f.writer.padEnd(28)} ${String(f.version || '?').padEnd(8)} last ship ${fleetAge(f.ageMs)}${mark}`);
+    }
+  }
   console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
   if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${runningPort(cfg)}`);
@@ -1416,6 +1488,24 @@ async function cmdDoctor() {
       // already answers the question that matters.
       add(true, 'house record: not kept in this house (pre-0.10 house, or no rights)');
     }
+    // The fleet: every writer the house has seen, and whether any of them is a danger.
+    // A pre-0.10 memhouse on ANOTHER machine reads none of this house's record and still
+    // deletes before re-inserting — on migrated rooms that delete reaches every retained
+    // parse of a session it re-ships. It cannot be stopped by code here; it can only be
+    // named, loudly, where the pilot looks.
+    try {
+      const fleet = await fleetState(cfg);
+      if (fleet && fleet.length) {
+        const old = fleet.filter((f) => f.verdict === 'legacy' || f.verdict === 'outdated');
+        const stale = fleet.filter((f) => f.verdict === 'stale');
+        add(old.length === 0,
+          old.length
+            ? `fleet: ${old.length} of ${fleet.length} writer(s) need attention — ${old.map((f) => `${f.writer} (${f.verdict})`).join(', ')}`
+            : `fleet: ${fleet.length} writer(s), all current${stale.length ? ` (${stale.length} stale >48h)` : ''}`,
+          'their re-ships DELETE retained parses on this house. Upgrade them, or as admin:\n'
+          + `     REVOKE ALTER DELETE, ALTER UPDATE ON ${cfg.db}.* FROM <member>`);
+      }
+    } catch { /* fleet view is best-effort */ }
     try {
       // countIf, not any(). `any()` returns an arbitrary row's value, so on a house with
       // four correctly-stamped rows and one blank it reported a pass five times out of
@@ -2148,9 +2238,21 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
     }
   }
 
+  // The floor under future writers: any 0.10+ memhouse reads this at pass start and
+  // refuses if it is too old for the house. Pre-0.10 releases read nothing — hence the
+  // REVOKE advice below, which is the only enforcement that reaches them.
+  await houseMeta(cfg, 'min_writer_schema', String(MIN_WRITER_SCHEMA));
+
   console.log(`\n${ok(`house is at schema ${SCHEMA_VERSION}`)}`);
   console.log('  verify with: memhouse doctor');
   console.log(`  then, when you are satisfied: DROP TABLE ${cfg.db}.<room>_pre_epoch`);
+  console.log('');
+  console.log(warn('machines still on an older memhouse cannot be stopped by code — they never read'));
+  console.log('  this house\'s record. If any exist, either upgrade them now or take away the one');
+  console.log('  privilege whose misuse loses data (their shipping breaks LOUDLY instead of deleting'); 
+  console.log('  retained parses silently):');
+  console.log(`     REVOKE ALTER DELETE, ALTER UPDATE ON ${cfg.db}.* FROM <member>   -- per member, as admin`);
+  console.log('  Nothing in 0.10+ needs those grants except the interactive `memhouse reset`.');
   return 0;
 }
 
