@@ -367,6 +367,60 @@ async function test(name, fn) {
       await s.close();
     });
 
+    await test('a valid 63MB frame with another frame behind it is served, not killed', async () => {
+      // Round-two review catch: the cap check used to run before frame
+      // extraction, so combined VALID frames summing past 64MB killed the
+      // server. A big frame plus a follower must both answer.
+      const big = startServer(env);
+      const pad = 'x'.repeat(63 * 1024 * 1024);
+      big.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping', params: { pad } }) + '\n');
+      big.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping', params: {} }) + '\n');
+      const got = await new Promise((resolve) => {
+        const t = setTimeout(() => resolve(null), 20000);
+        const poll = setInterval(() => {
+          const ids = big.rawFrames.map((f) => JSON.parse(f).id);
+          if (ids.includes(1) && ids.includes(2)) { clearTimeout(t); clearInterval(poll); resolve(ids); }
+        }, 100);
+      });
+      assert.ok(got, 'both frames answered');
+      assert.strictEqual(big.proc.exitCode, null, 'server did not die');
+      await big.close();
+    });
+
+    await test('a client that stops reading gets flow control, not an OOM — 500 answers arrive once it reads', async () => {
+      // Round-two review catch: capped frames times unbounded concurrency is
+      // still unbounded. A non-reading client must stall the server's intake
+      // (stdout drain gate + in-flight cap + stdin pause), and every response
+      // must still arrive once the client starts reading.
+      const proc = spawn('node', [path.join(ROOT, 'bin', 'memhouse.js'), 'mcp'], {
+        env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      proc.stdin.on('error', () => {});
+      for (let i = 1; i <= 500; i++) {
+        proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i, method: 'ping', params: {} }) + '\n');
+      }
+      // Do NOT read stdout yet: the OS pipe fills, the server's writes return
+      // false, and its gates close. Two seconds of deliberate neglect.
+      await new Promise((r) => setTimeout(r, 2000));
+      assert.strictEqual(proc.exitCode, null, 'server alive while the client neglects it');
+      const ids = new Set();
+      let rbuf = '';
+      proc.stdout.on('data', (c) => {
+        rbuf += c;
+        let i;
+        while ((i = rbuf.indexOf('\n')) >= 0) {
+          const line = rbuf.slice(0, i); rbuf = rbuf.slice(i + 1);
+          if (line.trim()) ids.add(JSON.parse(line).id);
+        }
+      });
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`only ${ids.size}/500 answers arrived`)), 20000);
+        const poll = setInterval(() => { if (ids.size === 500) { clearTimeout(t); clearInterval(poll); resolve(); } }, 100);
+      });
+      proc.stdin.end();
+      await new Promise((r) => proc.on('exit', r));
+    });
+
     await test('a single frame over the 64MB line cap is an exit(1), not an OOM', async () => {
       const giant = startServer(env);
       const code = await new Promise((resolve) => {
