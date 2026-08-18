@@ -154,7 +154,15 @@ async function rebuildRoom(q, ctx, { type, name, keepSuffix }, ui) {
     try {
       await q.sql(`INSERT INTO ${name} (${list}) SELECT ${list} FROM ${kept} FINAL WHERE ingested_at >= toDateTime64('${started}', 3, 'UTC')`, copySettings);
       late = true;
-    } catch { /* late-writes pass is best-effort; the snapshot copy already succeeded */ }
+    } catch (e) {
+      // Best-effort must not mean SILENT. The rows are not lost — they sit in the kept
+      // table — but a shipper that wrote during the copy has its newest rows stranded
+      // there until someone re-runs this insert, and nobody re-runs what nobody was told
+      // about.
+      ui.warn(`${name}: the late-writes pass failed (${e.message.split('\n')[0]})`);
+      ui.warn(`  rows written during the copy are still in ${kept}; recover them with:`);
+      ui.warn(`  INSERT INTO ${name} (${list}) SELECT ${list} FROM ${kept} FINAL WHERE ingested_at >= toDateTime64('${started}', 3, 'UTC')`);
+    }
   }
   const after = Number((await q.rows(`SELECT count() AS c FROM ${name} FINAL`))[0]?.c || 0);
   ui.ok(`${name}: ${after} rows, old room kept as ${kept}`);
@@ -188,6 +196,16 @@ const EXECUTORS = { rebuildRoom, healColumns, sql: async (q, ctx, { statement },
  * because the record must never be the reason a rebuild fails.
  */
 async function runMigration(q, ctx, { migration, found }, { ledger, ui }) {
+  // One migration-level pending marker FIRST, before any step. The per-step pair below
+  // records progress; this one exists for the OTHER migrator — unfinishedBy() reads it,
+  // and without it two `memhouse update`s sitting at their confirm prompts both saw a
+  // clean ledger and both proceeded on yes. (The room-level clash checks still make the
+  // race non-destructive — the loser fails on __migrating/CREATE — but failing cleanly
+  // beats failing confusingly.)
+  await ledger.event({
+    kind: 'migration', id: migration.id, status: 'pending', host: ctx.host,
+    to_version: String(migration.toVersion), detail: 'migration started',
+  });
   const steps = migration.steps(found, ctx);
   for (const step of steps) {
     const exec = EXECUTORS[step.op];
@@ -221,6 +239,10 @@ async function runMigration(q, ctx, { migration, found }, { ledger, ui }) {
       throw e;
     }
   }
+  await ledger.event({
+    kind: 'migration', id: migration.id, status: 'applied', host: ctx.host,
+    to_version: String(migration.toVersion), detail: 'migration completed',
+  });
   await ledger.meta('schema_version', String(migration.toVersion));
 }
 

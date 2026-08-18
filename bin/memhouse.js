@@ -1236,7 +1236,14 @@ async function fleetState(cfg) {
     for (const w of writers.values()) {
       const beat = w.lastShip || (w.lastRow ? `${w.lastRow.replace(' ', 'T')}` : null);
       const ageMs = beat ? Date.now() - Date.parse(beat) : null;
-      w.verdict = (w.schema === null && w.version === null) ? 'legacy'
+      // ROWS newer than the heartbeat by more than a pass interval = something on that
+      // host is writing without recording itself — a machine DOWNGRADED to pre-0.10
+      // after it had recorded. Judged on the record alone it read 'ok' for two days,
+      // while actively running the delete-before-reinsert the verdict exists to flag.
+      const rowMs = w.lastRow ? Date.parse(`${w.lastRow.replace(' ', 'T')}`) : null;
+      const shipMs = w.lastShip ? Date.parse(w.lastShip) : null;
+      const writingUnrecorded = rowMs !== null && shipMs !== null && rowMs - shipMs > 3600 * 1000;
+      w.verdict = ((w.schema === null && w.version === null) || writingUnrecorded) ? 'legacy'
         : (w.schema !== null && houseSchema && w.schema < houseSchema) ? 'outdated'
           : (ageMs !== null && ageMs > 48 * 3600 * 1000) ? 'stale' : 'ok';
       w.ageMs = ageMs;
@@ -2154,6 +2161,10 @@ async function houseMeta(cfg, key, value) {
  */
 async function cmdMigrate({ component = null, quiet = false, assumeYes = false } = {}) {
   const cfg = requireConfig(resolveConfig(), component === 'rooms' ? 'migrate-rooms' : 'migrate');
+  // The db name is spliced into system-table predicates and DDL below. install validates
+  // it at creation; this validates what an env FILE says, which a hand edit can break.
+  try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(cfg.db, 'house'); }
+  catch (e) { console.log(bad(e.message)); return 1; }
   const r = await roomsFor(cfg);
   const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
   const host = require(path.join(REPO_ROOT, 'memhouse', 'host.js')).identity().id;
@@ -2167,6 +2178,22 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   const ledger = { event: (e) => houseEvent(cfg, e), meta: (k, v) => houseMeta(cfg, k, v) };
   const ui = { ok: (m) => console.log(ok(m)), warn: (m) => console.log(warn(m)) };
 
+  // Detection first, and NOTHING written before the dry-run gate: detect() reads only
+  // system tables, so a --dry-run (and an already-current house under --dry-run) truly
+  // changes nothing — the earlier order created the meta tables and stamped
+  // schema_version on the way to saying "nothing was changed".
+  const pending = await mig.detectPending(q, ctx, { component });
+
+  if (flags['dry-run'] === true) {
+    if (!pending.length) { console.log(ok(`nothing to migrate — the house is at schema ${SCHEMA_VERSION}`)); return 0; }
+    for (const item of pending) {
+      for (const line of item.migration.plan(item.found)) console.log(line);
+      console.log('');
+    }
+    console.log(warn(`dry run — ${pending.length} migration(s) pending, nothing was changed`));
+    return 0;
+  }
+
   // The house's record of itself, created here if absent — a pre-0.10 house has none,
   // and a migration is precisely the event those tables exist to record. Best-effort: a
   // member without CREATE TABLE can still be the one who notices the rooms need
@@ -2178,7 +2205,6 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
     } catch { /* no rights, or already there */ }
   }
 
-  const pending = await mig.detectPending(q, ctx, { component });
   if (!pending.length) {
     if (!quiet) console.log(ok(`nothing to migrate — the house is at schema ${SCHEMA_VERSION}`));
     await houseMeta(cfg, 'schema_version', String(SCHEMA_VERSION));
@@ -2188,10 +2214,6 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   for (const item of pending) {
     for (const line of item.migration.plan(item.found)) console.log(line);
     console.log('');
-  }
-  if (flags['dry-run'] === true) {
-    console.log(warn(`dry run — ${pending.length} migration(s) pending, nothing was changed`));
-    return 0;
   }
 
   // Another actor mid-copy: two concurrent rebuilds of one room end with one of them
@@ -2226,6 +2248,16 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
     const what = pending.map((x) => x.migration.id).join(', ');
     const a = (await ask(`Run ${pending.length} migration(s) (${what}) on '${cfg.db}'? (yes/no)`, 'no')).toLowerCase();
     if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
+    // Re-check AFTER the prompt: it is where a second migrator sits while the first one's
+    // pending marker lands. Checked only before it, two `memhouse update`s both saw a
+    // clean ledger, both got a yes, and both proceeded.
+    for (const item of pending) {
+      const busy = await mig.unfinishedBy(q, ctx, item.migration.id);
+      if (busy) {
+        console.log(bad(`while you decided, '${busy.actor}' started ${item.migration.id} (${busy.at}) — standing down.`));
+        return 1;
+      }
+    }
   }
 
   for (const item of pending) {
@@ -2233,7 +2265,9 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
       await mig.runMigration(q, ctx, item, { ledger, ui });
     } catch (e) {
       console.log(bad(`${item.migration.id}: ${e.message}`));
-      console.log('  nothing already swapped was touched; re-running is safe once the cause is fixed.');
+      console.log('  what completed stands (house_events per room says which); what failed was not swapped.');
+      console.log(`  a partial copy may sit in <room>__migrating — inspect before dropping. Re-run when fixed:`);
+      console.log('     memhouse migrate');
       return 1;
     }
   }
@@ -2249,7 +2283,7 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   console.log('');
   console.log(warn('machines still on an older memhouse cannot be stopped by code — they never read'));
   console.log('  this house\'s record. If any exist, either upgrade them now or take away the one');
-  console.log('  privilege whose misuse loses data (their shipping breaks LOUDLY instead of deleting'); 
+  console.log('  privilege whose misuse loses data (their shipping breaks LOUDLY instead of deleting');
   console.log('  retained parses silently):');
   console.log(`     REVOKE ALTER DELETE, ALTER UPDATE ON ${cfg.db}.* FROM <member>   -- per member, as admin`);
   console.log('  Nothing in 0.10+ needs those grants except the interactive `memhouse reset`.');

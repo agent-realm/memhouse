@@ -269,7 +269,7 @@ test('the migration registry is ordered, complete, and matches the schema versio
   // Every step names an executor that exists — an unknown op is found at 2am otherwise.
   const fakeCtx = { rooms: Object.fromEntries(rooms.ROOM_TYPES.map((t) => [`${t}_raw`, t])) };
   for (const m of list) {
-    const found = rooms.ROOM_TYPES.map((t) => ({ t, name: t, key: 'wrong' }));
+    const found = rooms.ROOM_TYPES.map((t) => ({ t, name: t, key: 'wrong', rebuild: true }));
     for (const step of m.steps(found, fakeCtx)) {
       assert.ok(mig.EXECUTORS[step.op], `migration '${m.id}' names unknown op '${step.op}'`);
     }
@@ -283,7 +283,7 @@ test('the epoch-key migration heals what it does not rebuild', () => {
   // "fields are being DISCARDED" warning on the very next ship.
   const m = require('../memhouse/house/migrations/0100-epoch-key');
   const ctx = { rooms: Object.fromEntries(rooms.ROOM_TYPES.map((t) => [`${t}_raw`, t])) };
-  const found = [{ t: 'messages', name: 'messages', key: 'old' }, { t: 'tool_calls', name: 'tool_calls', key: 'old' }];
+  const found = [{ t: 'messages', name: 'messages', key: 'old', rebuild: true }, { t: 'tool_calls', name: 'tool_calls', key: 'old', rebuild: true }];
   const steps = m.steps(found, ctx);
   assert.deepStrictEqual(steps.map((x) => x.op), ['rebuildRoom', 'rebuildRoom', 'healColumns']);
   assert.strictEqual(steps[2].name, 'sessions');

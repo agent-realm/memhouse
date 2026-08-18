@@ -399,6 +399,11 @@ async function assertRoomKeys(client, rooms) {
 
 async function ensureSchema(client) {
   const rooms = await resolveRooms(client);
+  // BEFORE the CREATEs and ALTERs, not beside the end-of-function asserts. A house whose
+  // record says a newer release moved it forward may have columns this template does not
+  // know; running this template's DDL first could add back what that release removed —
+  // the exact write the guard exists to prevent.
+  await assertWriterSupported(client, rooms);
   const tpl = fs.readFileSync(path.join(__dirname, '..', 'house', 'schema.sql.tpl'), 'utf-8');
   const sql = tpl; // plain shared tables — nothing to render
   const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
@@ -487,7 +492,6 @@ async function ensureSchema(client) {
   // the template correctly — and it would have been actively wrong once this loop covered
   // house_meta and house_events, which have no origin and want none.
 
-  await assertWriterSupported(client, rooms);
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
@@ -599,11 +603,17 @@ async function assertWriterSupported(client, rooms) {
   const houseSchema = have.get('schema_version') || 0;
   const floor = have.get('min_writer_schema') || 0;
   const mine = Math.max(...SUPPORTED_SCHEMAS);
-  if (houseSchema > mine) {
-    throw new Error(
-      `this house is at schema ${houseSchema}; this memhouse (${require('../../package.json').version}) supports ${SUPPORTED_SCHEMAS.join(', ')}.\n`
-      + '  A newer release moved the house forward. Writing with this one could corrupt it, so it will not.\n'
-      + '  Update THIS machine:  memhouse update');
+  // MEMBERSHIP, not a ceiling. `houseSchema <= max` would let a [4]-only writer into a
+  // schema-3 house — and if generation 4 was a data transform, the sorting keys match and
+  // nothing else refuses. A recorded generation this release does not list is unwritable
+  // in either direction; only the remedy differs.
+  if (houseSchema > 0 && !SUPPORTED_SCHEMAS.includes(houseSchema)) {
+    throw new Error(houseSchema > mine
+      ? `this house is at schema ${houseSchema}; this memhouse (${require('../../package.json').version}) supports ${SUPPORTED_SCHEMAS.join(', ')}.\n`
+        + '  A newer release moved the house forward. Writing with this one could corrupt it, so it will not.\n'
+        + '  Update THIS machine:  memhouse update'
+      : `this house is at schema ${houseSchema}; this memhouse supports ${SUPPORTED_SCHEMAS.join(', ')}.\n`
+        + '  Bring the house forward:  memhouse migrate');
   }
   if (floor > mine) {
     throw new Error(
