@@ -12,17 +12,33 @@ stdio flow), `GRANTS.md` (what ClickHouse enforces, tested).
 Written 2026-08-16 against master `b78b342` (0.9.0); every line number cited below was
 verified there. Branch `claude/mcp-server`.
 
-**Status 2026-08-18: P3, P4, and P5 are BUILT and green.** `tools.js` (six tools),
-`rpc.js` (dual-era protocol), `stdio.js` (transport), `case 'mcp'` in the CLI, MCP
-read functions in `server/queries.js`. Gates passed: `npm test` (includes
-`misc/mcp-unit-test.js`, 8 protocol checks), `misc/mcp-test.js` (15 live checks over
-a throwaway house — including server-side readonly refusal, credential-leak grep,
-stdout purity under MEMHOUSE_DEBUG=1, and the no-house refusal), and the P5
-real-client gate: Claude Code itself, via `--mcp-config`, ran
-search → get_session → resume_command against a seeded fixture house and reported the
-right session, the right content, and the exact resume command. Remaining: P6
-(Streamable HTTP), P6b (credential surface, parent repo), P7 (resources, only if
-earned), P8 docs (README + CHANGELOG).
+**Status 2026-08-18: P3–P6 and P8 BUILT, tested, green.** `tools.js` (six tools),
+`rpc.js` (dual-era protocol, shared scrub), `stdio.js`, `POST /mcp` on the dashboard
+server, `case 'mcp'` in the CLI, MCP read functions in `server/queries.js`, README
+section, CHANGELOG entry. Test coverage, all green:
+
+- `npm test` — 16 protocol unit checks (`misc/mcp-unit-test.js`): result shapes, the
+  era split, -32022/-32601/-32602/-32600, deterministic order, id edge cases, the
+  version gate running before dispatch, the no-house refusal.
+- `misc/mcp-test.js` — 27 live stdio checks over a throwaway house: the tool flows,
+  LIKE-metacharacter literalness, the multi-holder ambiguity answer, truncation
+  flags, server-side readonly refusal verbatim, caps actually cutting (this battery
+  caught `result_overflow_mode: 'break'` not cutting inside one block — fixed with
+  an exact JS slice over the server bound), scrub holding even when a result
+  legitimately selects the password, concurrency, era persistence, -32700 recovery,
+  clean EOF, no-house.
+- `misc/mcp-http-test.js` — 14 live HTTP checks against the real dashboard process:
+  header↔body validation (-32020, base64 sentinel decoded), hostile Origin 403,
+  unknown method 404/-32601, unknown version 400/-32022, GET/DELETE 405,
+  Mcp-Session-Id ignored and never echoed, notifications 202, the legacy flow in
+  legacy shapes, credential never on the wire, and the dashboard still answering
+  from the same pid.
+- The P5 real-client gate: Claude Code via `--mcp-config` drove
+  search → get_session → resume_command and reported the right session, content,
+  and resume command.
+
+Remaining: P6b (credential surface — parent repo), P7 (resources — not earned yet),
+`agy` review before merge.
 
 One deviation from the letter of this plan, kept deliberately: `rpc.js` is
 **dual-era** — it also answers the legacy `initialize` handshake, because every

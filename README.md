@@ -78,6 +78,8 @@ memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
 memhouse plugins install claude            /memhouse:search, :sessions, :sql —
                                            into every Claude Code config dir found
+memhouse mcp                               MCP server on stdio — the same memory for
+                                           every MCP client, not just Claude Code
 memhouse prompt                            memory snippet for an agent's system prompt
 memhouse prompt --install                  an install prompt, rendered for this machine
 ```
@@ -97,6 +99,39 @@ Config resolves: flags → `MEMHOUSE_*` env → `$MEMHOUSE_HOME/env` (default
 `~/.memhouse/env`). There is no house-shaped default: with nothing configured, the
 commands that read or write memory refuse and say so rather than guessing
 `localhost:8123`, which on a lot of machines is a real house belonging to someone else.
+
+## The same memory from any client — MCP
+
+The Claude Code skills reach only Claude Code. `memhouse mcp` serves the house over
+MCP, so every client that speaks it — Claude Desktop, Cursor, Windsurf, Copilot,
+Goose, and the rest — reads the same memory. memhouse already parses 17 editors'
+conversations; MCP is how all of them read them back.
+
+Register it as a stdio server (every client supports that form):
+
+```json
+{ "mcpServers": { "memhouse": { "command": "memhouse", "args": ["mcp"] } } }
+```
+
+Six read-only tools: `search` returns a compact index where every hit carries
+`est_expand_tokens` — the price of fetching that whole session — so the model spends
+its context on the sessions worth it; `get_session` fetches the transcript (or a
+`seq` slice) for the ids it chose; `timeline` gives chronological context around a
+hit; `stats` shows whose memory is in the house and how fresh; `resume_command`
+turns a hit into the paste-ready command that reopens it in its own editor;
+`sql` is free-form read-only SQL for everything else.
+
+`sql` runs under the credential the server was configured with, and its limits are
+that credential's **grants** — ClickHouse enforces them, and a server refusal comes
+back verbatim as the answer. Point the server at a `GRANT SELECT`-only user for a
+read-only surface no application code has to get right.
+
+The server also mounts on the dashboard at `POST /mcp` (loopback, same process, no
+extra daemon) for clients that prefer Streamable HTTP. Both transports speak the
+stateless 2026-07-28 protocol revision *and* the classic `initialize` handshake, so
+today's clients and next year's both work. With no house configured the server still
+starts and lists its tools — each call then explains what to set up, instead of the
+client reporting an opaque "server failed".
 
 ## Going back into a session
 

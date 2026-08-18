@@ -4,6 +4,42 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+**`memhouse mcp`.** The house over MCP: the Claude Code skills reach only Claude
+Code; MCP reaches every client memhouse already parses — Claude Desktop, Cursor,
+Windsurf, Copilot, Goose, and the rest read the same memory back.
+
+- Six read-only tools: `search` (a compact index — every hit priced with
+  `est_expand_tokens`, the cost of expanding that session, so the model chooses
+  before it spends), `timeline`, `get_session` (the only tool returning transcript
+  text; slices by `seq`; with two members holding the same session id it answers
+  with the holder list instead of guessing), `stats`, `resume_command` (the same
+  print-never-run contract as `memhouse resume`), and `sql` (free-form read-only).
+- **No SQL parser.** `sql` pins `readonly` server-side and passes ClickHouse's own
+  refusal through verbatim — what the credential may read is the operator's GRANT
+  choice, enforced by the server, not by application code. Results are capped
+  (10000 rows / 64MB / 30s) as self-protection, exactly like the dashboard's SQL
+  console.
+- Two transports, one protocol layer: stdio (`memhouse mcp`) and `POST /mcp`
+  mounted on the running dashboard — same process, loopback, no new daemon. Both
+  are dual-era: the stateless 2026-07-28 revision (per-request `_meta`,
+  `server/discover`, `CacheableResult`, deterministic tool order) and the classic
+  `initialize` handshake today's clients still open with.
+- The HTTP mount validates `Origin` (403 for non-local pages), checks
+  `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` against the body (`400` +
+  `HeaderMismatch` on disagreement, base64 sentinel decoded first), answers
+  unknown methods `404`/`-32601`, and ignores legacy `Mcp-Session-Id` /
+  `Last-Event-ID` rather than honoring them.
+- With no house configured the server still starts and lists its tools; each call
+  refuses with the standard no-config message as a tool result. It never guesses
+  `localhost:8123`, and the credential it does hold is scrubbed from every
+  outgoing frame — including results that legitimately select it.
+- Tested at three levels: protocol units in `npm test`, and two live batteries
+  over a throwaway house (`misc/mcp-test.js` for stdio, `misc/mcp-http-test.js`
+  for HTTP) — 57 checks total, including a real-client pass driven by Claude
+  Code itself via `--mcp-config`.
+
 ## 0.9.0 — 2026-08-16
 
 **`node:sqlite`.** Breaking on the Node floor, and the reason `npm i -g memhouse` is
