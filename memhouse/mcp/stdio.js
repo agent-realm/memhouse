@@ -18,15 +18,7 @@ console.info = toErr;
 console.warn = toErr;
 console.debug = toErr;
 
-const { handle, newState } = require('./rpc');
-
-// Credentials never appear in any response, error body, or log. The one value we
-// know is secret is scrubbed at the single choke point every outgoing frame
-// passes through — a driver error that embeds the connection URL cannot leak it.
-const SECRET = process.env.MEMHOUSE_PASSWORD || '';
-function scrub(s) {
-  return SECRET ? s.split(SECRET).join('[redacted]') : s;
-}
+const { handle, newState, scrub } = require('./rpc');
 
 const state = newState();
 

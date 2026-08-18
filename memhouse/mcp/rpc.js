@@ -141,4 +141,13 @@ async function handle(msg, state) {
   }
 }
 
-module.exports = { handle, newState, toolList, SERVER_INFO, MODERN, INSTRUCTIONS };
+// Credentials never appear in any response, error body, or log. Every transport
+// passes its outgoing frames through this one choke point — a driver error that
+// embeds the connection URL cannot leak the password. Read per call, not at
+// load: the HTTP mount and the stdio entry stamp the env at different moments.
+function scrub(s) {
+  const secret = process.env.MEMHOUSE_PASSWORD;
+  return secret ? s.split(secret).join('[redacted]') : s;
+}
+
+module.exports = { handle, newState, toolList, scrub, SERVER_INFO, MODERN, INSTRUCTIONS };

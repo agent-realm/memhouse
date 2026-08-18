@@ -427,6 +427,85 @@ app.get('/api/gsd/file', (req, res) => res.json({ content: null }));
 app.get('/api/share-image', (req, res) => res.status(501).json({ error: 'not available in memhouse' }));
 app.get('/api/check-ai', (req, res) => res.status(501).json({ error: 'not available in memhouse' }));
 
+// ── MCP over Streamable HTTP (2026-07-28) ───────────────────────────────────────
+// The same rpc.js the stdio transport uses; this route only unwraps HTTP. One
+// endpoint, POST only — the 2026-07-28 revision removed the GET stream, sessions
+// (Mcp-Session-Id), and SSE resumability (Last-Event-ID), so legacy artifacts of
+// all three are ignored or answered 405, never honored. Stateless by
+// construction: a fresh rpc state per request, era chosen from what the request
+// itself carries.
+const mcp = require('../mcp/rpc');
+const MCP_META_V = 'io.modelcontextprotocol/protocolVersion';
+// Legacy revisions this dual-era server serves with initialize-handshake
+// semantics. A version outside this set and not 2026-07-28 is refused -32022.
+const MCP_LEGACY = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
+
+// The Mcp-Name header may carry the base64 sentinel when the value is not
+// header-safe; servers MUST decode before comparing to the body.
+function decodeMcpHeader(v) {
+  const m = /^=\?base64\?([A-Za-z0-9+/=]*)\?=$/.exec(v || '');
+  return m ? Buffer.from(m[1], 'base64').toString('utf8') : v;
+}
+
+// DNS-rebinding defense (spec MUST): a browser page on an attacker's origin can
+// POST to 127.0.0.1. An absent Origin is a non-browser caller (curl, an MCP
+// client) and passes; a present one must be a local page.
+function mcpOriginOk(origin) {
+  if (!origin) return true;
+  try {
+    const h = new URL(origin).hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+  } catch { return false; }
+}
+
+app.post('/mcp', async (req, res) => {
+  const send = (status, obj) =>
+    res.status(status).type('application/json').send(mcp.scrub(JSON.stringify(obj)));
+  if (!mcpOriginOk(req.get('origin'))) {
+    return send(403, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Origin not allowed' } });
+  }
+  const body = req.body;
+  const id = body && body.id !== undefined ? body.id : null;
+  const headerV = req.get('mcp-protocol-version');
+  const bodyV = body && body.params && body.params._meta ? body.params._meta[MCP_META_V] : undefined;
+  const reject = (msg) =>
+    send(400, { jsonrpc: '2.0', id, error: { code: -32020, message: `Header mismatch: ${msg}` } });
+
+  // Era: modern the moment either side of the version pair says 2026-07-28 —
+  // then BOTH sides must, and the routing headers become mandatory and checked
+  // against the body (a balancer routes on the header while this server executes
+  // the body; disagreement is an attack, not a typo).
+  const modern = headerV === mcp.MODERN || bodyV === mcp.MODERN;
+  if (modern) {
+    if (headerV !== mcp.MODERN) return reject(`MCP-Protocol-Version header '${headerV || ''}' does not match body value '${bodyV}'`);
+    if (bodyV !== mcp.MODERN) return reject(`body _meta protocolVersion '${bodyV || ''}' does not match MCP-Protocol-Version header '${headerV}'`);
+    const method = req.get('mcp-method');
+    if (!method || method !== body.method) return reject(`Mcp-Method header '${method || ''}' does not match body method '${body.method}'`);
+    if (body.method === 'tools/call') {
+      const name = decodeMcpHeader(req.get('mcp-name'));
+      const bodyName = body.params && body.params.name;
+      if (!name || name !== bodyName) return reject(`Mcp-Name header '${name || ''}' does not match body value '${bodyName}'`);
+    }
+  } else if (headerV && !MCP_LEGACY.has(headerV)) {
+    return send(400, {
+      jsonrpc: '2.0', id,
+      error: { code: -32022, message: 'Unsupported protocol version', data: { supported: [mcp.MODERN, ...MCP_LEGACY], requested: headerV } },
+    });
+  }
+
+  const state = mcp.newState();
+  if (!modern) state.era = 'legacy'; // over HTTP the version pair is decisive — no lenient-modern guess
+  const out = await mcp.handle(body, state);
+  if (!out) return res.status(202).end(); // notification accepted
+  const status = out.error ? (out.error.code === -32601 ? 404 : out.error.code === -32603 ? 500 : 400) : 200;
+  return send(status, out);
+});
+
+// The 2026-07-28 endpoint has no GET stream and no DELETE-to-end-session. This
+// must be registered here, before the SPA fallback eats GET /mcp.
+app.all('/mcp', (req, res) =>
+  res.status(405).set('Allow', 'POST').json({ error: 'the MCP endpoint accepts POST only (2026-07-28 revision: no GET stream, no session DELETE)' }));
+
 // SPA fallback
 app.get('*', (req, res) => {
   const index = path.join(PUBLIC_DIR, 'index.html');
