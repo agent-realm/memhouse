@@ -39,6 +39,10 @@ migration path is planned work, not a promise the old versions can cash.
   non-interactive run only names them and prints the command — a cron must never start
   a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
   who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **Mixed-version fleets: upgrade every machine of a member promptly.** A pre-0.10
+  shipper on another machine keeps working against migrated rooms (its key check only
+  looks for `origin`), but its delete-before-reinsert reaches every retained parse of a
+  session it re-ships. `memhouse migrate` warns about this at migration time.
 - **`memhouse migrate-rooms`** rebuilds rooms whose sorting key predates this version:
   copy, one atomic `RENAME`, old room kept as `<room>_pre_epoch` for the pilot to drop.
   Nothing is deleted, and `user_id` is carried across explicitly rather than restamped —

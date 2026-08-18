@@ -2121,6 +2121,14 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
     console.log('  by a second pass, but stopping it first makes the migration a single, quiet copy:');
     console.log('  memhouse service stop   (or: memhouse stop)');
   }
+  // The one writer this migration CANNOT make safe is an old memhouse on ANOTHER machine.
+  // A 0.9.0 shipper passes its own key check against the migrated rooms (it only looks
+  // for `origin`) and keeps writing — harmless — but its per-session DELETE clear removes
+  // a re-shipped session's rows across ALL epochs, destroying exactly the superseded
+  // parses this schema exists to keep. Say so here, where the pilot is looking.
+  console.log(warn('if OTHER machines ship into this house as you, upgrade them promptly:'));
+  console.log('  a pre-0.10 shipper elsewhere still deletes before re-inserting, and on the');
+  console.log('  migrated rooms that delete reaches every retained parse of a session it re-ships.');
   // assumeYes carries a consent ALREADY GIVEN one level up — `update` prompted (or took
   // --migrate/--yes) before calling here, and asking twice teaches pilots that prompts
   // are noise. It is never set on a direct `memhouse migrate`.
