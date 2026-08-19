@@ -39,6 +39,11 @@ migration path is planned work, not a promise the old versions can cash.
   non-interactive run only names them and prints the command — a cron must never start
   a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
   who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **`memhouse nightly [--out DIR]`** builds an installable, version-stamped tarball from
+  a checkout (`<base>-nightly.<YYYYMMDDTHHMM>`) without publishing — stamp, `npm pack`,
+  restore, so the checkout stays clean and the test machine's `--version` tells the
+  truth. On such an install use `memhouse update --no-install`; plain `update` installs
+  `memhouse@latest` and silently downgrades a nightly.
 - **`/mem:share` and `/mem:users`** — sharing as a skill. Members are now granted
   `SELECT … WITH GRANT OPTION` beside their `ALL` (both install paths), so
   `/mem:share <user>` opens a read-only window into your own house with no operator —

@@ -327,6 +327,8 @@ Setup        onboard              interactive wizard: discover → configure →
                                   --credentials    also forget the house and its password
                                   --full-removal   all of ${HOME_DIR.replace(os.homedir(), '~')}, identity included
                                   no tier touches the house data
+             nightly              build an installable version-stamped tarball from this
+                                  checkout, publishing nothing [--out DIR]
              update               upgrade, restart the daemons, migrate the house if it
                                   needs it (asks; --migrate runs unasked; --no-install
                                   skips npm when you already upgraded by hand)
@@ -2352,6 +2354,70 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   return 0;
 }
 
+/**
+ * `memhouse nightly [--out DIR]` — build an installable, version-stamped tarball from
+ * this checkout, without publishing anything.
+ *
+ * What it automates is exactly the by-hand recipe: stamp package.json with
+ * <base>-nightly.<YYYYMMDD.HHMM>, `npm pack` (prepack builds the dashboard bundle, so
+ * the tarball is what `npm publish` would upload), restore package.json. The stamp is
+ * the point — an unstamped pack says the RELEASE version, so `memhouse --version` lies
+ * on the test machine and `update --check` reports "already current".
+ *
+ * The tarball installs anywhere with `npm install -g <file>`. On such an install, use
+ * `memhouse update --no-install` — plain update's npm step installs memhouse@latest,
+ * which silently DOWNGRADES a nightly to the registry release.
+ */
+async function cmdNightly() {
+  const { kind, root } = installKind();
+  if (kind !== 'checkout') {
+    console.log(bad(`nightly builds come from a checkout — this is a ${kind} install (${root})`));
+    console.log('  git clone https://github.com/agent-realm/memhouse && cd memhouse && memhouse nightly');
+    return 1;
+  }
+  // A dirty package.json cannot be restored by checkout without eating the user's edits.
+  // npm version rewrites BOTH manifests; both must be clean and both are restored.
+  const dirty = spawnSync('git', ['status', '--porcelain', 'package.json', 'package-lock.json'], { cwd: root, encoding: 'utf-8' });
+  if ((dirty.stdout || '').trim()) {
+    console.log(bad('package.json / package-lock.json have uncommitted changes — commit or stash first;'));
+    console.log('  the stamp/restore cycle would destroy them.');
+    return 1;
+  }
+  const base = PKG.version.replace(/-.*$/, '');
+  const now = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  // One ALPHANUMERIC identifier ('20260820T0103'), not two numeric ones. Semver forbids
+  // leading zeros in numeric prerelease ids, so npm silently rewrote '.0103' to '.103'
+  // — measured — and two nightlies from the same day sorted wrong. The 'T' keeps the
+  // whole token alphanumeric, where leading zeros are legal and ordering is lexical.
+  const stamp = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}T${p2(now.getHours())}${p2(now.getMinutes())}`;
+  const version = `${base}-nightly.${stamp}`;
+  const outDir = flags.out && flags.out !== true ? path.resolve(String(flags.out)) : root;
+
+  console.log(`  building ${version} from ${root}`);
+  try {
+    let r = spawnSync('npm', ['version', version, '--no-git-tag-version'], { cwd: root, stdio: 'pipe' });
+    if (r.status !== 0) { console.log(bad(`npm version failed: ${(r.stderr || '').toString().trim().split('\n')[0]}`)); return 1; }
+    // prepack builds the ui — minutes, not seconds; inherit stdio so the wait is visible.
+    r = spawnSync('npm', ['pack'], { cwd: root, stdio: ['ignore', 'pipe', 'inherit'] });
+    if (r.status !== 0) { console.log(bad('npm pack failed — package.json is being restored')); return 1; }
+    const file = (r.stdout || '').toString().trim().split('\n').pop();
+    const src = path.join(root, file);
+    const dst = path.join(outDir, file);
+    if (src !== dst) { fs.mkdirSync(outDir, { recursive: true }); fs.renameSync(src, dst); }
+    console.log(ok(`built ${dst}`));
+    console.log('  install it:            npm install -g ' + dst);
+    console.log('  on that machine, use:  memhouse update --no-install   (plain update would');
+    console.log('  install memhouse@latest from the registry — a silent downgrade of a nightly)');
+    return 0;
+  } finally {
+    // ALWAYS restore, whatever pack did — a checkout left claiming to be a nightly would
+    // leak the stamp into the next real release. Both manifests: npm version touches the
+    // lockfile too (measured; the first version of this restored only package.json).
+    spawnSync('git', ['checkout', '--', 'package.json', 'package-lock.json'], { cwd: root, stdio: 'ignore' });
+  }
+}
+
 async function cmdUninstall() {
   // The OS service first, and this is not tidiness: it outlives the pidfile daemons by
   // design, it holds the credential inlined in its unit file, and it restarts itself. An
@@ -2548,6 +2614,7 @@ async function cmdUninstall() {
       }
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
+    case 'nightly': process.exitCode = await cmdNightly(); break;
     case 'migrate': process.exitCode = await cmdMigrate({}); break;
     case 'migrate-rooms': process.exitCode = await cmdMigrate({ component: 'rooms' }); break;
     case 'deploy': {
