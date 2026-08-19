@@ -81,6 +81,10 @@ function listMigrations() {
   const seen = new Set();
   let lastVersion = 0;
   for (const m of out) {
+    // The id is spliced into SQL (house_events predicates) and into kept-table suffixes.
+    // It is repo-controlled, but "repo-controlled" is one compromised dependency away
+    // from "attacker-controlled" — validate like any other identifier.
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(m.id)) throw new Error(`migration id '${m.id}' must match [a-z0-9-]+`);
     if (seen.has(m.id)) throw new Error(`duplicate migration id '${m.id}'`);
     seen.add(m.id);
     if (!(m.toVersion > lastVersion)) {
@@ -151,7 +155,13 @@ async function rebuildRoom(q, ctx, { type, name, keepSuffix }, ui) {
   const carried = newCols.filter((c) => oldCols.includes(c) && !['text_ngram', 'text_word'].includes(c));
   const list = carried.join(', ');
   const copySettings = { insert_allow_materialized_columns: 1, allow_experimental_full_text_index: 1 };
-  const started = (await q.rows("SELECT toString(now64(3, 'UTC')) AS t"))[0].t;
+  // The snapshot the late-writes pass filters against — taken with a MARGIN. An insert
+  // that began before this timestamp can commit after the big copy has read its parts,
+  // carrying an ingested_at OLDER than the snapshot: filtered at exactly `started`, such
+  // a row is missed by the copy AND the late pass, and dropping the kept table would
+  // then lose it. Five minutes covers any realistic insert-in-flight window, and the
+  // overlap costs nothing — ReplacingMergeTree dedupes re-copied rows.
+  const started = (await q.rows("SELECT toString(now64(3, 'UTC') - INTERVAL 300 SECOND) AS t"))[0].t;
 
   await q.sql(`INSERT INTO ${tmp} (${list}) SELECT ${list} FROM ${name} FINAL`, copySettings);
   const copied = Number((await q.rows(`SELECT count() AS c FROM ${tmp}`))[0]?.c || 0);
@@ -245,6 +255,15 @@ async function runMigration(q, ctx, { migration, found }, { ledger, ui }) {
           to_version: String(migration.toVersion), detail: `${label}: ${e.message}`,
         });
       }
+      // The MIGRATION-LEVEL failed row, always — the pending marker written before the
+      // steps is what unfinishedBy() reads, and left dangling it locked every OTHER
+      // member out of `memhouse migrate` forever, with advice (clean the __migrating
+      // leftovers) that did not touch the actual lock. argMax(status) = 'failed'
+      // unblocks; the next run re-detects and retries.
+      await ledger.event({
+        kind: 'migration', id: migration.id, status: 'failed', host: ctx.host,
+        to_version: String(migration.toVersion), detail: `migration failed at ${label}: ${e.message}`,
+      });
       throw e;
     }
   }

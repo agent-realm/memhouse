@@ -50,6 +50,10 @@ The user name goes into SQL unquoted: **refuse anything not matching
 `[A-Za-z][A-Za-z0-9_]*`** rather than quoting it — a name you cannot type bare is a name
 that will be gotten wrong everywhere else too.
 
+**Validate `<user>` FIRST, once, and use only the validated token — in the GRANT, the
+REVOKE, and the house_meta record alike.** The record INSERT is a quoted literal;
+anything that has not passed the name check must never reach it.
+
 **`<db>` below is the LIVE value of `$MEMHOUSE_DB` — print it with the connection
 (`echo "house: $MEMHOUSE_DB"`) and use THAT in every statement and every piece of
 advice.** Driven live, a model filled `<db>` in the admin advice with the literal
@@ -77,10 +81,14 @@ Two failure shapes, both to report exactly:
   server yet. Joining comes first: they run `memhouse install` against this server (or
   the admin runs `memhouse install --print-sql --member <user> --db <their-house>`).
   A share cannot create a user, by design.
-- `Not enough privileges` — this house predates 0.10.0, so your own grant carries no
-  grant option. Print the one statement the ADMIN runs, filled in:
+- `Not enough privileges` — either this house predates 0.10.0 (your own grant carries
+  no grant option), or **the configured house is not yours to share** (a team house, or
+  someone else's). Only suggest the admin remedy when the house is the user's OWN — the
+  grant-option statement hands them standing power to share it, which is the owner's
+  decision, not a fix. For their own pre-0.10 house, print for the ADMIN:
   `GRANT SELECT ON <db>.* TO <user>` — and to make future shares self-serve:
   `GRANT SELECT ON <db>.* TO <your-user> WITH GRANT OPTION`.
+  For a house that is not theirs, say so and stop: the owner shares it, not you.
 
 Tell the user how their friend actually reads it: qualified names —
 `SELECT … FROM <db>.messages …` — from /mem:ask, /mem:search or /mem:sql on the friend's

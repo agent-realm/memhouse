@@ -360,7 +360,7 @@ House        deploy --local       run ClickHouse in docker/podman, then install
                                   [--dry-run] [--yes]  (copy + atomic swap; deletes nothing)
              migrate-rooms        the same, scoped to the rooms
              service install      run the shipper as a user service (systemd / launchd)
-             service uninstall | status
+             service stop | start | restart | uninstall | status
 
 Config: flags > MEMHOUSE_* env > ${ENV_FILE.replace(os.homedir(), '~')} > defaults.
 Engine: MEMHOUSE_ENGINE pins docker or podman when both are installed and one cannot answer.
@@ -1910,7 +1910,22 @@ async function cmdUpdate() {
     // service.js install is idempotent: same home replaces in place and starts it.
     try {
       const svcmod = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
-      const r = svcmod.install({ shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval: 300, home: HOME_DIR });
+      // Keep the interval the pilot chose. The refresh used to hardcode 300, silently
+      // rewriting a `service install --interval 30` unit on every update.
+      let interval = 300;
+      try {
+        const unit = fs.readFileSync(require('path').join(os.homedir(), '.config', 'systemd', 'user', 'memhouse-shipper.service'), 'utf-8');
+        const m = unit.match(/--loop['" ]+(\d+)/);
+        if (m) interval = Number(m[1]);
+      } catch { /* launchd or missing: fall through to plist */ }
+      try {
+        if (interval === 300 && process.platform === 'darwin') {
+          const plist = fs.readFileSync(require('path').join(os.homedir(), 'Library', 'LaunchAgents', 'com.memhouse.shipper.plist'), 'utf-8');
+          const m = plist.match(/--loop<\/string>\s*<string>(\d+)/);
+          if (m) interval = Number(m[1]);
+        }
+      } catch { /* keep default */ }
+      const r = svcmod.install({ shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval, home: HOME_DIR });
       if (r.ok) console.log(ok(`service unit refreshed and restarted (${r.kind})`));
       else {
         console.log(warn(`could not refresh the service unit: ${r.msg}`));
@@ -2019,17 +2034,28 @@ function installPluginInto(dir) {
   // of them stale forever. Remove it only when it is provably OURS (it carries our
   // plugin.json); a directory someone else named `memhouse` is not ours to delete.
   const legacy = path.join(dir, 'skills', 'memhouse');
-  if (fs.existsSync(path.join(legacy, '.claude-plugin', 'plugin.json'))) {
-    fs.rmSync(legacy, { recursive: true });
-    console.log(ok(`removed the pre-0.10 plugin at ${short(legacy)} (renamed to 'mem')`));
+  const legacyManifest = path.join(legacy, '.claude-plugin', 'plugin.json');
+  if (fs.existsSync(legacyManifest)) {
+    let lname = null;
+    try { lname = JSON.parse(fs.readFileSync(legacyManifest, 'utf-8')).name; } catch { /* unreadable */ }
+    if (lname === 'memhouse' || lname === 'mem') {
+      fs.rmSync(legacy, { recursive: true });
+      console.log(ok(`removed the pre-0.10 plugin at ${short(legacy)} (renamed to 'mem')`));
+    }
   }
   const dst = path.join(dir, 'skills', 'mem');
-  // REPLACE, not overlay. cpSync over an existing install refreshes the four skills and
+  // REPLACE, not overlay. cpSync over an existing install refreshes the skills and
   // leaves anything else standing — a machine that once had a build with extra skills
-  // kept offering /mem:replay and /mem:status forever, stale, beside the real four.
-  // Same ownership rule as the legacy dir: only a directory carrying our plugin.json is
-  // ours to clear.
-  if (fs.existsSync(path.join(dst, '.claude-plugin', 'plugin.json'))) fs.rmSync(dst, { recursive: true });
+  // kept offering /mem:replay and /mem:status forever, stale, beside the real ones.
+  // Ownership means OUR MANIFEST, checked by name — "any plugin.json" would have deleted
+  // an unrelated plugin that happened to pick the same directory name.
+  const dstManifest = path.join(dst, '.claude-plugin', 'plugin.json');
+  if (fs.existsSync(dstManifest)) {
+    let name = null;
+    try { name = JSON.parse(fs.readFileSync(dstManifest, 'utf-8')).name; } catch { /* unreadable */ }
+    if (name === 'mem' || name === 'memhouse') fs.rmSync(dst, { recursive: true });
+    else throw new Error(`skills/mem in ${dir} belongs to plugin '${name || '(unreadable manifest)'}' — refusing to replace it`);
+  }
   fs.mkdirSync(dst, { recursive: true });
   fs.cpSync(path.join(DELIVERY, 'plugin'), dst, { recursive: true });
   return dst;
@@ -2246,6 +2272,21 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   // system tables, so a --dry-run (and an already-current house under --dry-run) truly
   // changes nothing — the earlier order created the meta tables and stamped
   // schema_version on the way to saying "nothing was changed".
+  // Read the recorded generation BEFORE anything else. This binary knows migrations up
+  // to SCHEMA_VERSION; a house recorded ABOVE that was moved forward by a newer release,
+  // and the two stamps at the bottom of this function would have quietly REWOUND its
+  // record (schema 3 -> 2) — defeating the writer guard for every old shipper whose key
+  // shapes happen to match. An older memhouse cannot migrate a newer house, only say so.
+  try {
+    const rec = await q.rows("SELECT value FROM house_meta FINAL WHERE key = 'schema_version'");
+    const recorded = rec.length ? Number(rec[0].value) || 0 : 0;
+    if (recorded > SCHEMA_VERSION) {
+      console.log(bad(`this house is at schema ${recorded}; this memhouse knows migrations up to ${SCHEMA_VERSION}.`));
+      console.log('  A newer release moved it forward. Update THIS machine:  memhouse update');
+      return 1;
+    }
+  } catch { /* no record yet — a pre-0.10 house; detection below owns it */ }
+
   const pending = await mig.detectPending(q, ctx, { component });
 
   if (flags['dry-run'] === true) {
@@ -2295,7 +2336,13 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   if (svc.running) {
     console.log(warn(`the shipper is running (${svc.via}) — rows it writes during the copy are picked up`));
     console.log('  by a second pass, but stopping it first makes the migration a single, quiet copy:');
-    console.log('  memhouse service stop   (or: memhouse stop)');
+    // The REAL command for how it is actually managed. This used to print
+    // `memhouse service stop`, which did not exist — the dispatcher showed status.
+    console.log(String(svc.via || '').startsWith('service')
+      ? (process.platform === 'darwin'
+        ? '  launchctl bootout gui/$(id -u)/com.memhouse.shipper   (memhouse service install brings it back)'
+        : '  systemctl --user stop memhouse-shipper   (systemctl --user start … brings it back)')
+      : '  memhouse stop');
   }
   // The one writer this migration CANNOT make safe is an old memhouse on ANOTHER machine.
   // A 0.9.0 shipper passes its own key check against the migrated rooms (it only looks
@@ -2991,6 +3038,26 @@ async function cmdUninstall() {
         // A refusal is a failure. Silence here told automation the credential-bearing
         // unit was gone while it was still installed and possibly still shipping.
         if (!r.ok) process.exitCode = 1;
+      } else if (sub === 'stop' || sub === 'start' || sub === 'restart') {
+        // These existed only as advice text for a while — and the advice named
+        // `memhouse service stop`, which fell through to status. A command a message
+        // tells you to run has to exist.
+        const st = svc.status();
+        if (!st.kind || !st.installed) { console.log(warn('service not installed')); process.exitCode = 1; break; }
+        const args = st.kind === 'systemd'
+          ? [['systemctl', ['--user', sub, 'memhouse-shipper']]]
+          : (sub === 'stop'
+            ? [['launchctl', ['bootout', `gui/${process.getuid()}/com.memhouse.shipper`]]]
+            : sub === 'start'
+              ? [['launchctl', ['bootstrap', `gui/${process.getuid()}`, st.path]]]
+              : [['launchctl', ['kickstart', '-k', `gui/${process.getuid()}/com.memhouse.shipper`]]]);
+        let failed = false;
+        for (const [b, a] of args) {
+          const r = spawnSync(b, a, { stdio: 'pipe', encoding: 'utf-8' });
+          if (r.status !== 0) { console.log(bad(`${b} ${a.join(' ')}: ${(r.stderr || '').trim().split('\n')[0] || `exit ${r.status}`}`)); failed = true; }
+        }
+        if (!failed) console.log(ok(`service ${sub === 'stop' ? 'stopped' : sub === 'start' ? 'started' : 'restarted'} (${st.kind})`));
+        process.exitCode = failed ? 1 : 0;
       } else {
         const st = svc.status();
         if (!st.kind) { console.log(warn(`no service integration for '${process.platform}'`)); break; }

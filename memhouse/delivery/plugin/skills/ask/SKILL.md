@@ -49,6 +49,11 @@ SQL
 
 ## The method — retrieve, read, answer, cite
 
+**Escaping, before anything touches SQL.** Search terms, session ids and user ids are
+arbitrary text going inside single-quoted literals: escape backslashes then single
+quotes (`\` → `\\`, `'` → `\'`) in every value you splice in. A term like `O'Reilly`
+otherwise breaks the query — and crafted text could reshape it.
+
 **1. Extract search terms from the question.** Not the question verbatim — the terms
 that would appear in the ANSWER. "How did I fix the ClickHouse auth error?" → search
 `ClickHouse auth`, `Authentication failed`, `ACCESS_DENIED` — error strings beat

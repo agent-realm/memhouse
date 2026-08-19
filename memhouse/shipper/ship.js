@@ -599,7 +599,19 @@ async function assertWriterSupported(client, rooms) {
       format: 'JSONEachRow',
     });
     have = new Map((await rs.json()).map((r) => [r.key, toInt(r.value)]));
-  } catch { return; } // no meta tables: a pre-0.10 house — the room checks own that case
+  } catch (e) {
+    // ONLY a missing table means a pre-0.10 house (the room checks own that case). Any
+    // other failure — an ACCESS_DENIED on house_meta, a timeout — used to fall through
+    // here too, and a writer that merely could not READ the record was treated as if the
+    // record did not exist: on a newer-schema house whose key shapes happen to match,
+    // that bypassed the whole compatibility guard. Not being able to check is a reason
+    // to refuse, never a reason to proceed.
+    const m = e && e.message ? e.message : String(e);
+    if (/UNKNOWN_TABLE|Unknown table expression|doesn't exist|does not exist/i.test(m)) return;
+    throw new Error(`could not read this house's compatibility record (${m.split('\n')[0]})\n`
+      + '  Refusing to write until it is readable — a writer that cannot check the schema\n'
+      + '  generation must not assume it matches.');
+  }
   const houseSchema = have.get('schema_version') || 0;
   const floor = have.get('min_writer_schema') || 0;
   const mine = Math.max(...SUPPORTED_SCHEMAS);

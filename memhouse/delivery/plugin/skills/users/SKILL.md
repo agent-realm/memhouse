@@ -11,6 +11,10 @@ allowed-tools: Bash
 **Invoking this skill IS the request. Run the report immediately and present it; there
 are no arguments and nothing to clarify.** Read-only throughout.
 
+Throughout, `<your-db>` is the live `$MEMHOUSE_DB` and `<your-user>` the live
+`$MEMHOUSE_USER` — take both from the connection environment, never from the
+conversation or from examples.
+
 Answers three questions, best-effort by design: ClickHouse shows a credential only what
 it may see, so on someone else's server some sections legitimately come back thin — say
 what could not be seen rather than guessing.
@@ -86,6 +90,8 @@ SELECT name FROM system.users ORDER BY name
 
 Four short sections in that order, each with its one-line meaning ("2 machines ship into
 your house", "you can read polat's memory", "yigit can read yours — read-only", …).
-Empty section three means "nobody can read your memory but you" — say exactly that; it
-is the answer most users are checking for. Point at `/mem:share <user>` /
+Empty section three means "no shares made through /mem:share" — and ONLY that. The
+record cannot see an admin-issued grant, so never promise "nobody can read your memory"
+from an empty ledger; say "no shares recorded through this skill — the authoritative
+check is the admin's system.grants query" and print it. Point at `/mem:share <user>` /
 `/mem:share revoke <user>` for changes.
