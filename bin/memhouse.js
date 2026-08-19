@@ -1049,7 +1049,7 @@ function printGettingStarted(cfg) {
   console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
   console.log('     memhouse service install        or: ship at login, no terminal needed');
   console.log('     memhouse plugins install claude give your agents /mem:ask, /mem:search,');
-  console.log('                                     /mem:sessions, /mem:sql');
+  console.log('                                     /mem:sessions, /mem:sql, /mem:status');
   console.log('     memhouse search <terms>         find a past conversation right now');
   console.log('     memhouse doctor                 every line a check mark = healthy');
   console.log('  The house keeps shipping as you work; nothing else to do.');

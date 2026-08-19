@@ -266,9 +266,9 @@ herdr pane run <pane2> "cd <worktree> && claude"
 herdr pane wait-output <pane2> --match ">" --timeout 60000
 ```
 
-The skills are **`/mem:ask`, `/mem:search`, `/mem:sessions`, `/mem:sql`**. The colon
+The skills are **`/mem:ask`, `/mem:search`, `/mem:sessions`, `/mem:sql`, `/mem:status`**. The colon
 namespace is earned by being installed as a plugin — `<config>/skills/mem/` holding
-`.claude-plugin/plugin.json` plus `skills/{ask,search,sessions,sql}/`. If autocomplete offers
+`.claude-plugin/plugin.json` plus `skills/{ask,search,sessions,sql,status}/`. If autocomplete offers
 `/mem-search` with a hyphen instead, the installer regressed to copying loose skill
 directories; that is a defect, not a naming variant. Check `plugins list` and the
 installed tree before reporting anything else about the skills.

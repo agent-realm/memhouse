@@ -39,6 +39,10 @@ migration path is planned work, not a promise the old versions can cash.
   non-interactive run only names them and prints the command — a cron must never start
   a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
   who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **`/mem:status`** reports the memory system's state from inside an agent: per-editor
+  holdings (current parses only), freshness and coverage bounds, schema generation and
+  migration state, and the writer fleet — including the rows-without-record signature of
+  a pre-0.10 machine still writing.
 - **The plugin is `mem` now, and it answers questions.** Skills install as `/mem:ask`,
   `/mem:search`, `/mem:sessions`, `/mem:sql` (the `mem` short name belonged to the
   retired memory-house and moves to the living product). `/mem:ask` is new: retrieve the
