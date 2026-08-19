@@ -6,7 +6,7 @@ argument-hint: "<search terms> [in <project>] [last <N> days] [from <editor>]"
 allowed-tools: Bash
 ---
 
-# /memhouse:search — search conversation memory
+# /mem:search — search conversation memory
 
 Search the full message history in the memhouse house. Every room is named for your
 ClickHouse user — `messages`, `sessions` — see **Room names** below.

@@ -24,7 +24,7 @@ migration path is planned work, not a promise the old versions can cash.
 - **Reads show one parse per session.** `roomNames()` resolves `messages` and `tool_calls`
   to a current-epoch subquery, and the bare tables only as `messages_raw` /
   `tool_calls_raw` for writes and DDL. Counts, tokens and cost are unchanged. Hand-written
-  SQL needs the filter — `/memhouse:sql` carries it.
+  SQL needs the filter — `/mem:sql` carries it.
 - **`memhouse migrate`** — a migration runner, not a one-off. Migrations live in
   `memhouse/house/migrations/<id>.js` (registry: id, component, toVersion, detect, plan,
   steps); the runner detects what a house still needs FROM ITS ROOMS (never from the
@@ -39,6 +39,15 @@ migration path is planned work, not a promise the old versions can cash.
   non-interactive run only names them and prints the command — a cron must never start
   a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
   who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **The plugin is `mem` now, and it answers questions.** Skills install as `/mem:ask`,
+  `/mem:search`, `/mem:sessions`, `/mem:sql` (the `mem` short name belonged to the
+  retired memory-house and moves to the living product). `/mem:ask` is new: retrieve the
+  relevant past sessions, read the transcripts, answer with citations — the synthesis is
+  the agent's; memhouse itself still runs no LLM anywhere. The installer removes a
+  pre-0.10 `skills/memhouse/` copy (only when it is provably ours) so the old and new
+  namespaces never load side by side.
+- **`install` ends with a getting-started overview** — dashboard, service, skills,
+  search, doctor — instead of a single next-step line.
 - **Writer compatibility is enforced, both directions.** Each release declares which
   schema generations it may write (`SUPPORTED_SCHEMAS`); every pass starts by reading the
   house's own record and refuses — before touching a room — when the house is newer than

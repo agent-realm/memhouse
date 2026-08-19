@@ -6,7 +6,7 @@ argument-hint: "<question or SQL>"
 allowed-tools: Bash
 ---
 
-# /memhouse:sql — ad-hoc analytics
+# /mem:sql — ad-hoc analytics
 
 If the user gives SQL, run it (append `FORMAT PrettyCompact` if no FORMAT
 given). If they give a question, write the SQL yourself from the schema below.
@@ -135,7 +135,7 @@ DIFFERENT memhouse version are the two ways this goes quietly wrong.
 | Object | Kind | Columns |
 |---|---|---|
 | `sessions` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, origin, epoch, user_id, ingested_at` |
-| `messages` | table, 1 row/message **per parse** | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, origin, epoch, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /memhouse:search) |
+| `messages` | table, 1 row/message **per parse** | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, origin, epoch, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /mem:search) |
 | `tool_calls` | table, 1 row/tool call **per parse** | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, origin, epoch, user_id, ingested_at` |
 | `house_meta` | table, house's own record | `key, value, updated_at, updated_by, host` — `schema_version`, per-member `client_version:<user>` |
 | `house_events` | append-only log | `event_at, kind, id, status, from_version, to_version, actor, host, rows_before, rows_after, detail` — migrations, version changes |

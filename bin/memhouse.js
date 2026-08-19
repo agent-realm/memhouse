@@ -878,9 +878,10 @@ async function cmdInstall({ interactive }) {
       console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
     }
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
-    console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
+    console.log(ok('installed'));
     console.log('  adding a housemate later is two statements for the admin:');
     console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
+    printGettingStarted(cfg);
     return 0;
   }
 
@@ -1030,8 +1031,28 @@ async function cmdInstall({ interactive }) {
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
   }
-  console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
+  console.log(ok('installed'));
+  printGettingStarted(cfg);
   return 0;
+}
+
+/**
+ * What now — printed once, at the end of a successful install. An install that ends with
+ * one next-step line leaves the pilot at a working house they do not know how to use:
+ * the dashboard, the agent skills, and the health check all exist, and nothing said so.
+ * Kept to one screen; each line is a thing to DO, not a feature list.
+ */
+function printGettingStarted(cfg) {
+  console.log('');
+  console.log('  Your house is live. From here:');
+  console.log('     memhouse start                  dashboard + shipper loop (background daemons)');
+  console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
+  console.log('     memhouse service install        or: ship at login, no terminal needed');
+  console.log('     memhouse plugins install claude give your agents /mem:ask, /mem:search,');
+  console.log('                                     /mem:sessions, /mem:sql');
+  console.log('     memhouse search <terms>         find a past conversation right now');
+  console.log('     memhouse doctor                 every line a check mark = healthy');
+  console.log('  The house keeps shipping as you work; nothing else to do.');
 }
 
 async function cmdOnboard() {
@@ -1088,7 +1109,7 @@ async function cmdOnboard() {
   const targets = claudeTargets();
   if (targets.length) {
     console.log('');
-    console.log(`Claude Code skills: ${fs.readdirSync(path.join(DELIVERY, 'plugin', 'skills')).map((n) => `/memhouse:${n}`).join(', ')}`);
+    console.log(`Claude Code skills: ${fs.readdirSync(path.join(DELIVERY, 'plugin', 'skills')).map((n) => `/mem:${n}`).join(', ')}`);
     const chosen = await chooseTargets(targets, 'Install into');
     for (const t of chosen) console.log(ok(`installed skills into ${short(installPluginInto(t.dir))}`));
     if (chosen.length) console.log('  they load next time that Claude Code starts');
@@ -1930,7 +1951,7 @@ async function cmdUpdate() {
 // A pilot rarely has one. `~/.claude` is the stock install, `CLAUDE_CONFIG_DIR` points at
 // whichever they are running right now, and Kommander-style playbooks live under
 // `~/.claude-playbooks/<name>[/playbook]`, each a complete config directory with its own
-// skills/. Installing into one and calling it done leaves /memhouse:search missing from
+// skills/. Installing into one and calling it done leaves /mem:search missing from
 // every other instance the pilot uses — silently, because a missing skill does not announce
 // itself, it just never appears.
 //
@@ -1961,11 +1982,20 @@ function claudeTargets() {
 }
 
 const short = (p) => p.replace(os.homedir(), '~');
-const PLUGIN_MARK = path.join('skills', 'memhouse', '.claude-plugin', 'plugin.json');
+const PLUGIN_MARK = path.join('skills', 'mem', '.claude-plugin', 'plugin.json');
 const isPluginInstalled = (dir) => fs.existsSync(path.join(dir, PLUGIN_MARK));
 
 function installPluginInto(dir) {
-  const dst = path.join(dir, 'skills', 'memhouse');
+  // The plugin was named `memhouse` until 0.10.0. A leftover copy under the old name
+  // would load BESIDE the new one — /memhouse:search and /mem:search both resolving, one
+  // of them stale forever. Remove it only when it is provably OURS (it carries our
+  // plugin.json); a directory someone else named `memhouse` is not ours to delete.
+  const legacy = path.join(dir, 'skills', 'memhouse');
+  if (fs.existsSync(path.join(legacy, '.claude-plugin', 'plugin.json'))) {
+    fs.rmSync(legacy, { recursive: true });
+    console.log(ok(`removed the pre-0.10 plugin at ${short(legacy)} (renamed to 'mem')`));
+  }
+  const dst = path.join(dir, 'skills', 'mem');
   fs.mkdirSync(dst, { recursive: true });
   fs.cpSync(path.join(DELIVERY, 'plugin'), dst, { recursive: true });
   return dst;
@@ -1999,16 +2029,16 @@ async function chooseTargets(targets, verb) {
 //
 // Claude Code gives a skill a namespace only when it arrives inside a plugin: a directory
 // under <config>/skills/ containing .claude-plugin/plugin.json loads as
-// `memhouse@skills-dir` and its skills become /memhouse:search, /memhouse:sessions,
-// /memhouse:sql. Copied in flat, the same three files register as unrelated top-level
+// `mem@skills-dir` and its skills become /mem:search, /mem:sessions,
+// /mem:sql. Copied in flat, the same three files register as unrelated top-level
 // skills named after their folders — which is what this used to do, while plugin.json sat
 // unread one directory away claiming the colon form. Driving a real Claude Code is what
-// caught it: `/memhouse:search` answered `Unknown command. Did you mean /memhouse-search?`
+// caught it: `/mem:search` answered `Unknown command. Did you mean /memhouse-search?`
 async function cmdPlugins() {
   const sub = positional[0] || 'list';
   const pluginSrc = path.join(DELIVERY, 'plugin');
   const names = fs.readdirSync(path.join(pluginSrc, 'skills'));
-  const invocations = names.map((n) => `/memhouse:${n}`).join(', ');
+  const invocations = names.map((n) => `/mem:${n}`).join(', ');
   // --target overrides the discovery rather than joining it: given one, that is the only
   // directory touched.
   const targets = flags.target ? [{ dir: flags.target, why: '--target' }] : claudeTargets();
@@ -2037,7 +2067,7 @@ async function cmdPlugins() {
     const chosen = await chooseTargets(targets, 'Install');
     if (!chosen.length) { console.log(warn('nothing installed')); return 0; }
     for (const t of chosen) console.log(ok(`installed ${names.length} skills into ${short(installPluginInto(t.dir))}`));
-    console.log(`  loads as memhouse@skills-dir next session — invoke ${invocations}`);
+    console.log(`  loads as mem@skills-dir next session — invoke ${invocations}`);
     return 0;
   }
 
@@ -2047,11 +2077,11 @@ async function cmdPlugins() {
     const chosen = await chooseTargets(installed, 'Remove from');
     if (!chosen.length) { console.log(warn('nothing removed')); return 0; }
     for (const t of chosen) {
-      fs.rmSync(path.join(t.dir, 'skills', 'memhouse'), { recursive: true });
+      fs.rmSync(path.join(t.dir, 'skills', 'mem'), { recursive: true });
       // Remove the now-empty skills/ we created, but never a skills/ holding someone
       // else's work.
       try { fs.rmdirSync(path.join(t.dir, 'skills')); } catch { /* not empty: leave it */ }
-      console.log(ok(`removed ${short(path.join(t.dir, 'skills', 'memhouse'))}`));
+      console.log(ok(`removed ${short(path.join(t.dir, 'skills', 'mem'))}`));
     }
     return 0;
   }

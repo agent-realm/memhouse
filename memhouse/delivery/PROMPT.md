@@ -22,9 +22,9 @@ work that is not in your current context ("that session where…", "how did I so
 X before", "did we ever…", "what was I working on last week"), search memhouse
 FIRST. Only say you don't know after a search comes back empty.
 
-**How to query.** Prefer the installed skills when present: `/memhouse:search`
-(full-text over messages), `/memhouse:sessions` (list/filter sessions),
-`/memhouse:sql` (free-form read-only SQL). Without skills, query directly.
+**How to query.** Prefer the installed skills when present: `/mem:search`
+(full-text over messages), `/mem:sessions` (list/filter sessions),
+`/mem:sql` (free-form read-only SQL). Without skills, query directly.
 
 **Table names.** The house's rooms are three plain, shared tables — `messages`,
 `sessions`, `tool_calls` — in the connection's database. Everyone in the house writes

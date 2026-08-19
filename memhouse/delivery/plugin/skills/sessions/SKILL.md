@@ -6,7 +6,7 @@ argument-hint: "[N] [project <name>] [from <editor>] [today|week|month]"
 allowed-tools: Bash
 ---
 
-# /memhouse:sessions — browse session history
+# /mem:sessions — browse session history
 
 List/filter sessions from the session rollup — a saved query over your own rooms, not an
 object; `memhouse sessions-query` prints it (session metadata +
@@ -154,11 +154,11 @@ FORMAT PrettyCompact
 | "what was I working on yesterday?" | `WHERE ended > now() - INTERVAL 1 DAY` |
 | "show my last 10 sessions in agentlytics" | `LIMIT 10 … WHERE project ILIKE '%agentlytics%'` |
 | "list my cursor sessions this month" | `WHERE source = 'cursor' AND ended > now() - INTERVAL 30 DAY` |
-| "which machine did I do the schema work on?" | search via /memhouse:search, or filter `host` here |
+| "which machine did I do the schema work on?" | search via /mem:search, or filter `host` here |
 
 ## Output
 
 A compact table: when, name (or first prompt), source, host, project, msgs,
 tokens. Offer to pull a full transcript next
 (`SELECT role, text FROM messages WHERE session_id = '…' ORDER BY seq`) or to
-run /memhouse:search for a specific quote.
+run /mem:search for a specific quote.
