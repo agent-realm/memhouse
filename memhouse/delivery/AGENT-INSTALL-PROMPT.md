@@ -42,8 +42,14 @@ already exist.
   echo a password into the transcript you are writing, which memhouse will then ship.
 - If a command fails, read what it printed before retrying. memhouse's failures name the
   cause and usually name the fix — it is not a generic tool that fails generically.
-- Rooms are named for the ClickHouse user: `sessions_<them>`, `messages_<them>`,
-  `tool_calls_<them>`. There are no unsuffixed tables. If you write a query, suffix it.
+- The house's rooms are three PLAIN, SHARED tables — `sessions`, `messages`,
+  `tool_calls` — in the connection's database. No suffixes, no per-member tables.
+  Direct reads of `messages`/`tool_calls` must filter to the current parse (the shipper
+  retains superseded parses under an `epoch` column); the installed skills carry the
+  filter, so prefer them for queries.
+- If `ship` refuses with "wrong sorting key … memhouse migrate", the house was built by
+  an older memhouse. Run `memhouse migrate` — it copies, swaps atomically, deletes
+  nothing, and shipping resumes on its own. Do NOT try to rebuild tables by hand.
 
 ## When you are done
 
@@ -52,6 +58,8 @@ mark. Then tell them:
 
 - where the dashboard is (`http://localhost:{{PORT}}`) and that `memhouse start` runs it
 - that `memhouse search <terms>` searches every past session from every editor
+- that `memhouse plugins install claude` gives their agents /mem:ask, /mem:search,
+  /mem:sessions, /mem:share, /mem:sql, /mem:status, /mem:users — offer to run it
 - that you can now search their history yourself, and offer to try one query
 
 If `doctor` reports a failure, say which line failed and what memhouse suggested. Do not

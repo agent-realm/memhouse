@@ -45,27 +45,30 @@ From a checkout instead (contributors): `npm install --no-audit --no-fund` in th
 repo root — nothing compiles — then substitute `node bin/memhouse.js` for `memhouse`
 below.
 
-## 2. Configure the connection
+## 2 + 3. Configure, create the schema, first ship — one command
 
-Write `~/.memhouse/env` (or run `memhouse install --yes --url … --user … --password
-… --db …`, which writes it for you):
+Do NOT hand-write `~/.memhouse/env`. `install` validates the connection, builds the
+rooms, ships, and writes the config LAST — a hand-written file is read as truth by
+every later command even when it is wrong, and an example URL pasted verbatim points
+at somebody's real house.
 
-```bash
-mkdir -p ~/.memhouse
-cat > ~/.memhouse/env <<'EOF'
-MEMHOUSE_URL=http://localhost:8123
-MEMHOUSE_USER=memhouse_root
-MEMHOUSE_PASSWORD=<credential>
-MEMHOUSE_DB=mem
-EOF
-chmod 600 ~/.memhouse/env
-```
-
-## 3. Create the schema and run the first ship
+With a credential the user already has on the house:
 
 ```bash
-memhouse install --yes     # applies the schema, then runs the first full ship
+memhouse install --url <house-url> --user <member> --password '<credential>' --db <house>
 ```
+
+Or, holding an admin credential, mint the member and the house in one go:
+
+```bash
+memhouse install --url <house-url> \
+  --admin-user <admin> --admin-password '<admin-credential>' \
+  --db <house> --member <member> --member-password '<credential>'
+```
+
+The admin credential is used once and never stored. Ask the user for values; never
+invent them and never default to localhost:8123 — on many machines that is a real house
+belonging to someone else.
 
 Expected output shape: `[memhouse] shipped N sessions (0 skipped) → M msg rows, T
 tool rows in Xs` with N in the hundreds on a machine with real agent usage.
@@ -84,9 +87,11 @@ no longer exists, so anything named here is a single editor's own store (locked 
 running editor, corrupt, or on a schema this parser does not know).
 
 `stats` should show one row per source (claude-code, codex, gemini-cli, …) with
-non-zero sessions/messages. Or verify by SQL — rooms are named for your ClickHouse
-user, and the session rollup is a saved query rather than an object, so
-`memhouse sessions-query` prints it:
+non-zero sessions/messages. Or verify by SQL — the rooms are plain shared tables
+(`sessions`, `messages`, `tool_calls`) and the session rollup is a saved query rather
+than an object, so `memhouse sessions-query` prints it (it also applies the
+current-parse filter that any hand-written read of `messages` needs — the shipper
+retains superseded parses under an `epoch`):
 
 ```bash
 curl -s -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" "$MEMHOUSE_URL/?database=$MEMHOUSE_DB" \
@@ -110,8 +115,25 @@ memhouse plugins install claude
 ```
 
 Installs the memhouse plugin into `<claude-config>/skills/mem`, which loads next
-session as `mem@skills-dir` and exposes `/mem:search`, `/mem:sessions`
-and `/mem:sql`. They read the connection from `$MEMHOUSE_HOME/env` (default
+session as `mem@skills-dir` and exposes `/mem:ask`, `/mem:search`, `/mem:sessions`,
+`/mem:share`, `/mem:sql`, `/mem:status` and `/mem:users`. They read the connection from
+`$MEMHOUSE_HOME/env` (default
 `~/.memhouse/env`), with exported `MEMHOUSE_*` vars taking precedence, and refuse to run
 rather than guessing a URL when neither is set. `memhouse plugins list` shows what is
 installed, `memhouse plugins remove claude` undoes it.
+
+## 7. Upgrading a machine that already ran memhouse < 0.10
+
+The 0.10 schema changed the transcript tables' sorting keys, so the first `ship` against
+an old house refuses and names the fix. Run it:
+
+```bash
+memhouse migrate      # copies each room, swaps atomically, keeps <room>_pre_epoch
+```
+
+Nothing is deleted; a service-managed shipper resumes on its next pass by itself.
+`memhouse update` performs this for the user interactively (`--migrate` runs it
+unasked); as an agent, prefer `memhouse update --no-install --migrate` after an
+`npm install -g` you already performed. If OTHER machines still ship into the same
+house with an older memhouse, tell the user to upgrade them promptly — the migration
+output explains why and prints the admin-side alternative.
