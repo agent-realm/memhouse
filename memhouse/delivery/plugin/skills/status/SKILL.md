@@ -8,6 +8,12 @@ allowed-tools: Bash
 
 # /mem:status — the state of the memory system
 
+**Invoking this skill IS the request. Run the report immediately — connect, run the four
+sections below, and present the summary. There are no arguments and nothing to clarify;
+do not describe this skill or ask what to check.** (Driven live, a model did exactly
+that: it summarized the file and asked "is there something specific?" — a status command
+that answers with a question has failed.)
+
 One report, four sections: what the house holds, how fresh it is, what generation it is
 at, and who writes into it. Read-only; nothing here changes anything.
 

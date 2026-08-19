@@ -1889,10 +1889,26 @@ async function cmdUpdate() {
   // within a loop interval (memhouse/self-update.js), but a pilot who typed `update` should
   // not have to wait for it, and the dashboard's stale bundle is visible immediately.
   if (svc.installed) {
-    console.log(warn(`the shipper is service-managed (${svc.kind}) — restart it to pick this up:`));
-    console.log(svc.kind === 'systemd'
-      ? '  systemctl --user restart memhouse-shipper'
-      : '  launchctl kickstart -k gui/$(id -u)/com.memhouse.shipper');
+    // REINSTALL the unit, do not merely advise a restart. Two reasons, both measured on
+    // testbed. The unit inlines its template AND the env at service-install time, so a
+    // fix shipped in a release (Restart=on-failure -> always was one; the self-update
+    // handover exits 0 and an on-failure unit stays DEAD after every upgrade) never
+    // reaches an existing install through a restart. And the advice route ends with a
+    // pilot who did everything `update` said and still has a dead shipper.
+    // service.js install is idempotent: same home replaces in place and starts it.
+    try {
+      const svcmod = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
+      const r = svcmod.install({ shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval: 300, home: HOME_DIR });
+      if (r.ok) console.log(ok(`service unit refreshed and restarted (${r.kind})`));
+      else {
+        console.log(warn(`could not refresh the service unit: ${r.msg}`));
+        console.log(svc.kind === 'systemd'
+          ? '  restart it yourself: systemctl --user restart memhouse-shipper'
+          : '  restart it yourself: launchctl kickstart -k gui/$(id -u)/com.memhouse.shipper');
+      }
+    } catch (e) {
+      console.log(warn(`could not refresh the service unit: ${e.message}`));
+    }
   }
   if (wasRunning.shipper || wasRunning.dashboard) {
     cmdStop();
