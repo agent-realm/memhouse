@@ -650,6 +650,12 @@ ${rooms.trim()}
 -- the boundary — and it is what lets the shipper create and evolve its own tables.
 GRANT ALL ON ${db}.* TO ${member};
 
+-- SELECT again, WITH GRANT OPTION — sharing, made self-serve and read-only by
+-- construction. This is what lets the member run \`GRANT SELECT ON ${db}.* TO <friend>\`
+-- themselves (/mem:share) without an operator, while the grant-option stops at SELECT:
+-- they can open a read-only window into their own memory and can hand on nothing more.
+GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
+
 -- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
 -- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
 -- currentUser() is computed during the INSERT, and an async flush stores it as the empty
@@ -731,6 +737,10 @@ async function adminBootstrap(cfg, admin) {
   // create and evolve the rooms (--ensure-schema below).
   try {
     await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member}`, { database: '' });
+    // SELECT again, WITH GRANT OPTION: what /mem:share rides on. The member can open a
+    // read-only window into their OWN house for a housemate-to-be — and can hand on
+    // nothing more, because the grant option stops at SELECT.
+    await q(`GRANT SELECT ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
     await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
     console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', async_insert pinned`));
   } catch (e) {
@@ -1049,7 +1059,7 @@ function printGettingStarted(cfg) {
   console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
   console.log('     memhouse service install        or: ship at login, no terminal needed');
   console.log('     memhouse plugins install claude give your agents /mem:ask, /mem:search,');
-  console.log('                                     /mem:sessions, /mem:sql, /mem:status');
+  console.log('                                     /mem:sessions, /mem:share, /mem:sql, /mem:status, /mem:users');
   console.log('     memhouse search <terms>         find a past conversation right now');
   console.log('     memhouse doctor                 every line a check mark = healthy');
   console.log('  The house keeps shipping as you work; nothing else to do.');

@@ -39,6 +39,14 @@ migration path is planned work, not a promise the old versions can cash.
   non-interactive run only names them and prints the command — a cron must never start
   a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
   who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **`/mem:share` and `/mem:users`** — sharing as a skill. Members are now granted
+  `SELECT … WITH GRANT OPTION` beside their `ALL` (both install paths), so
+  `/mem:share <user>` opens a read-only window into your own house with no operator —
+  and can hand on nothing more, because the grant option stops at SELECT. `revoke` closes
+  it; bare `/mem:share` lists who can read you. On a pre-0.10 house (no grant option) the
+  skill prints the one statement the admin runs. `/mem:users` reports who writes into
+  your house, whose houses you can read, who can read yours, and (where permitted) the
+  server's user list — each section degrading legibly on a hardened server.
 - **`/mem:status`** reports the memory system's state from inside an agent: per-editor
   holdings (current parses only), freshness and coverage bounds, schema generation and
   migration state, and the writer fleet — including the rows-without-record signature of
