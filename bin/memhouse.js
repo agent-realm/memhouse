@@ -322,7 +322,7 @@ Setup        onboard              interactive wizard: discover → configure →
                                   the member. The admin credential is never stored.
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
-             uninstall            stop daemons + service, clear runtime state.
+             uninstall            stop daemons + service, clear runtime state (asks; --yes).
                                   KEEPS the config and this machine's host identity
                                   --credentials    also forget the house and its password
                                   --full-removal   all of ${HOME_DIR.replace(os.homedir(), '~')}, identity included
@@ -2419,6 +2419,34 @@ async function cmdNightly() {
 }
 
 async function cmdUninstall() {
+  // Confirm FIRST, before the first destructive act. This used to start removing the
+  // service the moment it was typed — and "uninstall" is exactly the kind of command a
+  // person types to see what it would do. Name what THIS tier removes and keeps, ask
+  // once; --yes answers it for scripts, and a non-interactive run WITHOUT --yes refuses
+  // rather than proceeding — a destructive default in a pipeline should be spelled out.
+  if (flags.yes !== true) {
+    const fullT = flags['full-removal'] === true;
+    const credsT = fullT || flags.credentials === true;
+    const removes = ['the shipper/dashboard daemons and the OS service'];
+    if (credsT) removes.push(`the house connection and its credential (${ENV_FILE.replace(os.homedir(), '~')})`);
+    if (fullT) removes.push("this machine's host identity (a reinstall becomes a NEW host)");
+    const keeps = [];
+    if (!credsT) keeps.push('the house connection and credential');
+    if (!fullT) keeps.push("this machine's host identity");
+    keeps.push('ALL data in ClickHouse (no tier ever touches the house)');
+    console.log('This removes:');
+    for (const r of removes) console.log(`  - ${r}`);
+    console.log('Kept:');
+    for (const k of keeps) console.log(`  - ${k}`);
+    if (!process.stdin.isTTY) {
+      console.log(bad('not confirming a destructive command without a terminal — pass --yes to proceed'));
+      process.exitCode = 1;
+      return;
+    }
+    const a = (await ask('Uninstall? (yes/no)', 'no')).toLowerCase();
+    if (a !== 'yes' && a !== 'y') { console.log('aborted'); return; }
+  }
+
   // The OS service first, and this is not tidiness: it outlives the pidfile daemons by
   // design, it holds the credential inlined in its unit file, and it restarts itself. An
   // uninstall that stopped only the daemons would report success while a service kept

@@ -39,6 +39,10 @@ migration path is planned work, not a promise the old versions can cash.
   non-interactive run only names them and prints the command — a cron must never start
   a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
   who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **`memhouse uninstall` asks first.** It used to start removing the service the moment
+  it was typed. It now prints exactly what the chosen tier removes and keeps (the house
+  data is never touched, and says so), confirms once, takes `--yes` for scripts, and a
+  non-interactive run without `--yes` refuses rather than proceeding.
 - **`memhouse nightly [--out DIR]`** builds an installable, version-stamped tarball from
   a checkout (`<base>-nightly.<YYYYMMDDTHHMM>`) without publishing — stamp, `npm pack`,
   restore, so the checkout stays clean and the test machine's `--version` tells the
