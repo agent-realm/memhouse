@@ -50,6 +50,12 @@ The user name goes into SQL unquoted: **refuse anything not matching
 `[A-Za-z][A-Za-z0-9_]*`** rather than quoting it — a name you cannot type bare is a name
 that will be gotten wrong everywhere else too.
 
+**`<db>` below is the LIVE value of `$MEMHOUSE_DB` — print it with the connection
+(`echo "house: $MEMHOUSE_DB"`) and use THAT in every statement and every piece of
+advice.** Driven live, a model filled `<db>` in the admin advice with the literal
+fallback `mem` while the real house was named differently — advice the admin would have
+run against the wrong database.
+
 ```sql
 GRANT SELECT ON <db>.* TO <user>
 ```
