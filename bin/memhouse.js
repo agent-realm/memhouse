@@ -1996,6 +1996,12 @@ function installPluginInto(dir) {
     console.log(ok(`removed the pre-0.10 plugin at ${short(legacy)} (renamed to 'mem')`));
   }
   const dst = path.join(dir, 'skills', 'mem');
+  // REPLACE, not overlay. cpSync over an existing install refreshes the four skills and
+  // leaves anything else standing — a machine that once had a build with extra skills
+  // kept offering /mem:replay and /mem:status forever, stale, beside the real four.
+  // Same ownership rule as the legacy dir: only a directory carrying our plugin.json is
+  // ours to clear.
+  if (fs.existsSync(path.join(dst, '.claude-plugin', 'plugin.json'))) fs.rmSync(dst, { recursive: true });
   fs.mkdirSync(dst, { recursive: true });
   fs.cpSync(path.join(DELIVERY, 'plugin'), dst, { recursive: true });
   return dst;

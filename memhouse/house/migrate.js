@@ -68,6 +68,15 @@ const { ROOM_TYPES, keyProblem, createStatement } = require('./house');
 function listMigrations() {
   const dir = path.join(__dirname, 'migrations');
   const files = fs.readdirSync(dir).filter((f) => /^\d{4}-.*\.js$/.test(f)).sort();
+  // An EMPTY registry is a broken install, never a current house. Measured: an npm
+  // extraction dropped the one registry file, and `memhouse migrate` on an un-migrated
+  // house then said "nothing to migrate — the house is at schema 2" — the most dangerous
+  // possible reading of a missing file. The registry has carried at least 0100-epoch-key
+  // since it existed; zero entries means the files are gone, not the work.
+  if (!files.length) {
+    throw new Error(`the migration registry at ${dir} is empty — this install is broken.\n`
+      + '  Reinstall memhouse (npm install -g memhouse), then retry.');
+  }
   const out = files.map((f) => require(path.join(dir, f)));
   const seen = new Set();
   let lastVersion = 0;
