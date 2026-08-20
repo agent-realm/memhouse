@@ -23,8 +23,11 @@ substituted into a command — that burns the credential into the transcript on 
 
 2. Gather, by ASKING the user in chat:
    - the invitee's **name** (validate `[A-Za-z][A-Za-z0-9_]*`; refuse otherwise)
-   - optionally the **house** to put them in (`into <db>`); defaults to their name. A
-     shared house like `team_a` invites them INTO that shared house.
+   - optionally the **house** to put them in (`into <db>`). If the user does not name
+     one — or says "default"/"their own" — OMIT --db entirely; the CLI defaults the house
+     to the invitee's name. Only pass --db when they name a SPECIFIC shared house (e.g.
+     `team_a`). Never pass `--db default` for "the default house" — that is a literal
+     database named default.
    - the **URL the invitee will reach the house at** — NOT localhost (that is the
      invitee's own machine). A LAN IP, hostname, or tunnel.
    - the **admin user name** (just the name).
@@ -34,7 +37,7 @@ substituted into a command — that burns the credential into the transcript on 
    with everything else filled in:
 
    ```
-   memhouse invite <name> --url <url> --db <db> --admin-user <admin> --admin-password 'PASTE_IT_HERE'
+   memhouse invite <name> --url <url> [--db <shared-house>] --admin-user <admin> --admin-password 'PASTE_IT_HERE'
    ```
 
    Note the standing tip: in most terminals they can prefix the line with a space to
