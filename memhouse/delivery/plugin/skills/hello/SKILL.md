@@ -92,6 +92,12 @@ And around other people — **inviting comes before sharing**:
   hand them one env file; they install with it and have their own memory
 - `/mem:share <name>` — once they exist, open a read-only window into YOUR memory
   (`/mem:share revoke <name>` closes it); `/mem:users` shows who's around
+- **Read a friend's shared memory** — once they've shared theirs with you, name their
+  house right in the question: `/mem:ask <question> in <their-house>`, or
+  `/mem:search <terms> in <their-house>` / `/mem:sql … on <their-house>`. It reads THEIR
+  house read-only, with your own credentials; `/mem:users` lists the houses shared with
+  you. (A house is a whole ClickHouse database — sharing grants read on it, not on single
+  sessions.)
 
 Also worth naming: `memhouse start` serves a dashboard at http://localhost:4640 for
 browsing and analytics outside the chat, and everything here is read-only for agents —
