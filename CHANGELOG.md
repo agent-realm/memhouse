@@ -4,6 +4,17 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.5 — 2026-08-20
+
+- **`memhouse update` now refreshes the Claude plugin too.** Before, update upgraded the
+  package, the service unit, and the house, but left the installed `/mem:*` skills as
+  whatever an earlier `plugins install` had copied — so the plugin drifted behind the CLI
+  (and showed an old version). Update now re-copies the plugin into every Claude config dir
+  that ALREADY has it (never installs it somewhere new), from the files just put on disk,
+  and stamps the manifest with the freshly-installed version. It prints each dir refreshed
+  and a `/reload-plugins` reminder. (Self-update note: because `update` runs the
+  pre-upgrade code, this takes effect from the update AFTER the one that installs 0.12.5.)
+
 ## 0.12.4 — 2026-08-20
 
 - **Inserts are compressed and byte-bounded — the shipper stops choking slow links.**
