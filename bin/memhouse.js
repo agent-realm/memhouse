@@ -2180,6 +2180,17 @@ function installPluginInto(dir) {
   }
   fs.mkdirSync(dst, { recursive: true });
   fs.cpSync(path.join(DELIVERY, 'plugin'), dst, { recursive: true });
+  // Stamp the manifest with THIS memhouse's version. The source plugin.json carries a
+  // FROZEN number — it sat at 0.11.0 through several releases, so every install
+  // advertised the wrong version (`memhouse --version` said one thing, the plugin
+  // another). The package version is the single truth; write it into the copy.
+  try {
+    const m = JSON.parse(fs.readFileSync(dstManifest, 'utf-8'));
+    if (m.version !== PKG.version) {
+      m.version = PKG.version;
+      fs.writeFileSync(dstManifest, `${JSON.stringify(m, null, 2)}\n`);
+    }
+  } catch { /* manifest unreadable — leave the copied one rather than guess */ }
   return dst;
 }
 

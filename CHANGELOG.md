@@ -4,6 +4,15 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.2 — 2026-08-20
+
+- **The Claude plugin now reports the real version.** `plugin.json` carried a hardcoded
+  `"version": "0.11.0"` in the source, copied verbatim on install — so the plugin
+  advertised 0.11.0 no matter which memhouse produced it, disagreeing with
+  `memhouse --version`. `plugins install` now stamps the installed manifest with the
+  package version (the single source of truth), and the source manifest was bumped to
+  match. Re-run `memhouse plugins install claude` to refresh an already-installed plugin.
+
 ## 0.12.1 — 2026-08-20
 
 - **The skills no longer fall back to a hardcoded `mem` house.** A house is a database
