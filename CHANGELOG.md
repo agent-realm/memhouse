@@ -4,6 +4,21 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.3 — 2026-08-20
+
+- **`install` no longer blocks on the first ship — it ships in the background.** A fresh
+  member's first ship loads the entire local backlog (a real invitee's was 558 sessions /
+  170k rows / **224 seconds**), and the installer ran it synchronously and near-silently,
+  so `install` looked hung for minutes after "config written". Now install finishes
+  immediately and starts the shipper as a detached background daemon (the same one
+  `memhouse start` runs), which loads the history and keeps shipping — `memhouse status`
+  shows it fill in. It defers to an installed service rather than running a second shipper,
+  skips if one is already running, and is started AFTER the invite password rotation from a
+  re-read config so the daemon never holds the pre-rotation password. `--no-ship` still
+  skips it. Both install paths (invite `--env` and direct `--url/--user`) and `onboard`
+  (which calls install) are covered. Verified end to end: install returns in ~0s and the
+  detached shipper comes up alive.
+
 ## 0.12.2 — 2026-08-20
 
 - **The Claude plugin now reports the real version.** `plugin.json` carried a hardcoded

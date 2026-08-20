@@ -876,6 +876,40 @@ async function sortingKeyProblem(cfg) {
   } catch { return null; }  // unreachable house is a different check's problem
 }
 
+// Start the shipper as a BACKGROUND daemon instead of blocking install on a full first
+// pass. A fresh member's first ship loads the ENTIRE local backlog — yigido's was 558
+// sessions / 224s — and running it synchronously (the old `run(SHIP_JS)`) made `install`
+// sit silent for minutes and read as hung. Detached, install returns at once, the history
+// loads in the background, and the loop keeps shipping. Mirrors cmdStart's shipper daemon,
+// and defers to an installed service rather than running a second shipper beside it.
+//
+// Must be called AFTER finishInvite: rotation rewrites the env file, so the daemon has to
+// be spawned from a RE-READ config (resolveConfig()) or it would carry the old password.
+function startShipperBackground(cfg) {
+  let svc = { installed: false, running: false };
+  try { svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { /* unsupported platform */ }
+  if (svc.installed) {
+    console.log(svc.running
+      ? ok('shipping runs under the installed service — nothing to start')
+      : warn('a shipper service is installed but stopped — start it:  memhouse service start'));
+    return;
+  }
+  const existing = pidOf('shipper');
+  if (existing) { console.log(ok(`shipper already running in the background (pid ${existing})`)); return; }
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  const logPath = path.join(LOG_DIR, 'shipper.log');
+  const log = fs.openSync(logPath, 'a');
+  const child = spawn(process.execPath, [SHIP_JS, '--loop', String(flags.interval || 300)], {
+    env: childEnv(cfg), detached: true, stdio: ['ignore', log, log],
+  });
+  fs.writeFileSync(path.join(RUN_DIR, 'shipper.pid'), String(child.pid));
+  child.unref();
+  console.log(ok(`shipper started in the background (pid ${child.pid}) — loading your history now`));
+  console.log('  a large first ship can take a few minutes; watch it finish with:  memhouse status');
+  console.log('  dashboard (browse / search / analyze):  memhouse start');
+}
+
 async function cmdInstall({ interactive }) {
   // --env <file>: an INVITE intake. The file carries MEMHOUSE_URL/USER/PASSWORD/DB from
   // `memhouse invite` on the admin's machine; loading it into the environment BEFORE
@@ -971,12 +1005,14 @@ async function cmdInstall({ interactive }) {
       console.log(ok(`host identity: ${me.id}`));
       console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
     }
-    if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
     console.log(ok('installed'));
     console.log('  adding a housemate later is two statements for the admin:');
     console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
     printGettingStarted(cfg);
     await finishInvite(cfg);
+    // The first ship loads the whole backlog; do it in the background so install returns
+    // now. resolveConfig() re-reads the env file finishInvite may have just rotated.
+    if (flags['no-ship'] !== true) startShipperBackground(resolveConfig());
     return 0;
   }
 
@@ -1127,12 +1163,11 @@ async function cmdInstall({ interactive }) {
     console.log(ok(`host identity: ${me.id}`));
     console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
   }
-  if (flags['no-ship'] !== true) {
-    if (run(SHIP_JS, [], cfg) !== 0) return 1;
-  }
   console.log(ok('installed'));
   printGettingStarted(cfg);
   await finishInvite(cfg);
+  // Background first ship — same reasoning as the invite branch above.
+  if (flags['no-ship'] !== true) startShipperBackground(resolveConfig());
   return 0;
 }
 
