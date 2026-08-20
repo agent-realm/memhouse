@@ -671,7 +671,11 @@ GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
 -- Self-scoped ALTER USER: the member may change THEIR OWN password and no one else's.
 -- \`ON ${member}\` names exactly this user, so \`memhouse passwd\` needs no admin, and an
 -- invited member can make an inviter-set password their own. Verified non-escalating:
--- the holder cannot alter another user, nor grant this on another user.
+-- the holder cannot alter another user, nor grant this on another user, nor forge another
+-- identity (user_id is server-side currentUser()). The one thing this grant also permits
+-- is a member dropping their OWN async-insert pin, which on some ClickHouse versions
+-- makes their OWN rows land with an empty user_id — self-inflicted, within the collaborator
+-- trust model, flagged by \`memhouse doctor\`, and re-asserted on every \`ship --ensure-schema\`.
 GRANT ALTER USER ON ${member} TO ${member};
 
 -- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
@@ -751,7 +755,17 @@ async function adminBootstrap(cfg, admin) {
       }
     }
     try { await q(`CREATE USER ${admin.member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}'`, { database: '' }); }
-    catch (e) { console.log(bad(`could not create user '${admin.member}': ${e.message}`)); return null; }
+    catch (e) {
+      console.log(bad(`could not create user '${admin.member}': ${e.message}`));
+      // The stored-credential invite path chose this credential from a cheap
+      // system.users read-probe, which does not prove CREATE USER rights. If that is why
+      // we are here, name the real fix rather than leaving a raw ACCESS_DENIED.
+      if (admin.quiet && /Not enough privileges|ACCESS_DENIED/i.test(e.message || '')) {
+        console.log('  your configured credential can read users but not create them —');
+        console.log('  pass an admin that can:  memhouse invite … --admin-user <a> --admin-password <p>');
+      }
+      return null;
+    }
     console.log(ok(`created ClickHouse user '${admin.member}'`));
     createdUser = admin.member;
   }
@@ -1127,7 +1141,13 @@ async function finishInvite(cfg) {
     }
     if (go) {
       const code = await cmdPasswd({ quiet: true });
-      if (code !== 0) console.log(warn('rotation did not complete — the inviter still knows this password; retry: memhouse passwd'));
+      if (code !== 0) {
+        // Rotation failed and its own state may be uncertain — KEEP the invite file (it
+        // still carries the password the config was just written from) so nothing is
+        // stranded, and do not claim it is spent.
+        console.log(warn(`rotation did not complete — keeping ${_inviteFileToShred} for now; retry: memhouse passwd`));
+        return;
+      }
     } else {
       console.log(warn('keeping the invited password — rotate when ready:  memhouse passwd'));
     }
@@ -2630,9 +2650,17 @@ async function cmdInvite() {
     console.log(bad('--admin-user given without --admin-password')); return 1;
   }
 
-  const built = await adminBootstrap({ ...cfg, url, db, stated: true }, {
+  // WHERE to connect to provision. --url is the address the INVITEE will use — it may be
+  // a LAN IP or tunnel that is not this admin's own endpoint, and sending the stored
+  // credential there would hand it to whatever answers a typo'd or hostile --url. So the
+  // stored-credential path provisions at the admin's OWN configured cfg.url; only an
+  // EXPLICIT --admin-* (where the admin typed the target themselves) provisions at --url.
+  // Either way the invite FILE carries --url, the invitee's path.
+  const provisionUrl = flags['admin-user'] ? url : cfg.url;
+  const built = await adminBootstrap({ ...cfg, url: provisionUrl, db, stated: true }, {
     user: adminUser, password: adminPass || '', member: name, quiet: true,
   });
+  if (built) built.url = url; // the invitee reaches the house at --url, not the admin's endpoint
   if (!built) return 1;
 
   const out = path.resolve(flags.out && flags.out !== true ? String(flags.out) : `invite-${name}.env`);
@@ -2697,22 +2725,46 @@ async function cmdPasswd({ quiet = false, forNext = null } = {}) {
   // credential only for a pre-0.11 member (or a house minted without access management),
   // and only if one was supplied.
   const adminUser = flags['admin-user'];
-  let via = { ...cfg };
-  let usedAdmin = false;
   try {
     await ch(cfg, `ALTER USER \`${cfg.user}\` IDENTIFIED BY '${escPw}'`, { database: '' });
   } catch (selfErr) {
+    const m = selfErr && selfErr.message ? selfErr.message : String(selfErr);
+    // ONLY a privilege refusal means "cannot self-rotate, try admin". A transport error
+    // (timeout, connection reset) must be REPORTED, not silently relabelled as a pre-0.11
+    // member — and it must not be reconciled as a lost-response success below, because the
+    // ALTER may never have reached the server.
+    if (!/Not enough privileges|ACCESS_DENIED/i.test(m)) {
+      // The ALTER may have COMMITTED and only the response was lost — check before giving
+      // up, or a random new password vanishes and the member is locked out. If the OLD
+      // credential no longer works, the change took: persist the new one we still hold.
+      try {
+        await ch(cfg, 'SELECT 1', { database: '' });
+        console.log(bad(`could not rotate: ${m.split('\n')[0]}`));
+        console.log('  the old password still works and nothing was changed — retry.');
+        return 1;
+      } catch {
+        try {
+          await ch({ ...cfg, password: next }, 'SELECT 1', { database: '' });
+          console.log(warn('the rotation response was lost, but the new password is live — saving it.'));
+          writeEnvFile({ ...cfg, password: next });
+          if (!quiet) console.log(ok(`password rotated for '${cfg.user}'`));
+          return 0;
+        } catch {
+          console.log(bad(`rotation is in an unknown state: ${m.split('\n')[0]}`));
+          console.log('  neither the old nor a new password authenticates — recover as admin (ALTER USER … IDENTIFIED BY …).');
+          return 1;
+        }
+      }
+    }
     if (!adminUser || flags['admin-password'] === undefined) {
       console.log(bad(`'${cfg.user}' cannot change its own password on this house (pre-0.11 member, or no access management).`));
       console.log('  Rotate with an admin credential:  memhouse passwd --admin-user <a> --admin-password <p>');
       return 1;
     }
-    via = { ...cfg, user: adminUser, password: flags['admin-password'] || '' };
-    usedAdmin = true;
+    const via = { ...cfg, user: adminUser, password: flags['admin-password'] || '' };
     try { await ch(via, `ALTER USER \`${cfg.user}\` IDENTIFIED BY '${escPw}'`, { database: '' }); }
     catch (e) { console.log(bad(`could not rotate: ${e.message}`)); return 1; }
   }
-  void usedAdmin;
   // Prove the new credential BEFORE persisting it — a password changed on the server but
   // unverified here would strand the very install it was meant to protect.
   try { await ch({ ...cfg, password: next }, 'SELECT 1', { database: '' }); }

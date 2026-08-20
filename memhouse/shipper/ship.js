@@ -60,7 +60,7 @@ const selfUpdate = require('../self-update');
 // gets. Taking it later would record whatever an upgrade had already replaced.
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
-  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION,
+  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN,
   SUPPORTED_SCHEMAS, keyProblem,
 } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
@@ -495,6 +495,16 @@ async function ensureSchema(client) {
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
   await warnMissingColumns(client, rooms);
+  // Re-assert the async-insert pin. A 0.11 member holds ALTER USER on themselves (so
+  // `memhouse passwd` needs no admin) — and that same grant lets them drop the pin
+  // (`ALTER USER <self> SETTINGS NONE`), which on some ClickHouse versions makes their
+  // OWN async inserts land with an empty user_id. It cannot forge another identity
+  // (currentUser() is server-side) and doctor flags any blank user_id, but re-adding the
+  // pin here means an accidental or transient drop self-heals on the next --ensure-schema
+  // (install, update, migrate). Best-effort: a member who cannot ADD SETTING just stays
+  // as they were.
+  try { await client.command({ query: `ALTER USER \`${rooms.user}\` ADD SETTING ${MEMBER_PIN}`, clickhouse_settings: { async_insert: 0 } }); }
+  catch { /* no self-alter grant (pre-0.11), or not permitted — leave it */ }
   // The rooms are at this schema generation — the assertion above is what makes that a
   // fact rather than a claim. Recording it here means a house built by `install` is
   // already stamped, instead of looking un-migrated until its first ship pass.
