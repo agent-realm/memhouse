@@ -199,24 +199,43 @@ which is also why joining a ClickHouse someone else runs (a kernel's, a team's) 
 no negotiation beyond a database and a credential. Housemates are collaborators;
 groups that should not see each other get separate houses.
 
-### Imported history is protected
+### The house never destroys what it cannot rebuild
 
-Rows carry an `origin`. The shipper clears a session before re-inserting it, so a
-shorter re-parse can't leave a stale tail behind — but that clear only removes rows
-the shipper itself wrote (`origin='ship'`). Anything you imported from an older
-house, another product, or a machine that no longer exists survives a re-ship.
+**The shipper is insert-only.** It runs no `DELETE`, no `TRUNCATE`, no mutation of any
+kind, so no privilege it holds can lose you a row.
 
-`origin` is in the sorting key of `messages` and `tool_calls` too, so
-ReplacingMergeTree can't quietly collapse an imported row against a shipped one. Both
-halves matter: guarding only the delete still loses data, through the merge instead of
-the mutation.
+That is not free, because ReplacingMergeTree is a dedupe engine, not a diff engine: a
+re-parse yielding *fewer* messages leaves the old higher-`seq` rows with nothing written
+over them. The shipper used to delete the session's rows first to clear that tail — and
+a shorter re-parse has two indistinguishable causes. Either an adapter bug was fixed and
+the extra rows are junk, or Claude Code **compacted** the transcript, or the retention
+window (`cleanupPeriodDays`, 30 days by default) took it. In the last two cases the house
+holds the only surviving copy, and the delete destroyed it.
 
-`sessions` is the deliberate exception — one row per session, no `origin` in its key.
-A session's metadata has a single current version, and keying it on origin gives the
-same session two rows, which makes every rollup count its messages twice.
+So rows carry an `epoch`: which parse of the session they belong to.
 
-The shipper checks both directions before it writes and prints the rebuild if a house
-has it wrong, so an old house cannot be corrupted by a new shipper.
+- **Nothing changed** (the common case, including ordinary growth): same epoch, rows
+  dedupe exactly as before, no extra storage.
+- **Shorter, or rewritten at a position the house already holds**: the new parse goes to
+  `epoch + 1`. The old one stays complete and readable. You pay storage only when the old
+  rows are irreplaceable.
+
+Reads show one parse per session — the newest — so counts, tokens and cost are unchanged.
+`memhouse:sql` and any hand-written query should filter the same way; the skill carries
+the clause.
+
+**Imported history is protected the same way.** `origin` says who wrote a row, and it is
+in the sorting key of `messages` and `tool_calls`, so ReplacingMergeTree cannot collapse
+an imported row against a shipped one. Anything you imported from an older house, another
+product, or a machine that no longer exists survives every re-ship. `sessions` is the
+deliberate exception — one row per session, no `origin` and no `epoch` in its key, because
+a session's metadata has a single current version and a second row makes every rollup
+count its messages twice.
+
+The shipper verifies the sorting keys before it writes and refuses if they are wrong, so
+an old house cannot be corrupted by a new shipper. `memhouse migrate-rooms` rebuilds it:
+copy, atomic swap, and the old room kept as `<room>_pre_epoch` for you to drop. The house
+records the move in `house_events`, and `memhouse doctor` reads it back.
 
 ## Troubleshooting
 

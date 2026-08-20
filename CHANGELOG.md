@@ -4,6 +4,44 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.10.0 — unreleased
+
+**The shipper stops deleting.** Breaking on the room schema: an existing house needs
+`memhouse migrate-rooms` before it can be shipped into.
+
+- **`DELETE FROM` is gone from the shipper**, and with it the only privilege whose misuse
+  loses data — nothing memhouse runs needs `ALTER DELETE` any more. The clear existed to
+  remove the stale `seq` tail a shorter re-parse leaves behind (ReplacingMergeTree dedupes
+  same-key rows; it cannot remove a row the new parse no longer produces). It could not
+  tell a fixed adapter bug from a **compacted or expired transcript** — Claude Code
+  rewrites sessions in place and deletes them after `cleanupPeriodDays`, 30 days by
+  default — so it destroyed content the house was the last copy of.
+- **`epoch` joins `origin` in the sorting key** of `messages` and `tool_calls`. A re-parse
+  that is shorter than the stored one, or that differs from it at a `seq` the house already
+  holds (compared on the stored `line_hash`), is written under a new epoch; the superseded
+  parse stays complete and readable. An unchanged or merely longer re-parse reuses its
+  epoch and dedupes exactly as before, so the common case costs nothing.
+- **Reads show one parse per session.** `roomNames()` resolves `messages` and `tool_calls`
+  to a current-epoch subquery, and the bare tables only as `messages_raw` /
+  `tool_calls_raw` for writes and DDL. Counts, tokens and cost are unchanged. Hand-written
+  SQL needs the filter — `/memhouse:sql` carries it.
+- **`memhouse migrate-rooms`** rebuilds rooms whose sorting key predates this version:
+  copy, one atomic `RENAME`, old room kept as `<room>_pre_epoch` for the pilot to drop.
+  Nothing is deleted, and `user_id` is carried across explicitly rather than restamped —
+  it is `MATERIALIZED currentUser()`, so a plain `INSERT SELECT` would reassign every row
+  in a shared house to whoever ran the migration. Rows a running shipper writes during the
+  copy are picked up afterwards.
+- **The house keeps a record of itself**: `house_meta` (schema version, per-member client
+  version) and the append-only `house_events` (migrations pending/applied/failed, version
+  changes, actor, host, row counts). `memhouse doctor` reads it back, so a migration that
+  died between the copy and the swap is reported rather than left to be noticed.
+- **Fixed: the schema column healer had been dead** since the rooms became plain shared
+  tables. It matched `<type>_{{MEMBER}}`, which no longer exists, so it compared zero
+  columns — while `ensureSchema`, `--ensure-schema`, `warnMissingColumns` and `doctor` all
+  reported success over that empty comparison.
+- `npm run test:house` — the first tests that run against a real ClickHouse (throwaway
+  container, fixture adapters). Green on 25.11 and 26.7.
+
 ## 0.9.0 — 2026-08-16
 
 **`node:sqlite`.** Breaking on the Node floor, and the reason `npm i -g memhouse` is

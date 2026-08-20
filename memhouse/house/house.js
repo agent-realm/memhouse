@@ -33,6 +33,77 @@
 
 const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
 
+/**
+ * The house's own record of itself — not rooms. Nothing about a conversation lives in
+ * them, the shipper's guards do not require them, and a member who cannot create them
+ * still ships normally.
+ */
+const META_TYPES = ['house_meta', 'house_events'];
+
+/**
+ * What generation of the schema a house is at. Bumped only when existing rooms have to be
+ * REBUILT to keep working — a new column is not a version, because ensureSchema rolls one
+ * out in place.
+ *
+ *   1  0.4.x–0.9.x  shared rooms, origin in the transcript keys
+ *   2  0.10.0       epoch in the transcript keys; the shipper became insert-only
+ *
+ * A house at 1 is not broken, it is un-migrated: its rooms cannot hold two parses of a
+ * session, so the shipper refuses to write rather than overwrite. `memhouse migrate-rooms`
+ * moves it to 2.
+ */
+const SCHEMA_VERSION = 2;
+const MIGRATIONS = {
+  2: '0100-epoch-key',
+};
+
+/**
+ * The sorting key each room MUST have, as the column list ClickHouse reports in
+ * `system.tables.sorting_key`. Canonical here because three places check it — the shipper
+ * before every pass, `doctor`, and the room rebuild — and they disagreed once already: the
+ * shipper's guard lived only in `--ensure-schema`, so 137 sessions shipped straight past
+ * it into a stale-key house.
+ *
+ * Two of the five columns are the whole data-safety story, and both were bought with
+ * measured losses:
+ *
+ *   origin — an imported row and a shipped row at the same seq must be TWO rows.
+ *            Without it RMT collapses them and the import loses; 27,948 messages went
+ *            that way on a real house.
+ *   epoch  — a superseded parse and its replacement must be TWO rows, so a re-parse that
+ *            shrinks or diverges can be written WITHOUT deleting what it replaces. This is
+ *            what removed the shipper's DELETE.
+ *
+ * `sessions` is deliberately keyed on neither: it holds exactly one metadata row per
+ * session, and a second one makes sessions_v join messages twice and over-report (measured
+ * on a real house — one duplicate row inflated the totals by 1,764 messages and 655M
+ * tokens).
+ */
+const ROOM_KEYS = {
+  sessions: ['session_id', 'user_id'],
+  messages: ['session_id', 'user_id', 'origin', 'epoch', 'seq'],
+  tool_calls: ['session_id', 'user_id', 'origin', 'epoch', 'idx'],
+};
+
+/**
+ * What is wrong with a room's sorting key, or null when nothing is. `sortingKey` is the
+ * raw `system.tables.sorting_key` value; pass '' for a table that reports none.
+ *
+ * An EXISTING room reporting no sorting key at all is not a MergeTree — a Merge, a View, a
+ * Log engine standing where a room belongs. Skipping that case let a ship pass sail past
+ * its own guard and die later on `DELETE query is not supported for table …`, and let
+ * doctor print "✓ sorting keys carry origin correctly (2/3 rooms)" over a broken house.
+ */
+function keyProblem(type, sortingKey) {
+  const want = ROOM_KEYS[type];
+  if (!want) return `'${type}' is not a room type`;
+  const key = String(sortingKey || '').trim();
+  if (!key) return 'not a MergeTree, so it cannot be shipped to';
+  const have = key.split(',').map((s) => s.trim()).filter(Boolean);
+  if (have.length === want.length && have.every((c, i) => c === want[i])) return null;
+  return `(${key}) — expected (${want.join(', ')})`;
+}
+
 // The one server-side setting a member carries, applied directly on the user with
 // ADD SETTING (bare `ALTER USER … SETTINGS` REPLACES the user's whole list — measured, it
 // wiped an operator-set ceiling; ADD SETTING merges and upserts). There is no settings
@@ -89,6 +160,71 @@ function assertUsableName(name, what = 'name') {
 }
 
 /**
+ * One table's CREATE statement, lifted verbatim out of the schema template and renamed.
+ *
+ * Used by the room rebuild, which cannot construct the DDL from a column list: the
+ * sorting key IS the thing being changed, and the text indexes on `messages` carry a
+ * syntax (`TYPE text(tokenizer = ngrams(3))`) that no column-level reconstruction would
+ * reproduce. Taking the statement whole means a migrated room is byte-for-byte the room a
+ * fresh install would create.
+ */
+function createStatement(tpl, table, asName) {
+  // `(?:--[^\n]*\n\s*)*` between the column list and ENGINE: the template comments the
+  // engine choice on some tables, and a pattern demanding `) ENGINE` silently matched
+  // nothing for those — which reads as "the template has no such table".
+  const m = tpl.match(new RegExp(
+    `CREATE TABLE IF NOT EXISTS ${table}\\s*\\([\\s\\S]*?\\n\\)\\s*(?:--[^\\n]*\\n\\s*)*ENGINE[\\s\\S]*?;`, 'm'));
+  if (!m) throw new Error(`the schema template declares no table '${table}'`);
+  return m[0].replace(`CREATE TABLE IF NOT EXISTS ${table}`, `CREATE TABLE ${asName || table}`);
+}
+
+/**
+ * A transcript room restricted to the CURRENT parse of each session — SQL text, usable
+ * wherever the table name would go.
+ *
+ * The shipper keeps superseded parses (see the epoch column in schema.sql.tpl), so the
+ * physical room can hold a session twice: five messages at epoch 0, three at epoch 1.
+ * Reading that raw does not merely show stale rows, it makes every aggregate wrong —
+ * `total_msgs`, token sums, cost, model counts — which is a worse failure than the stale
+ * tail the epoch replaced. The filter is therefore not optional, and it is not left to
+ * each query to remember: `roomNames()` hands out THIS for `messages` / `tool_calls`, and
+ * the bare table only under `messages_raw` / `tool_calls_raw`. A read path nobody thought
+ * to update is correct; a write path nobody updated fails loudly on an insert into a
+ * subquery.
+ *
+ * `origin != 'ship'` first, and it carries the weight: epochs belong to the shipper, and
+ * an imported row sits at epoch 0 forever. Filtering it against the shipper's current
+ * epoch would hide the entire import behind any session that had been compacted once —
+ * the same class of loss as the delete this design removed, arriving as a read that
+ * silently returns less.
+ *
+ * The projection is deliberate: `*` omits MATERIALIZED columns, and the ones this schema
+ * has are all load-bearing. `user_id` is what every consumer scopes by (the rollup JOINs
+ * on it) and `text_ngram` / `text_word` are what `memhouse search` matches against — a
+ * bare `SELECT *` drops all three, and the search fails with `Unknown identifier`.
+ * Listing them costs nothing where they are unused: ClickHouse prunes unread columns out
+ * of a subquery.
+ */
+const ROOM_MATERIALIZED = {
+  messages: ['user_id', 'text_ngram', 'text_word'],
+  tool_calls: ['user_id'],
+};
+
+function currentParse(table, epochSource = table) {
+  const extra = (ROOM_MATERIALIZED[table] || ['user_id']).join(', ');
+  return `(
+    SELECT *, ${extra}
+    FROM ${table} FINAL
+    WHERE origin != 'ship'
+       OR (session_id, user_id, epoch) IN (
+            SELECT session_id, user_id, max(epoch)
+            FROM ${epochSource}
+            WHERE origin = 'ship'
+            GROUP BY session_id, user_id)
+  )`;
+}
+
+/**
  * The session rollup as SQL text, usable in the same `FROM ... AS c` position a view name
  * would occupy. Groups by (session_id, user_id): two housemates' rows never merge, even
  * on a colliding session_id.
@@ -123,7 +259,7 @@ function sessionsRollup({ sessions, messages }) {
         coalesce(sumIf(length(m.text), m.role = 'assistant'), 0) AS assistant_chars,
         coalesce(substring(argMinIf(m.text, m.seq, m.role = 'user' AND m.text != ''), 1, 200), '') AS first_prompt
     FROM ${sessions} AS s FINAL
-    LEFT JOIN ${messages} AS m FINAL ON m.session_id = s.session_id AND m.user_id = s.user_id
+    LEFT JOIN ${messages} AS m ON m.session_id = s.session_id AND m.user_id = s.user_id
     GROUP BY s.session_id, s.user_id
     SETTINGS join_use_nulls = 1
   )`;
@@ -145,7 +281,22 @@ const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
  */
 function roomNames(user) {
   const out = { member: user, user };
-  for (const t of ROOM_TYPES) out[t] = t;
+  // The raw table names — for INSERT, for DDL, and for the shipper's own bookkeeping
+  // reads, which have to see every epoch to decide which one to write next.
+  for (const t of ROOM_TYPES) out[`${t}_raw`] = t;
+  // What everything else gets. `sessions` is unfiltered: it is one metadata row per
+  // session by construction, latest-wins, and carries no epoch anyone may read.
+  out.sessions = 'sessions';
+  out.messages = currentParse('messages');
+  // tool_calls takes its epoch from MESSAGES, not from itself. A parse that produces
+  // messages but NO tool calls is ordinary — a compaction can remove every assistant turn
+  // that called something — and it writes zero rows into this room at the new epoch. Asked
+  // for its own max(epoch), the room would answer with the SUPERSEDED epoch and serve the
+  // old parse's tool calls beside the new parse's messages. Both rooms are written by the
+  // same pass at the same epoch, so messages is the authority for both.
+  out.tool_calls = currentParse('tool_calls', 'messages');
+  // The house's own record of itself — plain names, nothing to filter.
+  for (const t of META_TYPES) { out[t] = t; out[`${t}_raw`] = t; }
   out.sessions_v = sessionsRollup(out);
   return out;
 }
@@ -164,7 +315,8 @@ async function resolveRooms(client) {
 }
 
 module.exports = {
-  ROOM_TYPES, READ_SETTINGS, MEMBER_PIN,
+  ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MIGRATIONS, ROOM_KEYS, keyProblem,
+  READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
-  sessionsRollup, roomNames, currentUser, resolveRooms,
+  sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,
 };
