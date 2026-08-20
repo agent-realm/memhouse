@@ -2223,7 +2223,16 @@ const sqlStr = (s) => `'${String(s == null ? '' : s).replace(/\\/g, '\\\\').repl
 /** Append one row to house_events. Never fatal: paperwork must not stop a migration. */
 async function houseEvent(cfg, e) {
   const cols = ['kind', 'id', 'status', 'from_version', 'to_version', 'host', 'rows_before', 'rows_after', 'detail'];
-  const vals = cols.map((c) => (typeof e[c] === 'number' ? String(e[c]) : sqlStr(e[c] || '')));
+  // Numeric columns render as 0 when absent, NEVER as ''. An event without rows_after —
+  // which is every pending and every failed row — rendered '' into a UInt64, ClickHouse
+  // refused the whole INSERT, and the catch below swallowed it: the ledger silently held
+  // only applied rows, so unfinishedBy() could never see a pending marker and the
+  // concurrent-migrator lock never engaged. Found by reading the ledger after a real
+  // refused migration and counting two rows where six belonged.
+  const NUMERIC = new Set(['rows_before', 'rows_after']);
+  const vals = cols.map((c) => (NUMERIC.has(c)
+    ? String(Number(e[c]) || 0)
+    : sqlStr(e[c] || '')));
   try {
     await ch(cfg, `INSERT INTO house_events (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
       { settings: { async_insert: 0 } });
