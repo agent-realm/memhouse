@@ -4,6 +4,20 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.11.2 — 2026-08-20
+
+- **`/mem:hello` leads with a what-is overview.** Before, the welcome skill only said
+  what memhouse *is* in its not-configured branch — a configured user got session counts
+  and a command tour but never the one-paragraph framing. It now gives a
+  state-independent overview first, in every state: a shipper reads 17 editors' session
+  files into a ClickHouse *house you own*, on any ClickHouse you point it at (local, your
+  own VM, or a managed/remote server — memhouse is not a hosted service and phones nothing
+  home), runs no LLM in its path, and outlives the transcripts editors delete after weeks.
+- **The tour now separates the three retrieval skills.** `/mem:ask`, `/mem:search` and
+  `/mem:sql` overlap enough that the same words work in each; the tour carries the rule
+  that tells them apart — **want a session → search, want an answer → ask, want a number →
+  sql** (ask runs a search then reads and cites; search stops at the list; sql aggregates).
+
 ## 0.11.1 — 2026-08-20
 
 - **Upgrading from 0.9.x needs one manual step**, and the tool now says so plainly. `memhouse update` runs the OLD version's update code (it replaces itself mid-run), and 0.9.x predates migrations — so it cannot prompt to migrate the house the way an upgrade from 0.10+ does. The first ship after such an upgrade refuses (nothing is lost) and now leads with the exact fix: **run `memhouse migrate` once, by hand.** From 0.11 onward the interactive prompt works normally. (Found upgrading a real 87k-message house.)
