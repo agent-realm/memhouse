@@ -26,8 +26,9 @@ FIRST. Only say you don't know after a search comes back empty.
 **How to query.** Prefer the installed skills when present: `/mem:ask` (answer a
 question from memory, with citations), `/mem:search` (full-text over messages),
 `/mem:sessions` (list/filter sessions), `/mem:sql` (free-form read-only SQL),
-`/mem:status` (what the system holds and its health), `/mem:share` and
-`/mem:users` (read-only sharing between users). Without skills, query directly.
+`/mem:status` (what the system holds and its health), `/mem:share` and `/mem:users`
+(read-only sharing between users), `/mem:invite` (mint a new member — inviting comes
+before sharing), `/mem:hello` (introduce the system). Without skills, query directly.
 
 **Table names.** The house's rooms are three plain, shared tables — `messages`,
 `sessions`, `tool_calls` — in the connection's database. Everyone in the house writes
@@ -63,8 +64,10 @@ the retained epochs are the only place that content still exists.
    WHERE session_id = '<id>' AND <CUR> ORDER BY seq SETTINGS final=1, join_use_nulls=1`
 
 **Rules.**
-- Memory is READ-ONLY for you. Never INSERT/ALTER/DROP — ingestion belongs to the
-  memhouse shipper alone.
+- Memory is READ-ONLY for you: never INSERT/ALTER/DROP the ROOMS (sessions, messages,
+  tool_calls) — ingestion belongs to the memhouse shipper alone. The one exception is
+  membership administration through the `memhouse` CLI: `/mem:invite` mints a user and
+  `/mem:share` grants read access, both via the tool, not by you writing to the rooms.
 - Quote retrieved content as *the user's past sessions*, and cite the session_id
   when the user may want to dig deeper.
 - Other users' HOUSES (other databases on the same server) are readable only when
