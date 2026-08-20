@@ -316,6 +316,13 @@ memhouse ${PKG.version} — agent conversation memory across 17 editors
 
 Setup        onboard              interactive wizard: discover → configure → ship → start
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
+                                  --env FILE installs from an invite file (see: invite)
+             invite <name>        mint a member + house on the server and write the env
+                                  file their install needs (--url --admin-user
+                                  --admin-password [--db NAME] [--out FILE]); local
+                                  machine untouched
+             passwd               rotate this member's password + rewrite the env file
+                                  (admin-assisted: --admin-user --admin-password)
                                   --print-sql            print the SQL, run it yourself
                                   with admin: --admin-user --admin-password [--member NAME]
                                   builds house + user + rooms + grants, then verifies as
@@ -818,6 +825,21 @@ async function sortingKeyProblem(cfg) {
 }
 
 async function cmdInstall({ interactive }) {
+  // --env <file>: an INVITE intake. The file carries MEMHOUSE_URL/USER/PASSWORD/DB from
+  // `memhouse invite` on the admin's machine; loading it into the environment BEFORE
+  // resolveConfig makes every value count as stated, and the rest of install runs
+  // unchanged — including the existing-config mismatch refusal and the config-last
+  // write. Nothing is persisted until the connection and rooms have proved out.
+  if (flags.env && flags.env !== true) {
+    let parsed;
+    try { parsed = envfile.parse(fs.readFileSync(String(flags.env), 'utf-8')); }
+    catch (e) { console.log(bad(`could not read --env ${flags.env}: ${e.message}`)); return 1; }
+    const wanted = ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB'];
+    const missing = wanted.filter((k) => k !== 'MEMHOUSE_PASSWORD' && !parsed[k]);
+    if (missing.length) { console.log(bad(`--env ${flags.env} is missing ${missing.join(', ')} — not an invite file?`)); return 1; }
+    for (const k of wanted) if (parsed[k] !== undefined) process.env[k] = parsed[k];
+    console.log(ok(`using the invite file ${String(flags.env)} (nothing persisted until the install proves out)`));
+  }
   let cfg = resolveConfig();
   const adminUser = flags['admin-user'];
 
@@ -912,7 +934,11 @@ async function cmdInstall({ interactive }) {
     return 1;
   }
 
-  const haveAll = flags.yes === true || (flags.url && flags.user !== undefined);
+  // An invite file answers every question an interactive install would ask — prompting
+  // after --env re-asks what the file already stated (measured: it prompted for the URL
+  // and an EOF'd stdin sailed through the defaults).
+  const haveAll = flags.yes === true || (flags.url && flags.user !== undefined)
+    || (flags.env && flags.env !== true);
   // --yes must not turn "unanswered" into "the default". Everywhere else in the product a
   // missing house is refused; here it was authenticated with.
   if (haveAll && !cfg.stated) {
@@ -1060,8 +1086,9 @@ function printGettingStarted(cfg) {
   console.log('     memhouse start                  dashboard + shipper loop (background daemons)');
   console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
   console.log('     memhouse service install        or: ship at login, no terminal needed');
-  console.log('     memhouse plugins install claude give your agents /mem:ask, /mem:search,');
-  console.log('                                     /mem:sessions, /mem:share, /mem:sql, /mem:status, /mem:users');
+  console.log('     memhouse plugins install claude give your agents /mem:hello, /mem:ask, /mem:search,');
+  console.log('                                     /mem:sessions, /mem:share, /mem:invite, /mem:sql,');
+  console.log('                                     /mem:status, /mem:users');
   console.log('     memhouse search <terms>         find a past conversation right now');
   console.log('     memhouse doctor                 every line a check mark = healthy');
   console.log('  The house keeps shipping as you work; nothing else to do.');
@@ -2474,6 +2501,108 @@ async function cmdNightly() {
   }
 }
 
+/**
+ * `memhouse invite <name> --url <house-url> --admin-user <a> --admin-password <p>
+ *                  [--db <house>] [--out <file>]`
+ *
+ * Mint a member on the server and hand back the ONE FILE their install needs — this
+ * machine's config is never touched and nothing local ships. The server half is exactly
+ * adminBootstrap (create user if absent, create house, GRANT ALL + SELECT WITH GRANT
+ * OPTION, async pin, then verify AS THE MEMBER), so an invited member is
+ * indistinguishable from one minted by a local admin install — /mem:share works for
+ * them on day one.
+ *
+ * The output file IS a credential. The header says so, the handoff advice names safe
+ * transfer, and rotation (memhouse passwd) is printed because the inviter knows this
+ * password until the invitee changes it.
+ */
+async function cmdInvite() {
+  const name = positional[0];
+  if (!name) { console.log('usage: memhouse invite <name> --url <house-url> --admin-user … --admin-password … [--db <house>] [--out <file>]'); return 2; }
+  try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(name, 'member'); }
+  catch (e) { console.log(bad(e.message)); return 1; }
+  const cfg = resolveConfig();
+  // The URL must be STATED and must work from the INVITEE's machine. cfg.url falls back
+  // to localhost:8123 — dead, or worse, someone else's house, on every other machine.
+  const url = flags.url && flags.url !== true ? String(flags.url) : null;
+  if (!url) { console.log(bad('an invite needs --url — the address the INVITEE will reach the house at')); return 1; }
+  if (/\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url) && flags['allow-local'] !== true) {
+    console.log(bad(`${url} is loopback — it points at the INVITEE's machine, not this house.`));
+    console.log('  Use an address they can reach (LAN IP, hostname, tunnel). --allow-local overrides');
+    console.log('  for the same-machine case.');
+    return 1;
+  }
+  const adminUser = flags['admin-user'];
+  if (!adminUser || flags['admin-password'] === undefined) {
+    console.log(bad('an invite mints a user and a database — that takes --admin-user and --admin-password'));
+    return 1;
+  }
+  const db = flags.db && flags.db !== true ? String(flags.db) : name;
+  try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(db, 'house'); }
+  catch (e) { console.log(bad(e.message)); return 1; }
+
+  const built = await adminBootstrap({ ...cfg, url, db, stated: true }, {
+    user: adminUser, password: flags['admin-password'] || '', member: name,
+  });
+  if (!built) return 1;
+
+  const out = path.resolve(flags.out && flags.out !== true ? String(flags.out) : `invite-${name}.env`);
+  const sq = envfile.quoteShell;
+  fs.writeFileSync(out, [
+    `# memhouse invite for '${name}' — THIS FILE IS A CREDENTIAL. Treat it like a password:`,
+    '# hand it over a channel you trust, delete it after install, and rotate afterwards',
+    '# (memhouse passwd) — whoever created this file knows the password inside it.',
+    `# Install: memhouse install --env ${path.basename(out)}`,
+    `MEMHOUSE_URL=${sq(built.url)}`,
+    `MEMHOUSE_USER=${sq(built.user)}`,
+    `MEMHOUSE_PASSWORD=${sq(built.password)}`,
+    `MEMHOUSE_DB=${sq(built.db)}`,
+    '',
+  ].join('\n'), { mode: 0o600 });
+  console.log(ok(`invite written: ${out}`));
+  console.log(`  hand it to ${name} over a channel you trust (croc, a password manager — not chat).`);
+  console.log(`  they run:   memhouse install --env ${path.basename(out)}`);
+  console.log(`  then they should rotate the password you now both know:  memhouse passwd`);
+  console.log(`  once installed, they are a member — sharing works both ways: /mem:share ${name}`);
+  return 0;
+}
+
+/**
+ * `memhouse passwd [--password <new>] --admin-user <a> --admin-password <p>`
+ *
+ * Rotate THIS install's member password and rewrite the env file. Admin-assisted by
+ * ClickHouse's rules — changing any password takes the ALTER USER privilege, which a
+ * member deliberately does not hold (holding it would let them alter EVERY user). The
+ * use case that makes rotation matter: an invited member's password was generated on
+ * the INVITER's machine, and stays known there until changed here.
+ */
+async function cmdPasswd() {
+  const cfg = requireConfig(resolveConfig(), 'passwd');
+  const adminUser = flags['admin-user'];
+  if (!adminUser || flags['admin-password'] === undefined) {
+    console.log(bad('changing a password takes the ALTER USER privilege, which members do not hold.'));
+    console.log('  memhouse passwd --admin-user <a> --admin-password <p>   (used once, never stored)');
+    console.log(`  Or as the admin directly:  ALTER USER ${cfg.user} IDENTIFIED BY '…'  then: memhouse setup --password …`);
+    return 1;
+  }
+  const next = flags.password && flags.password !== true ? String(flags.password) : generatePassword();
+  const adminCfg = { ...cfg, user: adminUser, password: flags['admin-password'] || '' };
+  try { await ch(adminCfg, `ALTER USER ${cfg.user} IDENTIFIED BY '${next.replace(/'/g, "\\'")}'`, { database: '' }); }
+  catch (e) { console.log(bad(`could not rotate: ${e.message}`)); return 1; }
+  // Prove the new credential BEFORE persisting it — a password changed on the server but
+  // unverified here would strand the very install it was meant to protect.
+  try { await ch({ ...cfg, password: next }, 'SELECT 1', { database: '' }); }
+  catch (e) {
+    console.log(bad(`the new password did not authenticate: ${e.message}`));
+    console.log('  the env file was NOT touched; the server may now disagree with it — fix as admin.');
+    return 1;
+  }
+  writeEnvFile({ ...cfg, password: next });
+  console.log(ok(`password rotated for '${cfg.user}' and ${ENV_FILE.replace(os.homedir(), '~')} updated`));
+  console.log('  restart anything that inlines the credential:  memhouse update --no-install');
+  return 0;
+}
+
 async function cmdUninstall() {
   // Confirm FIRST, before the first destructive act. This used to start removing the
   // service the moment it was typed — and "uninstall" is exactly the kind of command a
@@ -2698,6 +2827,8 @@ async function cmdUninstall() {
       }
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
+    case 'invite': process.exitCode = await cmdInvite(); break;
+    case 'passwd': process.exitCode = await cmdPasswd(); break;
     case 'nightly': process.exitCode = await cmdNightly(); break;
     case 'migrate': process.exitCode = await cmdMigrate({}); break;
     case 'migrate-rooms': process.exitCode = await cmdMigrate({ component: 'rooms' }); break;

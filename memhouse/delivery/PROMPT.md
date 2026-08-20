@@ -26,8 +26,9 @@ FIRST. Only say you don't know after a search comes back empty.
 **How to query.** Prefer the installed skills when present: `/mem:ask` (answer a
 question from memory, with citations), `/mem:search` (full-text over messages),
 `/mem:sessions` (list/filter sessions), `/mem:sql` (free-form read-only SQL),
-`/mem:status` (what the system holds and its health), `/mem:share` and
-`/mem:users` (read-only sharing between users). Without skills, query directly.
+`/mem:status` (what the system holds and its health), `/mem:share` and `/mem:users`
+(read-only sharing between users), `/mem:invite` (mint a new member — inviting comes
+before sharing), `/mem:hello` (introduce the system). Without skills, query directly.
 
 **Table names.** The house's rooms are three plain, shared tables — `messages`,
 `sessions`, `tool_calls` — in the connection's database. Everyone in the house writes
