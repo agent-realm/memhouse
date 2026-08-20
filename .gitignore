@@ -156,3 +156,6 @@ sandbox/vm-e2e/artifacts/
 
 # GitHub App credentials
 gha-creds-*.json
+
+# ClickHouse writes these when run from the repo dir (test/dev)
+preprocessed_configs/
