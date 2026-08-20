@@ -237,6 +237,27 @@ an old house cannot be corrupted by a new shipper. `memhouse migrate-rooms` rebu
 copy, atomic swap, and the old room kept as `<room>_pre_epoch` for you to drop. The house
 records the move in `house_events`, and `memhouse doctor` reads it back.
 
+## Upgrading
+
+`memhouse update` upgrades the code, restarts the daemons, and — from 0.10.0 onward —
+detects a schema migration the house needs and prompts to run it.
+
+**One exception: upgrading from 0.9.x.** That release predates migrations, and `update`
+runs the *old* version's code (it replaces itself mid-run), so it cannot prompt. After
+the upgrade the first ship refuses (nothing is lost) and tells you the one command to
+run by hand:
+
+```bash
+memhouse update      # installs the new version, refuses to ship the old-schema house
+memhouse migrate     # the one-time rebuild it named — copy + atomic swap, nothing deleted
+memhouse doctor      # every line a check mark
+```
+
+If other machines ship into the same house as the same member, upgrade them too — a
+pre-0.10 shipper still deletes-before-reinsert; `memhouse doctor` flags any that are
+behind, and prints the `REVOKE ALTER DELETE, ALTER UPDATE` fallback that stops them
+destructively until you can.
+
 ## Troubleshooting
 
 ### An editor reads zero sessions

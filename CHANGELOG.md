@@ -4,6 +4,10 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.11.1 — 2026-08-20
+
+- **Upgrading from 0.9.x needs one manual step**, and the tool now says so plainly. `memhouse update` runs the OLD version's update code (it replaces itself mid-run), and 0.9.x predates migrations — so it cannot prompt to migrate the house the way an upgrade from 0.10+ does. The first ship after such an upgrade refuses (nothing is lost) and now leads with the exact fix: **run `memhouse migrate` once, by hand.** From 0.11 onward the interactive prompt works normally. (Found upgrading a real 87k-message house.)
+
 ## 0.11.0 — 2026-08-20
 
 - **`memhouse invite <name>`** mints a member and their own house on the server (same

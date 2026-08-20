@@ -387,13 +387,15 @@ async function assertRoomKeys(client, rooms) {
   }
   if (wrong.length) {
     throw new Error(
-      'these rooms have the wrong sorting key, so a ship pass would corrupt them:\n'
+      'this house needs a one-time migration before it can be shipped to. Run:\n'
+      + '\n    memhouse migrate\n'
+      + '\n  (an upgrade from a pre-0.10 memhouse cannot prompt for this itself — the old\n'
+      + '  `update` command predates migrations, so run the line above once, by hand.)\n'
+      + '\n  Why: these rooms have the wrong sorting key, so a ship pass would corrupt them:\n'
       + wrong.map((s) => `    ${s}`).join('\n')
-      + '\n  ORDER BY cannot be altered in place — the rooms have to be rebuilt:'
-      + '\n    memhouse migrate-rooms'
-      + '\n  It copies each room into one with the current key, swaps them atomically, and'
-      + '\n  keeps the old one as <room>_pre_epoch for you to drop. Nothing is deleted.'
-      + '\n  A house with no imported rows can also just be re-shipped from scratch.');
+      + '\n  ORDER BY cannot be altered in place, so migrate copies each room into one with\n'
+      + '  the current key, swaps them atomically, and keeps the old one as <room>_pre_epoch\n'
+      + '  for you to drop. Nothing is deleted.');
   }
 }
 
