@@ -4,6 +4,22 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.6 — 2026-08-20
+
+- **Members can see who else is on the ClickHouse.** New accounts (via `memhouse invite`
+  and the admin install) now get `GRANT SHOW USERS ON *.* ` — read-only visibility of the
+  user list (names only; no passwords, no data), so `/mem:users` can answer "every user on
+  the server" and a member can find who to share with. It grants no read of anyone's rows;
+  that still needs an explicit `/mem:share`. Best-effort, like the self-`ALTER USER` grant:
+  an admin without access-management just skips it. Both grant paths carry it — the
+  programmatic `adminBootstrap` and the `--print-sql` template. (Existing members are
+  unaffected; grant them by hand: `GRANT SHOW USERS ON *.* TO <member>`.)
+- **The plugin nudges you when the client is behind.** `/mem:status` (and, quietly,
+  `/mem:hello`) now compare the installed `memhouse version` against the latest npm release
+  and, on a real gap (a minor/major behind, or many patches), offer `memhouse update` —
+  which upgrades the CLI and, since 0.12.5, refreshes the `/mem:*` plugin too. A patch or
+  two behind is mentioned gently or not at all; the skills never run the update themselves.
+
 ## 0.12.5 — 2026-08-20
 
 - **`memhouse update` now refreshes the Claude plugin too.** Before, update upgraded the

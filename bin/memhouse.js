@@ -687,6 +687,11 @@ GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
 -- trust model, flagged by \`memhouse doctor\`, and re-asserted on every \`ship --ensure-schema\`.
 GRANT ALTER USER ON ${member} TO ${member};
 
+-- See the OTHER members, read-only. SHOW USERS lets \`/mem:users\` list who is on this
+-- ClickHouse (names only — no passwords, no data) so a member can find who to share with.
+-- It grants no read of anyone's rows; reading a housemate's memory still needs /mem:share.
+GRANT SHOW USERS ON *.* TO ${member};
+
 -- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
 -- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
 -- currentUser() is computed during the INSERT, and an async flush stores it as the empty
@@ -795,8 +800,14 @@ async function adminBootstrap(cfg, admin) {
     // self-rotation.
     try { await q(`GRANT ALTER USER ON ${admin.member} TO ${admin.member}`, { database: '' }); }
     catch { /* admin without access-management: passwd stays admin-assisted for this member */ }
+    // See the OTHER members, read-only: SHOW USERS lets `/mem:users` list who is on this
+    // ClickHouse (names only — no passwords, no data) so a member can find who to share
+    // with. It grants no read of anyone's rows; that still needs an explicit /mem:share.
+    // Best-effort like ALTER USER above — an admin without access-management just skips it.
+    try { await q(`GRANT SHOW USERS ON *.* TO ${admin.member}`, { database: '' }); }
+    catch { /* no access-management: /mem:users section 4 stays admin-only for this member */ }
     await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
-    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', async_insert pinned`));
+    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', SHOW USERS, async_insert pinned`));
   } catch (e) {
     console.log(bad(`could not grant the house to '${admin.member}': ${e.message}`));
     if (createdUser) {
