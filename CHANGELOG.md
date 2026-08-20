@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.11.0 — 2026-08-20
 
 - **`memhouse invite <name>`** mints a member and their own house on the server (same
   verified path as the admin install — grants, grant option, async pin, connect-as-member
