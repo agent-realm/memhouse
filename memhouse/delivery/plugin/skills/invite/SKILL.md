@@ -21,31 +21,30 @@ substituted into a command — that burns the credential into the transcript on 
    the user to install it first (`npm install -g memhouse`) — there is no in-skill
    fallback, on purpose (see above).
 
-2. Gather, by ASKING the user in chat:
+2. Gather ONLY two things by asking:
    - the invitee's **name** (validate `[A-Za-z][A-Za-z0-9_]*`; refuse otherwise)
-   - optionally the **house** to put them in (`into <db>`). If the user does not name
-     one — or says "default"/"their own" — OMIT --db entirely; the CLI defaults the house
-     to the invitee's name. Only pass --db when they name a SPECIFIC shared house (e.g.
-     `team_a`). Never pass `--db default` for "the default house" — that is a literal
-     database named default.
    - the **URL the invitee will reach the house at** — NOT localhost (that is the
      invitee's own machine). A LAN IP, hostname, or tunnel.
-   - the **admin user name** (just the name).
 
-3. Try it WITHOUT an admin password first — `memhouse invite` uses the caller's own
-   configured credential when that credential can manage users (the common case for
-   whoever set the house up):
+   Do NOT ask for an admin user or password yet — the next step usually needs neither.
+   Only ask about a **shared house** if the user brings one up; default is the invitee's
+   own house (omit --db; never pass `--db default` for "the default house").
+
+3. TRY IT BARE FIRST — run this via the Bash tool. `memhouse invite` uses the caller's
+   OWN configured credential when it can manage users, which is the common case for
+   whoever set the house up, so no admin is needed:
 
    ```
    memhouse invite <name> --url <url> [--db <shared-house>]
    ```
 
-   Run that via the Bash tool. If it succeeds (`invite written: …`), skip to step 4.
+   If it prints `invite written: …`, go to step 4 — you are done, and no admin secret
+   ever touched this conversation.
 
-   If it fails with "your configured credential cannot create users", the caller's memhouse
-   user is a plain member and provisioning needs a real admin. DO NOT take the admin
-   password in chat — memhouse archives this transcript. Hand the user the line to run
-   THEMSELVES (a leading space keeps it out of shell history):
+   ONLY if it fails with "your configured credential cannot create users" does
+   provisioning need a real admin. Do NOT take the admin password in chat — memhouse
+   archives this transcript. Hand the user the line to run THEMSELVES (a leading space
+   keeps it out of shell history):
 
    ```
    memhouse invite <name> --url <url> [--db <shared-house>] --admin-user <admin> --admin-password 'PASTE_IT_HERE'
