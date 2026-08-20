@@ -2054,6 +2054,30 @@ async function cmdUpdate() {
   }
   console.log(ok('files updated'));
 
+  // Refresh the Claude plugin wherever it is ALREADY installed, so `update` keeps the
+  // skills in lockstep with the package instead of leaving a stale `/mem:*` behind. Only
+  // dirs that already have it are touched — update never installs the plugin somewhere new.
+  // The files copied are the ones npm/git just put on disk; the manifest is stamped with
+  // the FRESH package version read off disk (this process still runs the pre-upgrade code,
+  // so its in-memory PKG.version is a release behind).
+  try {
+    let fresh = PKG.version;
+    try { fresh = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')).version || fresh; } catch { /* keep in-memory */ }
+    const installed = claudeTargets().filter((t) => isPluginInstalled(t.dir));
+    for (const t of installed) {
+      const dst = installPluginInto(t.dir);
+      try {
+        const mf = path.join(dst, '.claude-plugin', 'plugin.json');
+        const m = JSON.parse(fs.readFileSync(mf, 'utf-8'));
+        if (m.version !== fresh) { m.version = fresh; fs.writeFileSync(mf, `${JSON.stringify(m, null, 2)}\n`); }
+      } catch { /* leave the stamp installPluginInto wrote */ }
+      console.log(ok(`plugin refreshed in ${short(t.dir)}`));
+    }
+    if (installed.length) console.log('  reload it in Claude Code:  /reload-plugins  (or restart the session)');
+  } catch (e) {
+    console.log(warn(`could not refresh Claude plugins: ${e.message.split('\n')[0]}`));
+  }
+
   // Restarting is the half a bare `npm i -g` leaves undone. The daemons notice on their own
   // within a loop interval (memhouse/self-update.js), but a pilot who typed `update` should
   // not have to wait for it, and the dashboard's stale bundle is visible immediately.
