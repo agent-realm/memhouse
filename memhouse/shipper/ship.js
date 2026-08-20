@@ -498,7 +498,12 @@ async function ensureSchema(client) {
   // The rooms are at this schema generation — the assertion above is what makes that a
   // fact rather than a claim. Recording it here means a house built by `install` is
   // already stamped, instead of looking un-migrated until its first ship pass.
-  await recordHouseState(client, rooms, hostId());
+  //
+  // MEMHOUSE_NO_RECORD is the invite path: `memhouse invite` runs this only to PROVE the
+  // new member can build the rooms, on a throwaway home. Recording would stamp a phantom
+  // <member>@<ephemeral-host> writer into a house the inviter never ships to — the
+  // invitee mints their real identity on their own first pass.
+  if (process.env.MEMHOUSE_NO_RECORD !== '1') await recordHouseState(client, rooms, hostId());
   return stmts.length;
 }
 

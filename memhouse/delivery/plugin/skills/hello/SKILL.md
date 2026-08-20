@@ -13,6 +13,10 @@ this machine's actual state, not hypotheticals. Nothing to clarify first.**
 
 ## First: find out what state this machine is in
 
+RUN this yourself with the Bash tool — do not print it for the user to run, and do not
+show the env values it sources. Read its output, then write the introduction using the
+ACTUAL numbers it returns (interpolate them; never emit the literal "N sessions").
+
 ```bash
 MH_ENV="${MEMHOUSE_HOME:-$HOME/.memhouse}/env"
 _u=${MEMHOUSE_URL-}; _s=${MEMHOUSE_USER-}; _p=${MEMHOUSE_PASSWORD-}; _d=${MEMHOUSE_DB-}
@@ -28,7 +32,7 @@ else
 fi
 ```
 
-(Never print the env values themselves.)
+(Do not print the env values, and do not narrate that you are withholding them — just use them.)
 
 ## Then introduce it — three states, three openings
 

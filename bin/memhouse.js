@@ -52,6 +52,7 @@ for (let i = 0; i < rest.length; i++) {
 const JSON_OUT = flags.json === true;
 
 let ONBOARDING = false;
+let _inviteFileToShred = null;
 
 // ── config ──────────────────────────────────────────────────────────────────────
 function readEnvFile() {
@@ -110,13 +111,14 @@ function requireConfig(cfg, what) {
   process.exit(2);
 }
 
-function childEnv(cfg) {
+function childEnv(cfg, override = {}) {
   return {
     ...process.env,
     // Set only by the install path, which prints its own refusal for this case.
     ...(cfg._quietDenied ? { MEMHOUSE_QUIET_DENIED: '1' } : {}),
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
+    ...override,
   };
 }
 
@@ -225,9 +227,9 @@ const ok = (s) => `  \x1b[32m✓\x1b[0m ${s}`;
 const bad = (s) => `  \x1b[31m✗\x1b[0m ${s}`;
 const warn = (s) => `  \x1b[33m•\x1b[0m ${s}`;
 
-function run(script, args, cfg, { inherit = true } = {}) {
+function run(script, args, cfg, envOverride = {}) {
   const r = spawnSync(process.execPath, [script, ...args], {
-    env: childEnv(cfg), stdio: inherit ? 'inherit' : 'pipe', encoding: 'utf-8',
+    env: childEnv(cfg, envOverride), stdio: 'inherit', encoding: 'utf-8',
   });
   return r.status ?? 1;
 }
@@ -729,11 +731,17 @@ async function adminBootstrap(cfg, admin) {
   } else {
     if (!password) {
       password = generatePassword();
-      console.log('');
-      console.log(`  password for '${admin.member}':  ${password}`);
-      console.log(`  Shown once. It goes into ${ENV_FILE}; to change it later:`);
-      console.log(`     ALTER USER ${admin.member} IDENTIFIED BY '…'   then: memhouse setup --password …`);
-      console.log('');
+      // For a local install the password must be SHOWN — it is the user's only copy. For
+      // an invite it must NOT: the caller writes it to the credential file, and printing
+      // it here would land it in the terminal and, via /mem:invite, in a transcript
+      // memhouse itself ships. admin.quiet is the invite path.
+      if (!admin.quiet) {
+        console.log('');
+        console.log(`  password for '${admin.member}':  ${password}`);
+        console.log(`  Shown once. It goes into ${ENV_FILE}; to change it later:`);
+        console.log(`     ALTER USER ${admin.member} IDENTIFIED BY '…'   then: memhouse setup --password …`);
+        console.log('');
+      }
     }
     try { await q(`CREATE USER ${admin.member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}'`, { database: '' }); }
     catch (e) { console.log(bad(`could not create user '${admin.member}': ${e.message}`)); return null; }
@@ -767,7 +775,14 @@ async function adminBootstrap(cfg, admin) {
   // The step that makes this trustworthy: stop being admin, and prove the credential we
   // are about to persist can build and reach the rooms itself.
   const memberCfg = { ...cfg, user: admin.member, password };
-  if (run(SHIP_JS, ['--ensure-schema'], memberCfg) !== 0) {
+  // An invite must not mint THIS machine's host identity, nor record the invitee as a
+  // <invitee>@<inviter-host> writer in a house the inviter will never ship to. Run the
+  // schema-build proof against a throwaway MEMHOUSE_HOME so host.json lands there and is
+  // discarded — the invitee mints their real identity on their own first ship.
+  const proofEnv = admin.quiet
+    ? { MEMHOUSE_HOME: fs.mkdtempSync(path.join(require('os').tmpdir(), 'mh-invite-')), MEMHOUSE_NO_RECORD: '1' }
+    : {};
+  if (run(SHIP_JS, ['--ensure-schema'], memberCfg, proofEnv) !== 0) {
     console.log(bad(`'${admin.member}' could not create the rooms in '${cfg.db}' — nothing written to disk`));
     return null;
   }
@@ -835,10 +850,17 @@ async function cmdInstall({ interactive }) {
     try { parsed = envfile.parse(fs.readFileSync(String(flags.env), 'utf-8')); }
     catch (e) { console.log(bad(`could not read --env ${flags.env}: ${e.message}`)); return 1; }
     const wanted = ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB'];
-    const missing = wanted.filter((k) => k !== 'MEMHOUSE_PASSWORD' && !parsed[k]);
-    if (missing.length) { console.log(bad(`--env ${flags.env} is missing ${missing.join(', ')} — not an invite file?`)); return 1; }
-    for (const k of wanted) if (parsed[k] !== undefined) process.env[k] = parsed[k];
+    // Password REQUIRED too — an edited/truncated invite that drops it would otherwise let
+    // resolveConfig fall back to an ambient or existing-config password, "succeeding" on
+    // this machine with a file that cannot authenticate on the invitee's.
+    const missing = wanted.filter((k) => !parsed[k]);
+    if (missing.length) { console.log(bad(`--env ${flags.env} is missing ${missing.join(', ')} — not a complete invite file?`)); return 1; }
+    // Clear ambient MEMHOUSE_* so ONLY the file speaks (exported vars normally win over the
+    // file; an invite intake is the one place they must not).
+    for (const k of ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB', 'MEMHOUSE_PORT']) delete process.env[k];
+    for (const k of wanted) process.env[k] = parsed[k];
     console.log(ok(`using the invite file ${String(flags.env)} (nothing persisted until the install proves out)`));
+    _inviteFileToShred = path.resolve(String(flags.env));
   }
   let cfg = resolveConfig();
   const adminUser = flags['admin-user'];
@@ -916,6 +938,7 @@ async function cmdInstall({ interactive }) {
     console.log('  adding a housemate later is two statements for the admin:');
     console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
     printGettingStarted(cfg);
+    shredInviteFile();
     return 0;
   }
 
@@ -1071,7 +1094,20 @@ async function cmdInstall({ interactive }) {
   }
   console.log(ok('installed'));
   printGettingStarted(cfg);
+  shredInviteFile();
   return 0;
+}
+
+// The invite file is a spent credential once its install succeeds. Delete it — its own
+// header told the user to, and leaving it is a plaintext password on disk. Best-effort,
+// announced, never fatal.
+function shredInviteFile() {
+  if (!_inviteFileToShred) return;
+  try {
+    fs.unlinkSync(_inviteFileToShred);
+    console.log(ok(`removed the spent invite file ${_inviteFileToShred} (it held your password)`));
+    console.log('  now rotate it, since whoever invited you still knows it:  memhouse passwd --admin-user … --admin-password …');
+  } catch { /* already gone, or read-only — the header still told them to delete it */ }
 }
 
 /**
@@ -2526,8 +2562,13 @@ async function cmdInvite() {
   // to localhost:8123 — dead, or worse, someone else's house, on every other machine.
   const url = flags.url && flags.url !== true ? String(flags.url) : null;
   if (!url) { console.log(bad('an invite needs --url — the address the INVITEE will reach the house at')); return 1; }
-  if (/\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url) && flags['allow-local'] !== true) {
-    console.log(bad(`${url} is loopback — it points at the INVITEE's machine, not this house.`));
+  let host = null;
+  try { host = new URL(url).hostname; } catch { console.log(bad(`--url is not a URL: ${url}`)); return 1; }
+  const hnorm = host.replace(/^\[|\]$/g, '').toLowerCase();
+  const isLoopback = hnorm === 'localhost' || hnorm === '::1' || hnorm === '0.0.0.0'
+    || /^127\./.test(hnorm) || /^127(\.\d+){0,2}$/.test(hnorm); // 127.x, and short forms like 127.1
+  if (isLoopback && flags['allow-local'] !== true) {
+    console.log(bad(`${url} is loopback (${host}) — it points at the INVITEE's machine, not this house.`));
     console.log('  Use an address they can reach (LAN IP, hostname, tunnel). --allow-local overrides');
     console.log('  for the same-machine case.');
     return 1;
@@ -2542,13 +2583,13 @@ async function cmdInvite() {
   catch (e) { console.log(bad(e.message)); return 1; }
 
   const built = await adminBootstrap({ ...cfg, url, db, stated: true }, {
-    user: adminUser, password: flags['admin-password'] || '', member: name,
+    user: adminUser, password: flags['admin-password'] || '', member: name, quiet: true,
   });
   if (!built) return 1;
 
   const out = path.resolve(flags.out && flags.out !== true ? String(flags.out) : `invite-${name}.env`);
   const sq = envfile.quoteShell;
-  fs.writeFileSync(out, [
+  const body = [
     `# memhouse invite for '${name}' — THIS FILE IS A CREDENTIAL. Treat it like a password:`,
     '# hand it over a channel you trust, delete it after install, and rotate afterwards',
     '# (memhouse passwd) — whoever created this file knows the password inside it.',
@@ -2558,7 +2599,24 @@ async function cmdInvite() {
     `MEMHOUSE_PASSWORD=${sq(built.password)}`,
     `MEMHOUSE_DB=${sq(built.db)}`,
     '',
-  ].join('\n'), { mode: 0o600 });
+  ].join('\n');
+  // Atomic + private + no symlink follow: write a fresh temp with O_EXCL at 0600, then
+  // rename over the target. writeFileSync's mode is IGNORED when the file already exists,
+  // so a stale 0644 invite would otherwise receive the new password world-readable, and a
+  // symlink at the path would be followed. rename also means no half-written file is ever
+  // readable as an invite.
+  const tmp = `${out}.${process.pid}.tmp`;
+  try {
+    const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    fs.writeSync(fd, body); fs.closeSync(fd);
+    fs.renameSync(tmp, out);
+    fs.chmodSync(out, 0o600);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* nothing staged */ }
+    console.log(bad(`the member was provisioned, but the invite file could not be written: ${e.message}`));
+    console.log(`  re-run with a writable --out, then rotate: the account exists as '${name}'.`);
+    return 1;
+  }
   console.log(ok(`invite written: ${out}`));
   console.log(`  hand it to ${name} over a channel you trust (croc, a password manager — not chat).`);
   console.log(`  they run:   memhouse install --env ${path.basename(out)}`);
@@ -2585,9 +2643,16 @@ async function cmdPasswd() {
     console.log(`  Or as the admin directly:  ALTER USER ${cfg.user} IDENTIFIED BY '…'  then: memhouse setup --password …`);
     return 1;
   }
+  // Validate the identity we are about to splice into an admin-authorized ALTER USER — a
+  // hand-edited env file is the one place cfg.user is not already vetted. Backtick-quote
+  // it regardless, and escape the new password for BOTH backslash and quote (quote-only
+  // left `\` live).
+  try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(cfg.user, 'user'); }
+  catch (e) { console.log(bad(e.message)); return 1; }
   const next = flags.password && flags.password !== true ? String(flags.password) : generatePassword();
+  const escPw = next.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   const adminCfg = { ...cfg, user: adminUser, password: flags['admin-password'] || '' };
-  try { await ch(adminCfg, `ALTER USER ${cfg.user} IDENTIFIED BY '${next.replace(/'/g, "\\'")}'`, { database: '' }); }
+  try { await ch(adminCfg, `ALTER USER \`${cfg.user}\` IDENTIFIED BY '${escPw}'`, { database: '' }); }
   catch (e) { console.log(bad(`could not rotate: ${e.message}`)); return 1; }
   // Prove the new credential BEFORE persisting it — a password changed on the server but
   // unverified here would strand the very install it was meant to protect.
@@ -2599,7 +2664,9 @@ async function cmdPasswd() {
   }
   writeEnvFile({ ...cfg, password: next });
   console.log(ok(`password rotated for '${cfg.user}' and ${ENV_FILE.replace(os.homedir(), '~')} updated`));
-  console.log('  restart anything that inlines the credential:  memhouse update --no-install');
+  console.log('  restart anything that inlines the credential here:  memhouse update --no-install');
+  console.log(warn('this rotated the ONE server credential — every OTHER machine you ship as'));
+  console.log(`  '${cfg.user}' now fails auth until it gets the new password (memhouse setup --password …).`);
   return 0;
 }
 
