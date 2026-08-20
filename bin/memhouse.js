@@ -53,6 +53,7 @@ const JSON_OUT = flags.json === true;
 
 let ONBOARDING = false;
 let _inviteFileToShred = null;
+let _inviteWantsRotate = false;
 
 // ── config ──────────────────────────────────────────────────────────────────────
 function readEnvFile() {
@@ -667,6 +668,12 @@ GRANT ALL ON ${db}.* TO ${member};
 -- they can open a read-only window into their own memory and can hand on nothing more.
 GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
 
+-- Self-scoped ALTER USER: the member may change THEIR OWN password and no one else's.
+-- \`ON ${member}\` names exactly this user, so \`memhouse passwd\` needs no admin, and an
+-- invited member can make an inviter-set password their own. Verified non-escalating:
+-- the holder cannot alter another user, nor grant this on another user.
+GRANT ALTER USER ON ${member} TO ${member};
+
 -- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
 -- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
 -- currentUser() is computed during the INSERT, and an async flush stores it as the empty
@@ -758,6 +765,13 @@ async function adminBootstrap(cfg, admin) {
     // read-only window into their OWN house for a housemate-to-be — and can hand on
     // nothing more, because the grant option stops at SELECT.
     await q(`GRANT SELECT ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
+    // Self-scoped ALTER USER — the member owns their own password (memhouse passwd needs
+    // no admin; an invitee can rotate the password the inviter set). Non-escalating: the
+    // grant names this one user, so it reaches no other account. Best-effort: a house on
+    // a ClickHouse where the admin lacks access-management can still ship, just without
+    // self-rotation.
+    try { await q(`GRANT ALTER USER ON ${admin.member} TO ${admin.member}`, { database: '' }); }
+    catch { /* admin without access-management: passwd stays admin-assisted for this member */ }
     await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
     console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', async_insert pinned`));
   } catch (e) {
@@ -861,6 +875,7 @@ async function cmdInstall({ interactive }) {
     for (const k of wanted) process.env[k] = parsed[k];
     console.log(ok(`using the invite file ${String(flags.env)} (nothing persisted until the install proves out)`));
     _inviteFileToShred = path.resolve(String(flags.env));
+    _inviteWantsRotate = parsed.MEMHOUSE_INVITE === '1';
   }
   let cfg = resolveConfig();
   const adminUser = flags['admin-user'];
@@ -938,7 +953,7 @@ async function cmdInstall({ interactive }) {
     console.log('  adding a housemate later is two statements for the admin:');
     console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
     printGettingStarted(cfg);
-    shredInviteFile();
+    await finishInvite(cfg);
     return 0;
   }
 
@@ -1094,20 +1109,35 @@ async function cmdInstall({ interactive }) {
   }
   console.log(ok('installed'));
   printGettingStarted(cfg);
-  shredInviteFile();
+  await finishInvite(cfg);
   return 0;
 }
 
-// The invite file is a spent credential once its install succeeds. Delete it — its own
-// header told the user to, and leaving it is a plaintext password on disk. Best-effort,
-// announced, never fatal.
-function shredInviteFile() {
-  if (!_inviteFileToShred) return;
-  try {
-    fs.unlinkSync(_inviteFileToShred);
-    console.log(ok(`removed the spent invite file ${_inviteFileToShred} (it held your password)`));
-    console.log('  now rotate it, since whoever invited you still knows it:  memhouse passwd --admin-user … --admin-password …');
-  } catch { /* already gone, or read-only — the header still told them to delete it */ }
+// After a successful install FROM AN INVITE: offer to rotate the shared password to one
+// only this machine knows (the member holds ALTER USER on themselves, so no admin), then
+// delete the spent file. Interactive offers (default yes); --yes rotates unasked; a
+// non-TTY without --yes only advises. All best-effort — a failed rotation never fails the
+// install, it just leaves the inviter's password in place with a warning.
+async function finishInvite(cfg) {
+  if (_inviteWantsRotate) {
+    let go = flags.yes === true;
+    if (!go && process.stdin.isTTY) {
+      const a = (await ask('This password was set by whoever invited you. Change it to one only you know now? (Y/n)', 'Y')).toLowerCase();
+      go = a === '' || a === 'y' || a === 'yes';
+    }
+    if (go) {
+      const code = await cmdPasswd({ quiet: true });
+      if (code !== 0) console.log(warn('rotation did not complete — the inviter still knows this password; retry: memhouse passwd'));
+    } else {
+      console.log(warn('keeping the invited password — rotate when ready:  memhouse passwd'));
+    }
+  }
+  if (_inviteFileToShred) {
+    try {
+      fs.unlinkSync(_inviteFileToShred);
+      console.log(ok(`removed the spent invite file ${_inviteFileToShred}`));
+    } catch { /* already gone, or read-only — the file's own header told them to delete it */ }
+  }
 }
 
 /**
@@ -2573,17 +2603,35 @@ async function cmdInvite() {
     console.log('  for the same-machine case.');
     return 1;
   }
-  const adminUser = flags['admin-user'];
-  if (!adminUser || flags['admin-password'] === undefined) {
-    console.log(bad('an invite mints a user and a database — that takes --admin-user and --admin-password'));
-    return 1;
-  }
   const db = flags.db && flags.db !== true ? String(flags.db) : name;
   try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(db, 'house'); }
   catch (e) { console.log(bad(e.message)); return 1; }
 
+  // Whose credential mints the member. Explicit --admin-* wins; otherwise TRY THE
+  // CONFIGURED ONE — an install made as an admin-capable ClickHouse user (access
+  // management) can invite with no extra flags, which is the common case for the person
+  // who set the house up. Fall back to asking only when the stored credential cannot
+  // read system.users (the proxy for "can it provision").
+  let adminUser = flags['admin-user'];
+  let adminPass = flags['admin-password'];
+  if (!adminUser) {
+    const c = requireConfig(cfg, 'invite');
+    if (!c.user) return 1;
+    try {
+      await ch({ ...c, url }, 'SELECT 1 FROM system.users LIMIT 1', { database: '' });
+      adminUser = c.user; adminPass = c.password;
+      console.log(ok(`inviting as your own credential '${c.user}' (it can manage users on this house)`));
+    } catch {
+      console.log(bad('your configured credential cannot create users on this house.'));
+      console.log('  Pass an admin that can:  --admin-user <a> --admin-password <p>');
+      return 1;
+    }
+  } else if (adminPass === undefined) {
+    console.log(bad('--admin-user given without --admin-password')); return 1;
+  }
+
   const built = await adminBootstrap({ ...cfg, url, db, stated: true }, {
-    user: adminUser, password: flags['admin-password'] || '', member: name, quiet: true,
+    user: adminUser, password: adminPass || '', member: name, quiet: true,
   });
   if (!built) return 1;
 
@@ -2591,13 +2639,17 @@ async function cmdInvite() {
   const sq = envfile.quoteShell;
   const body = [
     `# memhouse invite for '${name}' — THIS FILE IS A CREDENTIAL. Treat it like a password:`,
-    '# hand it over a channel you trust, delete it after install, and rotate afterwards',
-    '# (memhouse passwd) — whoever created this file knows the password inside it.',
+    '# hand it over a channel you trust, and delete it after install.',
+    '# The person who created it knows the password inside — so when you install, memhouse',
+    '# OFFERS to change it to one only you know (you were granted ALTER USER on yourself).',
     `# Install: memhouse install --env ${path.basename(out)}`,
     `MEMHOUSE_URL=${sq(built.url)}`,
     `MEMHOUSE_USER=${sq(built.user)}`,
     `MEMHOUSE_PASSWORD=${sq(built.password)}`,
     `MEMHOUSE_DB=${sq(built.db)}`,
+    '# This credential was issued by an invitation (no admin access here); memhouse offers',
+    '# to rotate it on install so the inviter no longer knows it.',
+    'MEMHOUSE_INVITE=1',
     '',
   ].join('\n');
   // Atomic + private + no symlink follow: write a fresh temp with O_EXCL at 0600, then
@@ -2634,26 +2686,33 @@ async function cmdInvite() {
  * use case that makes rotation matter: an invited member's password was generated on
  * the INVITER's machine, and stays known there until changed here.
  */
-async function cmdPasswd() {
+async function cmdPasswd({ quiet = false, forNext = null } = {}) {
   const cfg = requireConfig(resolveConfig(), 'passwd');
-  const adminUser = flags['admin-user'];
-  if (!adminUser || flags['admin-password'] === undefined) {
-    console.log(bad('changing a password takes the ALTER USER privilege, which members do not hold.'));
-    console.log('  memhouse passwd --admin-user <a> --admin-password <p>   (used once, never stored)');
-    console.log(`  Or as the admin directly:  ALTER USER ${cfg.user} IDENTIFIED BY '…'  then: memhouse setup --password …`);
-    return 1;
-  }
-  // Validate the identity we are about to splice into an admin-authorized ALTER USER — a
-  // hand-edited env file is the one place cfg.user is not already vetted. Backtick-quote
-  // it regardless, and escape the new password for BOTH backslash and quote (quote-only
-  // left `\` live).
   try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(cfg.user, 'user'); }
   catch (e) { console.log(bad(e.message)); return 1; }
-  const next = flags.password && flags.password !== true ? String(flags.password) : generatePassword();
+  const next = forNext || (flags.password && flags.password !== true ? String(flags.password) : generatePassword());
   const escPw = next.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  const adminCfg = { ...cfg, user: adminUser, password: flags['admin-password'] || '' };
-  try { await ch(adminCfg, `ALTER USER \`${cfg.user}\` IDENTIFIED BY '${escPw}'`, { database: '' }); }
-  catch (e) { console.log(bad(`could not rotate: ${e.message}`)); return 1; }
+  // SELF-ROTATION FIRST. Since 0.11 a member holds `ALTER USER ON <self>`, so changing
+  // their own password needs no admin. Try it as the member; fall back to an admin
+  // credential only for a pre-0.11 member (or a house minted without access management),
+  // and only if one was supplied.
+  const adminUser = flags['admin-user'];
+  let via = { ...cfg };
+  let usedAdmin = false;
+  try {
+    await ch(cfg, `ALTER USER \`${cfg.user}\` IDENTIFIED BY '${escPw}'`, { database: '' });
+  } catch (selfErr) {
+    if (!adminUser || flags['admin-password'] === undefined) {
+      console.log(bad(`'${cfg.user}' cannot change its own password on this house (pre-0.11 member, or no access management).`));
+      console.log('  Rotate with an admin credential:  memhouse passwd --admin-user <a> --admin-password <p>');
+      return 1;
+    }
+    via = { ...cfg, user: adminUser, password: flags['admin-password'] || '' };
+    usedAdmin = true;
+    try { await ch(via, `ALTER USER \`${cfg.user}\` IDENTIFIED BY '${escPw}'`, { database: '' }); }
+    catch (e) { console.log(bad(`could not rotate: ${e.message}`)); return 1; }
+  }
+  void usedAdmin;
   // Prove the new credential BEFORE persisting it — a password changed on the server but
   // unverified here would strand the very install it was meant to protect.
   try { await ch({ ...cfg, password: next }, 'SELECT 1', { database: '' }); }
@@ -2663,6 +2722,7 @@ async function cmdPasswd() {
     return 1;
   }
   writeEnvFile({ ...cfg, password: next });
+  if (quiet) { console.log(ok(`password rotated — this credential is now yours alone`)); return 0; }
   console.log(ok(`password rotated for '${cfg.user}' and ${ENV_FILE.replace(os.homedir(), '~')} updated`));
   console.log('  restart anything that inlines the credential here:  memhouse update --no-install');
   console.log(warn('this rotated the ONE server credential — every OTHER machine you ship as'));

@@ -16,6 +16,15 @@ migration path is planned work, not a promise the old versions can cash.
 - **`memhouse passwd`** rotates this member's password and rewrites the env file —
   admin-assisted by ClickHouse's rules (members deliberately hold no ALTER USER), and the
   reason it exists: an invited member's password is known to the inviter until rotated.
+- **Self-service password rotation.** Members are granted `ALTER USER ON <self>` — a
+  self-scoped grant (verified non-escalating: the holder cannot alter or grant on any
+  other user), so `memhouse passwd` needs no admin. It tries self-rotation first and only
+  falls back to `--admin-*` for a pre-0.11 member.
+- **`memhouse invite` uses your own credential when it can.** If the configured user can
+  manage users (an install made as an admin-capable ClickHouse user), no `--admin-*` is
+  needed. The invite file carries `MEMHOUSE_INVITE=1`, and `memhouse install --env` then
+  OFFERS to rotate the inviter-set password to one only the invitee knows (`--yes` does it
+  unasked) — so the inviter's knowledge of the password expires at install.
 - **`/mem:invite` and `/mem:hello`** — the invite flow and a grounded introduction from
   inside an agent. Inviting comes before sharing: a share can only grant a user who
   exists.

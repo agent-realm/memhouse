@@ -32,24 +32,31 @@ substituted into a command — that burns the credential into the transcript on 
      invitee's own machine). A LAN IP, hostname, or tunnel.
    - the **admin user name** (just the name).
 
-3. For the admin PASSWORD, do not accept it in chat. Tell the user to run the command
-   themselves so the secret never lands in this transcript, and give them the exact line
-   with everything else filled in:
+3. Try it WITHOUT an admin password first — `memhouse invite` uses the caller's own
+   configured credential when that credential can manage users (the common case for
+   whoever set the house up):
+
+   ```
+   memhouse invite <name> --url <url> [--db <shared-house>]
+   ```
+
+   Run that via the Bash tool. If it succeeds (`invite written: …`), skip to step 4.
+
+   If it fails with "your configured credential cannot create users", the caller's memhouse
+   user is a plain member and provisioning needs a real admin. DO NOT take the admin
+   password in chat — memhouse archives this transcript. Hand the user the line to run
+   THEMSELVES (a leading space keeps it out of shell history):
 
    ```
    memhouse invite <name> --url <url> [--db <shared-house>] --admin-user <admin> --admin-password 'PASTE_IT_HERE'
    ```
 
-   Note the standing tip: in most terminals they can prefix the line with a space to
-   keep it out of shell history. If the user insists you run it, run it but WARN first
-   that the admin password will be recorded in this conversation, which memhouse
-   archives — and prefer they run it themselves.
-
 4. When it succeeds it prints `invite written: invite-<name>.env`. Relay to the user:
    - hand `invite-<name>.env` to the invitee over a trusted channel (croc, a password
      manager — not chat); the file IS a password
-   - the invitee runs `memhouse install --env invite-<name>.env` (it deletes the file
-     and prompts them to rotate afterward)
+   - the invitee runs `memhouse install --env invite-<name>.env` — it OFFERS to change
+     the password to one only they know (they were granted rotation on their own account),
+     then deletes the file; so the password you set stops working once they install
    - once installed, sharing works: `/mem:share <name>` on either side
 
 ## Never
