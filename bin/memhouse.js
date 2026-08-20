@@ -1607,7 +1607,7 @@ async function cmdDoctor() {
       } else {
         keysCorrect = wrongKeys.length === 0;
         add(keysCorrect, `sorting keys${keysCorrect ? ` carry origin and epoch correctly (${checked}/${ROOM_TYPES.length} rooms)` : `: wrong on ${wrongKeys.join(', ')}`}`,
-          'those rooms predate the epoch key, so the shipper refuses to write into them.\n     rebuild them (nothing is deleted): memhouse migrate-rooms');
+          'those rooms predate the epoch key, so the shipper refuses to write into them.\n     rebuild them (nothing is deleted): memhouse migrate');
       }
     } catch (e) { add(false, 'sorting keys', e.message); }
     // What the house says about ITSELF — its schema generation and whether a rebuild was
