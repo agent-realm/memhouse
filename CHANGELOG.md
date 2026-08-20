@@ -4,6 +4,18 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.11.3 — 2026-08-20
+
+- **Read a friend's shared memory by naming their house.** A share is a read-only GRANT on
+  a whole house (a ClickHouse database), and the rooms resolve by the connection's
+  database — so `/mem:ask`, `/mem:search` and `/mem:sql` now recognize a house named in the
+  question ("how did yigit fix X", "search … in yigit", "query yigit's house"), resolve it
+  against `SHOW DATABASES`, and point the connection at that house with your own
+  credentials, read-only. A name that matches a readable house wins over the `in <project>`
+  qualifier — otherwise "in yigit" silently filtered your own project column and returned
+  nothing. `/mem:hello` now names the phrase, and `/mem:users` still lists the houses shared
+  with you.
+
 ## 0.11.2 — 2026-08-20
 
 - **`/mem:hello` leads with a what-is overview.** Before, the welcome skill only said

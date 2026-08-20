@@ -1,6 +1,6 @@
 ---
 name: ask
-description: Answer a question FROM conversation memory — retrieve the relevant past sessions out of the memhouse ClickHouse store, read the actual transcripts, and synthesize an answer with citations. Use when the user asks something their past work already answered, e.g. "how did I fix X last time", "what approach did we settle on for Y", "why did we choose Z", "have I solved this error before", "what did the reviewer say about W". This is the retrieve-and-answer skill; /mem:search is find-the-session, /mem:sql is run-a-query.
+description: Answer a question FROM conversation memory — retrieve the relevant past sessions out of the memhouse ClickHouse store, read the actual transcripts, and synthesize an answer with citations. Use when the user asks something their past work already answered, e.g. "how did I fix X last time", "what approach did we settle on for Y", "why did we choose Z", "have I solved this error before", "what did the reviewer say about W". Also answers from a friend's house shared with you when they name it ("how did yigit fix X", "ask yigit's memory"). This is the retrieve-and-answer skill; /mem:search is find-the-session, /mem:sql is run-a-query.
 user-invocable: true
 argument-hint: "<question about past work>"
 allowed-tools: Bash
@@ -46,6 +46,25 @@ SQL
 ```
 
 `readonly=1` is pinned on every request: this skill never writes.
+
+## Answering from another person's house (shared with you)
+
+The house is a ClickHouse database; a share is a read-only GRANT on it. When the user asks
+about a FRIEND's memory — "how did yigit fix X", "in yigit's house", "ask yigit's memory",
+"from yigit" — answer from THEIR house without changing your credentials:
+
+1. **Resolve the house.** `SHOW DATABASES` returns what your credential may read; a name
+   that is not `system` / `information_schema` / `default` and not your own `$MEMHOUSE_DB`
+   is a house shared with you. Match the named person to one; set `HOUSE=yigit`. With no
+   house named, `HOUSE=$MEMHOUSE_DB`.
+2. **Point the connection at it:** replace `database=${MEMHOUSE_DB:-mem}` with
+   `database=<HOUSE>` in the recipe above. The rooms (`messages`, `sessions`) resolve by
+   the connection's database, so retrieval, the transcript read, and the citation all run
+   against that house — leave the table names bare.
+3. **Cite the house.** Say whose memory the answer came from ("from yigit's house") so the
+   user never mistakes a friend's session for their own.
+4. **Read-only, thin by design.** A refused SELECT means the house was not shared with you
+   (or the share was revoked) — say so; never guess another database.
 
 ## The method — retrieve, read, answer, cite
 

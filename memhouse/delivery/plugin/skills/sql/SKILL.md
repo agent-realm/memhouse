@@ -1,6 +1,6 @@
 ---
 name: sql
-description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls tables on ClickHouse, shared by the house). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data.
+description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls tables on ClickHouse, shared by the house). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data — over your own house, or a friend's house shared with you when they name it.
 user-invocable: true
 argument-hint: "<question or SQL>"
 allowed-tools: Bash
@@ -99,6 +99,16 @@ by the connection's database (`MEMHOUSE_DB`), not by who is asking. Everyone in 
 writes into the same tables; `user_id` (stamped by the server) says whose row it is and
 `host` says which machine shipped it. Filter with `WHERE user_id = '<name>'` when you want
 one person, or leave it off for the whole house.
+
+**Another person's house (shared with you).** A house is a database; a share is a
+read-only GRANT on it. Because the rooms resolve by the connection's database, you read a
+friend's memory by pointing the connection at THEIR house — same credentials, different
+`database`. `SHOW DATABASES` lists what you may read; a name that is not `system` /
+`information_schema` / `default` and not your own `$MEMHOUSE_DB` is a house shared with
+you. When the user names one ("query yigit's house", "on yigit", "from yigit"), replace
+`database=${MEMHOUSE_DB:-mem}` with `database=<house>` in the connection recipe and leave
+the table names bare — or, to join across houses in one query, qualify tables explicitly
+(`yigit.messages`). Read-only: a refused SELECT means that house was not shared with you.
 
 **Keep the SQL heredoc quoted (`<<'SQL'`).** This skill once told the agent to substitute
 a shell variable into the table names, which cannot expand inside a quoted heredoc — so
