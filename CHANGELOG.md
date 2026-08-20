@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## 0.10.0 — unreleased
+## 0.10.0 — 2026-08-20
 
 **The shipper stops deleting.** Breaking on the room schema: an existing house needs
 `memhouse migrate-rooms` before it can be shipped into.
