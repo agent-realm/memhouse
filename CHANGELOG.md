@@ -4,6 +4,17 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.1 — 2026-08-20
+
+- **The skills no longer fall back to a hardcoded `mem` house.** A house is a database
+  named for its owner — `resolveConfig` defaults `MEMHOUSE_DB` to the connection's
+  username (`polat` ships into `polat.messages`), and `memhouse invite` mints a per-user
+  database. But the plugin skills hardcoded `${MEMHOUSE_DB:-mem}` in their connection
+  recipes, so a config missing `MEMHOUSE_DB` would silently query a `mem` house that the
+  user-named convention had moved on from. All eight skills now fall back to
+  `${MEMHOUSE_DB:-$MEMHOUSE_USER}`, matching the CLI. (The env file always sets
+  `MEMHOUSE_DB`, so this only bit an unset-DB config — but the stale default was wrong.)
+
 ## 0.12.0 — 2026-08-20
 
 - **`memhouse relocate --to <url>` moves a whole house to a new ClickHouse.** The copy is

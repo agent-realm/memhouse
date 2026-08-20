@@ -57,7 +57,7 @@ fi
 # in 50 samples). What actually leaks a credential is PRINTING it, which the rule above
 # covers.
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL

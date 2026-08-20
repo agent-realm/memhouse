@@ -39,7 +39,7 @@ if [ -z "${MEMHOUSE_URL:-}" ] || [ -z "${MEMHOUSE_USER:-}" ]; then
 fi
 
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT JSONEachRow
 SQL
@@ -57,7 +57,7 @@ about a FRIEND's memory — "how did yigit fix X", "in yigit's house", "ask yigi
    that is not `system` / `information_schema` / `default` and not your own `$MEMHOUSE_DB`
    is a house shared with you. Match the named person to one; set `HOUSE=yigit`. With no
    house named, `HOUSE=$MEMHOUSE_DB`.
-2. **Point the connection at it:** replace `database=${MEMHOUSE_DB:-mem}` with
+2. **Point the connection at it:** replace `database=${MEMHOUSE_DB:-$MEMHOUSE_USER}` with
    `database=<HOUSE>` in the recipe above. The rooms (`messages`, `sessions`) resolve by
    the connection's database, so retrieval, the transcript read, and the citation all run
    against that house — leave the table names bare.

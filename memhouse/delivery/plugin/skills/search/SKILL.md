@@ -50,7 +50,7 @@ fi
 # in 50 samples). What actually leaks a credential is PRINTING it, which the rule above
 # covers.
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
@@ -155,7 +155,7 @@ the connection's `database`, so one change redirects every query in this skill.
    "in yigit", "house yigit", "from yigit" — set `HOUSE=yigit`; otherwise leave
    `HOUSE=$MEMHOUSE_DB`.
 2. **Point the connection at it:** in the recipe above, replace
-   `database=${MEMHOUSE_DB:-mem}` with `database=<HOUSE>`. Leave the table names bare —
+   `database=${MEMHOUSE_DB:-$MEMHOUSE_USER}` with `database=<HOUSE>`. Leave the table names bare —
    they resolve to that house. Nothing else in the query changes.
 3. **A house wins over `in <project>`.** A name that matches a readable house is a HOUSE,
    not a project filter — otherwise "in yigit" silently filters YOUR house's project
