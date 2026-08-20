@@ -341,6 +341,30 @@ async function test(name, fn) {
       assert.deepStrictEqual(alive.result, {});
     });
 
+    await test('epoch fork (0.10 shipper): MCP reads serve only the current parse; sql over the raw room sees history', async () => {
+      // The insert-only shipper forks a session's epoch instead of DELETEing
+      // when a re-parse diverges. The {{messages}} token now resolves to a
+      // current-epoch subquery — search and get_session must see ONLY the
+      // latest parse, while the raw table keeps every epoch for history.
+      const E = 'claude-code:eeee0000-1111-2222-3333-444444444444';
+      await chq(`INSERT INTO sessions (session_id, source, host, name, folder, origin, message_count) VALUES
+        ('${E}', 'claude-code', 'mac1', 'epoch forked session', '/tmp/e', 'ship', 2)`);
+      await chq(`INSERT INTO messages (session_id, seq, source, host, ts, role, text, origin, epoch, line_hash) VALUES
+        ('${E}', 1, 'claude-code', 'mac1', '2026-08-14 10:00:00', 'user', 'old parse epoch-zero-text one', 'ship', 0, 21),
+        ('${E}', 2, 'claude-code', 'mac1', '2026-08-14 10:00:10', 'user', 'old parse epoch-zero-text two', 'ship', 0, 22),
+        ('${E}', 3, 'claude-code', 'mac1', '2026-08-14 10:00:20', 'user', 'old parse epoch-zero-text three', 'ship', 0, 23)`);
+      await chq(`INSERT INTO messages (session_id, seq, source, host, ts, role, text, origin, epoch, line_hash) VALUES
+        ('${E}', 1, 'claude-code', 'mac1', '2026-08-14 10:00:00', 'user', 'compacted parse epoch-one-text', 'ship', 1, 24),
+        ('${E}', 2, 'claude-code', 'mac1', '2026-08-14 10:00:10', 'user', 'compacted tail', 'ship', 1, 25)`);
+      const full = parseTool(await s.rpc('tools/call', { name: 'get_session', arguments: { session_id: E }, _meta: MODERN_META }));
+      assert.strictEqual(full.messages.length, 2, 'only the current epoch is served');
+      assert.ok(full.messages[0].text.includes('epoch-one'), 'and it is the NEW parse');
+      const stale = parseTool(await s.rpc('tools/call', { name: 'search', arguments: { q: 'epoch-zero-text' }, _meta: MODERN_META }));
+      assert.strictEqual(stale.matches, 0, 'search does not surface the superseded parse');
+      const raw = parseTool(await s.rpc('tools/call', { name: 'sql', arguments: { query: `SELECT count() AS n FROM messages WHERE session_id = '${E}'` }, _meta: MODERN_META }));
+      assert.strictEqual(Number(raw.rows[0].n), 5, 'the raw room keeps every epoch — history is retrievable by sql');
+    });
+
     await test('cancellation is one-shot: a reused id answers again after suppressing once', async () => {
       // JSON-RPC ids only have to be unique among in-flight requests. Cancel id
       // 777, then use it: the first response is suppressed AND the id is
