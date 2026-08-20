@@ -34,6 +34,25 @@ fi
 
 (Do not print the env values, and do not narrate that you are withholding them — just use them.)
 
+## What memhouse is — the overview (give this in every state, before the tour)
+
+One paragraph, grounded not sold: **memhouse is your personal, permanent archive of every
+AI coding session.** A background shipper reads the session files your editors write —
+Claude Code, Codex, Cursor, VS Code, Zed, OpenCode, Gemini CLI and 10 more, 17 in all —
+and ships them into a ClickHouse database you own, called a **house**. YOU choose that
+ClickHouse: a local one on your laptop, one on your own VM, or any ClickHouse server you
+control — managed or remote. memhouse itself is not a hosted service and phones nothing
+home; your sessions go only to the house you point it at, and it runs no LLM in its write
+or read path — it stores rows, the agent reading them (this chat) does the thinking. It
+outlives the transcripts on disk: editors compact and delete their local session files
+after weeks, so for anything older than ~30 days the house is the only place it still
+exists. One archive spans every editor, every project, every machine you ship from.
+
+What it gives you, in one breath: **ask** your own history a question and get a cited
+answer, **search** for the session you half-remember, **query** the raw data for numbers,
+browse a **dashboard**, and **invite** other people onto your ClickHouse so memories can be
+**shared** read-only. The tour below names each.
+
 ## Then introduce it — three states, three openings
 
 **Configured and answering** — open with the numbers: "Your memory holds N sessions
@@ -60,6 +79,12 @@ What you can DO from this chat:
 - `/mem:sessions` — browse and filter what's stored
 - `/mem:sql <question or SQL>` — ad-hoc analytics (tokens, costs, rankings)
 - `/mem:status` — is it healthy, how much is stored, which machines ship into it
+
+The first three overlap — same words work in each — so give the reader the rule that
+separates them: **want a session → search. Want an answer → ask. Want a number → sql.**
+`ask` runs a `search` first, then reads the turns it finds and writes you a cited answer;
+`search` stops at the ranked list of sessions; `sql` counts and aggregates the columns
+rather than hunting text.
 
 And around other people — **inviting comes before sharing**:
 
