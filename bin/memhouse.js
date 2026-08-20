@@ -667,15 +667,13 @@ CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'
 
 ${rooms.trim()}
 
--- The whole database. ALL on your own house reaches nothing outside it — the database is
--- the boundary — and it is what lets the shipper create and evolve its own tables.
-GRANT ALL ON ${db}.* TO ${member};
-
--- SELECT again, WITH GRANT OPTION — sharing, made self-serve and read-only by
--- construction. This is what lets the member run \`GRANT SELECT ON ${db}.* TO <friend>\`
--- themselves (/mem:share) without an operator, while the grant-option stops at SELECT:
--- they can open a read-only window into their own memory and can hand on nothing more.
-GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
+-- The whole database, WITH GRANT OPTION. ALL on your own house reaches nothing outside it
+-- — the database is the boundary — and it lets the shipper create and evolve its own
+-- tables. The grant option makes the member the real owner: they can hand on any of their
+-- own data (\`/mem:share\` still opens only a read-only SELECT window, but the owner is not
+-- boxed into read-only sharing of their own house). Scoped to this db, and no CREATE USER
+-- rides with it — a member still cannot mint accounts or reach another house.
+GRANT ALL ON ${db}.* TO ${member} WITH GRANT OPTION;
 
 -- Self-scoped ALTER USER: the member may change THEIR OWN password and no one else's.
 -- \`ON ${member}\` names exactly this user, so \`memhouse passwd\` needs no admin, and an
@@ -788,11 +786,12 @@ async function adminBootstrap(cfg, admin) {
   // reaches nothing outside the database, and it is what lets the member's own shipper
   // create and evolve the rooms (--ensure-schema below).
   try {
-    await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member}`, { database: '' });
-    // SELECT again, WITH GRANT OPTION: what /mem:share rides on. The member can open a
-    // read-only window into their OWN house for a housemate-to-be — and can hand on
-    // nothing more, because the grant option stops at SELECT.
-    await q(`GRANT SELECT ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
+    // ALL, WITH GRANT OPTION: the database is theirs, so they may do anything with their
+    // own data AND hand any of it on. /mem:share still opens only a read-only window (it
+    // grants SELECT), but the owner is not boxed into read-only sharing of their own house.
+    // Scoped to their db: the grant option reaches nothing outside it, and no CREATE USER
+    // comes with it, so a member still cannot mint accounts or touch another house.
+    await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
     // Self-scoped ALTER USER — the member owns their own password (memhouse passwd needs
     // no admin; an invitee can rotate the password the inviter set). Non-escalating: the
     // grant names this one user, so it reaches no other account. Best-effort: a house on
