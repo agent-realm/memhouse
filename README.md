@@ -76,7 +76,7 @@ memhouse update [--check]                  upgrade, restart daemons, check the s
 memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
-memhouse plugins install claude            /memhouse:search, :sessions, :sql —
+memhouse plugins install claude            /mem:search, :sessions, :sql —
                                            into every Claude Code config dir found
 memhouse prompt                            memory snippet for an agent's system prompt
 memhouse prompt --install                  an install prompt, rendered for this machine
@@ -89,7 +89,7 @@ an agent — so an agent can install its own memory unattended.
 config directory on the machine** — `~/.claude`, whatever `CLAUDE_CONFIG_DIR` points
 at, and each Kommander-style playbook under `~/.claude-playbooks/`. All are selected by
 default; answer with numbers to narrow it, or pass `--target DIR` for exactly one.
-Installing into just the default config is how `/memhouse:search` ends up missing from
+Installing into just the default config is how `/mem:search` ends up missing from
 the instance you actually work in, silently, since a missing skill never announces
 itself.
 
@@ -221,7 +221,7 @@ So rows carry an `epoch`: which parse of the session they belong to.
   rows are irreplaceable.
 
 Reads show one parse per session — the newest — so counts, tokens and cost are unchanged.
-`memhouse:sql` and any hand-written query should filter the same way; the skill carries
+`/mem:sql` and any hand-written query should filter the same way; the skill carries
 the clause.
 
 **Imported history is protected the same way.** `origin` says who wrote a row, and it is

@@ -58,6 +58,29 @@ const MIGRATIONS = {
 };
 
 /**
+ * Which schema generations THIS release may write. The degenerate compatibility matrix:
+ * a release supports exactly its own generation, and the array exists for the rare
+ * release that is wire-compatible across two (write both, migrate at leisure).
+ *
+ * The check that reads this (ship.js assertWriterSupported) is the forward half of the
+ * mixed-fleet story: every release from 0.10.0 on REFUSES a house whose recorded schema
+ * it does not support, in both directions — a house too new says "update memhouse", a
+ * house too old says "memhouse migrate". The backward half cannot be code: releases
+ * already on the registry read none of this, so for them the enforcement is the pilot's
+ * GRANTs (revoke the mutation privileges after migrating, and a pre-0.10 shipper's
+ * delete fails loudly instead of destroying retained parses). `memhouse migrate` prints
+ * that advice.
+ */
+const SUPPORTED_SCHEMAS = [2];
+
+/**
+ * The floor a house may set under its writers, recorded by `memhouse migrate` in
+ * house_meta['min_writer_schema']. Today it equals SCHEMA_VERSION; a future
+ * back-compatible generation can hold it one step lower for a grace window.
+ */
+const MIN_WRITER_SCHEMA = 2;
+
+/**
  * The sorting key each room MUST have, as the column list ClickHouse reports in
  * `system.tables.sorting_key`. Canonical here because three places check it — the shipper
  * before every pass, `doctor`, and the room rebuild — and they disagreed once already: the
@@ -315,7 +338,8 @@ async function resolveRooms(client) {
 }
 
 module.exports = {
-  ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MIGRATIONS, ROOM_KEYS, keyProblem,
+  ROOM_TYPES, META_TYPES, SCHEMA_VERSION, SUPPORTED_SCHEMAS, MIN_WRITER_SCHEMA,
+  MIGRATIONS, ROOM_KEYS, keyProblem,
   READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
   sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,

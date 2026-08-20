@@ -266,20 +266,22 @@ herdr pane run <pane2> "cd <worktree> && claude"
 herdr pane wait-output <pane2> --match ">" --timeout 60000
 ```
 
-The skills are **`/memhouse:search`, `/memhouse:sessions`, `/memhouse:sql`**. The colon
-namespace is earned by being installed as a plugin — `<config>/skills/memhouse/` holding
-`.claude-plugin/plugin.json` plus `skills/{search,sessions,sql}/`. If autocomplete offers
-`/memhouse-search` with a hyphen instead, the installer regressed to copying loose skill
+The skills are **`/mem:ask`, `/mem:search`, `/mem:sessions`, `/mem:share`, `/mem:sql`, `/mem:status`, `/mem:users`**. The colon
+namespace is earned by being installed as a plugin — `<config>/skills/mem/` holding
+`.claude-plugin/plugin.json` plus `skills/{ask,search,sessions,share,sql,status,users}/`. If autocomplete offers
+`/mem-search` with a hyphen instead, the installer regressed to copying loose skill
 directories; that is a defect, not a naming variant. Check `plugins list` and the
 installed tree before reporting anything else about the skills.
 
-`/mem:ask` and `/mem:search` belonged to *memory-house*, which was removed from this
-machine on 2026-08-09. They should not resolve at all.
+The `/mem:*` namespace once belonged to *memory-house* (removed 2026-08-09) and was
+reclaimed by memhouse in 0.10.0 when the plugin was renamed from `memhouse` to `mem` —
+so `/mem:ask` resolving is now CORRECT, and a leftover `/memhouse:*` resolving beside it
+means the installer failed to remove the pre-0.10 plugin directory.
 
 Drive them by sending text, as a human would:
 
 ```bash
-herdr pane send-text <pane2> "/memhouse:search clickhouse"
+herdr pane send-text <pane2> "/mem:search clickhouse"
 herdr pane send-keys  <pane2> Enter
 herdr pane wait-output <pane2> --match "sessions|hits|no results" --regex --timeout 120000
 herdr pane read <pane2> --source visible --lines 60
@@ -292,7 +294,7 @@ What must hold:
   The trap to watch for now is a JOIN on `session_id` alone: the skill docs say to join
   on `(session_id, user_id)`, and an agent that drops the user half can merge two
   housemates' rows on a colliding id
-- `/memhouse:sql` runs read-only SQL and refuses writes
+- `/mem:sql` runs read-only SQL and refuses writes
 - the session rollup is a **saved query**, not an object — an agent that does
   `FROM sessions_v` is following stale instructions
 - credentials never appear in the transcript

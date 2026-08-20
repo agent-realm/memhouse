@@ -1,8 +1,17 @@
 {
-  "name": "memhouse",
-  "description": "Conversation memory for AI agents over the memhouse typed ClickHouse store: search, browse, and analyze every past session across all 17 supported editors and machines. Skills install as /memhouse:search, /memhouse:sessions, and /memhouse:sql.",
+  "name": "mem",
+  "description": "Conversation memory for AI agents over the memhouse typed ClickHouse store: ask, search, browse, analyze, check, and share every past session across all 17 supported editors and machines. Skills install as /mem:ask, /mem:search, /mem:sessions, /mem:share, /mem:sql, /mem:status, and /mem:users.",
   "version": "0.4.6",
-  "author": { "name": "Ramazan Polat" },
+  "author": {
+    "name": "Ramazan Polat"
+  },
   "homepage": "https://github.com/agent-realm/memhouse",
-  "keywords": ["memory", "clickhouse", "search", "sessions", "analytics", "agentlytics"]
+  "keywords": [
+    "memory",
+    "clickhouse",
+    "search",
+    "sessions",
+    "analytics",
+    "agentlytics"
+  ]
 }

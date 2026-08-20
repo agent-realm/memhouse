@@ -25,7 +25,7 @@ const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
 const {
   roomNames, ROOM_TYPES, MEMBER_PIN, installCommand, keyProblem,
-  SCHEMA_VERSION, MIGRATIONS, META_TYPES, createStatement,
+  SCHEMA_VERSION, MIN_WRITER_SCHEMA, MIGRATIONS, META_TYPES, createStatement,
 } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 
@@ -322,12 +322,16 @@ Setup        onboard              interactive wizard: discover → configure →
                                   the member. The admin credential is never stored.
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
-             uninstall            stop daemons + service, clear runtime state.
+             uninstall            stop daemons + service, clear runtime state (asks; --yes).
                                   KEEPS the config and this machine's host identity
                                   --credentials    also forget the house and its password
                                   --full-removal   all of ${HOME_DIR.replace(os.homedir(), '~')}, identity included
                                   no tier touches the house data
-             update               upgrade, restart the daemons, and check the house schema
+             nightly              build an installable version-stamped tarball from this
+                                  checkout, publishing nothing [--out DIR]
+             update               upgrade, restart the daemons, migrate the house if it
+                                  needs it (asks; --migrate runs unasked; --no-install
+                                  skips npm when you already upgraded by hand)
                                   (--check to compare versions and change nothing)
              reset                clear the shipper's rows and re-ship everything (--yes to skip confirm)
                                   imported rows are kept; --all-origins removes those too
@@ -352,10 +356,11 @@ Agents       plugins              list | install claude [--target DIR] | remove 
 House        deploy --local       run ClickHouse in docker/podman, then install
              deploy --down        remove the local house (container + volume)
                                   [--house-port N] [--tag 25.11]  (--port is the dashboard)
-             migrate-rooms        rebuild rooms whose sorting key predates this version
-                                  (copies, swaps atomically, keeps <room>_pre_epoch)
+             migrate              run every migration this house still needs
+                                  [--dry-run] [--yes]  (copy + atomic swap; deletes nothing)
+             migrate-rooms        the same, scoped to the rooms
              service install      run the shipper as a user service (systemd / launchd)
-             service uninstall | status
+             service stop | start | restart | uninstall | status
 
 Config: flags > MEMHOUSE_* env > ${ENV_FILE.replace(os.homedir(), '~')} > defaults.
 Engine: MEMHOUSE_ENGINE pins docker or podman when both are installed and one cannot answer.
@@ -647,6 +652,12 @@ ${rooms.trim()}
 -- the boundary — and it is what lets the shipper create and evolve its own tables.
 GRANT ALL ON ${db}.* TO ${member};
 
+-- SELECT again, WITH GRANT OPTION — sharing, made self-serve and read-only by
+-- construction. This is what lets the member run \`GRANT SELECT ON ${db}.* TO <friend>\`
+-- themselves (/mem:share) without an operator, while the grant-option stops at SELECT:
+-- they can open a read-only window into their own memory and can hand on nothing more.
+GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
+
 -- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
 -- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
 -- currentUser() is computed during the INSERT, and an async flush stores it as the empty
@@ -728,6 +739,10 @@ async function adminBootstrap(cfg, admin) {
   // create and evolve the rooms (--ensure-schema below).
   try {
     await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member}`, { database: '' });
+    // SELECT again, WITH GRANT OPTION: what /mem:share rides on. The member can open a
+    // read-only window into their OWN house for a housemate-to-be — and can hand on
+    // nothing more, because the grant option stops at SELECT.
+    await q(`GRANT SELECT ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
     await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
     console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', async_insert pinned`));
   } catch (e) {
@@ -875,9 +890,10 @@ async function cmdInstall({ interactive }) {
       console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
     }
     if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
-    console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
+    console.log(ok('installed'));
     console.log('  adding a housemate later is two statements for the admin:');
     console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
+    printGettingStarted(cfg);
     return 0;
   }
 
@@ -1027,8 +1043,28 @@ async function cmdInstall({ interactive }) {
   if (flags['no-ship'] !== true) {
     if (run(SHIP_JS, [], cfg) !== 0) return 1;
   }
-  console.log(ok('installed — next: memhouse start   (dashboard + shipper loop)'));
+  console.log(ok('installed'));
+  printGettingStarted(cfg);
   return 0;
+}
+
+/**
+ * What now — printed once, at the end of a successful install. An install that ends with
+ * one next-step line leaves the pilot at a working house they do not know how to use:
+ * the dashboard, the agent skills, and the health check all exist, and nothing said so.
+ * Kept to one screen; each line is a thing to DO, not a feature list.
+ */
+function printGettingStarted(cfg) {
+  console.log('');
+  console.log('  Your house is live. From here:');
+  console.log('     memhouse start                  dashboard + shipper loop (background daemons)');
+  console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
+  console.log('     memhouse service install        or: ship at login, no terminal needed');
+  console.log('     memhouse plugins install claude give your agents /mem:ask, /mem:search,');
+  console.log('                                     /mem:sessions, /mem:share, /mem:sql, /mem:status, /mem:users');
+  console.log('     memhouse search <terms>         find a past conversation right now');
+  console.log('     memhouse doctor                 every line a check mark = healthy');
+  console.log('  The house keeps shipping as you work; nothing else to do.');
 }
 
 async function cmdOnboard() {
@@ -1085,7 +1121,7 @@ async function cmdOnboard() {
   const targets = claudeTargets();
   if (targets.length) {
     console.log('');
-    console.log(`Claude Code skills: ${fs.readdirSync(path.join(DELIVERY, 'plugin', 'skills')).map((n) => `/memhouse:${n}`).join(', ')}`);
+    console.log(`Claude Code skills: ${fs.readdirSync(path.join(DELIVERY, 'plugin', 'skills')).map((n) => `/mem:${n}`).join(', ')}`);
     const chosen = await chooseTargets(targets, 'Install into');
     for (const t of chosen) console.log(ok(`installed skills into ${short(installPluginInto(t.dir))}`));
     if (chosen.length) console.log('  they load next time that Claude Code starts');
@@ -1191,6 +1227,74 @@ function cmdStop() {
   if (!stopped) console.log(warn('nothing was running'));
 }
 
+/**
+ * Every writer this house has, judged. Ground truth is the DATA — distinct
+ * (user_id, host) over the messages room — because the one writer that matters most, a
+ * pre-0.10 memhouse, records nothing about itself: it predates the house record
+ * entirely. The record then annotates whoever it knows.
+ *
+ *   'legacy'    rows in the house, no record of a writer — a pre-0.10 memhouse. It still
+ *               deletes before re-inserting, and on migrated rooms that delete reaches
+ *               every retained parse it re-ships. The state worth shouting about.
+ *   'outdated'  recorded, but supports an older schema than the house is at — it is
+ *               refusing every pass right now and ships nothing until updated.
+ *   'stale'     no heartbeat for 48h — machine off, or shipper dead.
+ *   'ok'        current and beating.
+ *
+ * Null when the house is unreachable or holds no rows at all.
+ */
+async function fleetState(cfg) {
+  try {
+    const writers = new Map(); // 'member@host' -> row
+    for (const d of await chRows(cfg,
+      "SELECT user_id, host, formatDateTime(max(ingested_at), '%Y-%m-%dT%H:%i:%SZ') AS last_row FROM messages GROUP BY user_id, host")) {
+      writers.set(`${d.user_id}@${d.host}`, { writer: `${d.user_id}@${d.host}`, lastRow: d.last_row, version: null, schema: null, lastShip: null });
+    }
+    if (!writers.size) return null;
+    let houseSchema = 0;
+    try {
+      for (const r of await chRows(cfg,
+        "SELECT key, value FROM house_meta FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'")) {
+        if (r.key === 'schema_version') { houseSchema = Number(r.value) || 0; continue; }
+        const cut = r.key.indexOf(':');
+        const kind = r.key.slice(0, cut); const who = r.key.slice(cut + 1);
+        const w = writers.get(who) || { writer: who, lastRow: null, version: null, schema: null, lastShip: null };
+        if (kind === 'client_version') w.version = String(r.value);
+        if (kind === 'client_schema') w.schema = Number(r.value) || null;
+        if (kind === 'last_ship') w.lastShip = String(r.value);
+        writers.set(who, w);
+      }
+    } catch { /* pre-0.10 house: no record — every writer below reads as legacy, correctly */ }
+    const out = [];
+    for (const w of writers.values()) {
+      const beat = w.lastShip || (w.lastRow ? `${w.lastRow.replace(' ', 'T')}` : null);
+      const ageMs = beat ? Date.now() - Date.parse(beat) : null;
+      // ROWS newer than the heartbeat by more than a pass interval = something on that
+      // host is writing without recording itself — a machine DOWNGRADED to pre-0.10
+      // after it had recorded. Judged on the record alone it read 'ok' for two days,
+      // while actively running the delete-before-reinsert the verdict exists to flag.
+      const rowMs = w.lastRow ? Date.parse(`${w.lastRow.replace(' ', 'T')}`) : null;
+      const shipMs = w.lastShip ? Date.parse(w.lastShip) : null;
+      const writingUnrecorded = rowMs !== null && shipMs !== null && rowMs - shipMs > 3600 * 1000;
+      w.verdict = ((w.schema === null && w.version === null) || writingUnrecorded) ? 'legacy'
+        : (w.schema !== null && houseSchema && w.schema < houseSchema) ? 'outdated'
+          : (ageMs !== null && ageMs > 48 * 3600 * 1000) ? 'stale' : 'ok';
+      w.ageMs = ageMs;
+      out.push(w);
+    }
+    return out.sort((a, b) => a.writer.localeCompare(b.writer));
+  } catch { return null; }
+}
+
+function fleetAge(ms) {
+  if (ms === null) return 'never';
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
 async function cmdStatus() {
   // requireConfig, not resolveConfig. `status` reads a house and reports its counts as
   // YOURS, which is exactly the answer that must not come from a guessed URL: with no
@@ -1218,6 +1322,7 @@ async function cmdStatus() {
     out.sessions = Number(s[0]?.sessions || 0);
     out.messages = Number(m[0]?.msgs || 0);
     out.freshest = m[0]?.freshest || null;
+    out.fleet = await fleetState(cfg);
   } catch (e) { out.connected = false; out.error = netReason(e); }
 
   if (JSON_OUT) { console.log(JSON.stringify(out, null, 2)); return out.connected ? 0 : 1; }
@@ -1231,6 +1336,16 @@ async function cmdStatus() {
   console.log(ok(`host: ${out.host.id}${out.host.renamed ? ` (this machine now answers to '${out.host.current_hostname}' — the id is kept so its history stays one machine)` : ''}`));
   if (out.connected && !out.messages) console.log(ok(`house: empty — ${out.sessions} sessions, 0 messages (nothing shipped yet)`));
   else if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
+  if (out.fleet && out.fleet.length) {
+    const badOnes = out.fleet.filter((f) => f.verdict !== 'ok');
+    console.log((badOnes.length ? warn : ok)(`fleet: ${out.fleet.length} writer(s) known to this house`));
+    for (const f of out.fleet) {
+      const mark = f.verdict === 'legacy' ? '  ⚠ pre-0.10 — upgrade it (or revoke its mutation grants); its re-ships delete retained parses'
+        : f.verdict === 'outdated' ? '  ⚠ supports an older schema — refusing every pass until updated'
+          : f.verdict === 'stale' ? '  • stale' : '';
+      console.log(`     ${f.writer.padEnd(28)} ${String(f.version || '?').padEnd(8)} last ship ${fleetAge(f.ageMs)}${mark}`);
+    }
+  }
   console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
   if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${runningPort(cfg)}`);
@@ -1413,6 +1528,24 @@ async function cmdDoctor() {
       // already answers the question that matters.
       add(true, 'house record: not kept in this house (pre-0.10 house, or no rights)');
     }
+    // The fleet: every writer the house has seen, and whether any of them is a danger.
+    // A pre-0.10 memhouse on ANOTHER machine reads none of this house's record and still
+    // deletes before re-inserting — on migrated rooms that delete reaches every retained
+    // parse of a session it re-ships. It cannot be stopped by code here; it can only be
+    // named, loudly, where the pilot looks.
+    try {
+      const fleet = await fleetState(cfg);
+      if (fleet && fleet.length) {
+        const old = fleet.filter((f) => f.verdict === 'legacy' || f.verdict === 'outdated');
+        const stale = fleet.filter((f) => f.verdict === 'stale');
+        add(old.length === 0,
+          old.length
+            ? `fleet: ${old.length} of ${fleet.length} writer(s) need attention — ${old.map((f) => `${f.writer} (${f.verdict})`).join(', ')}`
+            : `fleet: ${fleet.length} writer(s), all current${stale.length ? ` (${stale.length} stale >48h)` : ''}`,
+          'their re-ships DELETE retained parses on this house. Upgrade them, or as admin:\n'
+          + `     REVOKE ALTER DELETE, ALTER UPDATE ON ${cfg.db}.* FROM <member>`);
+      }
+    } catch { /* fleet view is best-effort */ }
     try {
       // countIf, not any(). `any()` returns an arbitrary row's value, so on a house with
       // four correctly-stamped rows and one blank it reported a pass five times out of
@@ -1728,7 +1861,13 @@ async function cmdUpdate() {
   try { svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { /* unsupported platform */ }
   const wasRunning = { shipper: !!pidOf('shipper'), dashboard: !!pidOf('dashboard') };
 
-  if (kind === 'checkout') {
+  if (flags['no-install'] === true) {
+    // The files were already replaced by other means — a hand-typed `npm i -g`, a tarball,
+    // a configuration manager. The npm/git half is exactly what such a pilot has already
+    // done, and the half a bare install leaves undone (restart, migrations, schema heal)
+    // is exactly what they came here for.
+    console.log(warn('--no-install: files assumed current; restarting and checking the house only'));
+  } else if (kind === 'checkout') {
     // The stale-UI case, and it is checkout-only: a published tarball ships public/ built by
     // prepack, but `git pull` updates ui/src and leaves the old bundle in public/ — so the
     // dashboard serves the previous release however many times it is restarted.
@@ -1762,10 +1901,41 @@ async function cmdUpdate() {
   // within a loop interval (memhouse/self-update.js), but a pilot who typed `update` should
   // not have to wait for it, and the dashboard's stale bundle is visible immediately.
   if (svc.installed) {
-    console.log(warn(`the shipper is service-managed (${svc.kind}) — restart it to pick this up:`));
-    console.log(svc.kind === 'systemd'
-      ? '  systemctl --user restart memhouse-shipper'
-      : '  launchctl kickstart -k gui/$(id -u)/com.memhouse.shipper');
+    // REINSTALL the unit, do not merely advise a restart. Two reasons, both measured on
+    // testbed. The unit inlines its template AND the env at service-install time, so a
+    // fix shipped in a release (Restart=on-failure -> always was one; the self-update
+    // handover exits 0 and an on-failure unit stays DEAD after every upgrade) never
+    // reaches an existing install through a restart. And the advice route ends with a
+    // pilot who did everything `update` said and still has a dead shipper.
+    // service.js install is idempotent: same home replaces in place and starts it.
+    try {
+      const svcmod = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
+      // Keep the interval the pilot chose. The refresh used to hardcode 300, silently
+      // rewriting a `service install --interval 30` unit on every update.
+      let interval = 300;
+      try {
+        const unit = fs.readFileSync(require('path').join(os.homedir(), '.config', 'systemd', 'user', 'memhouse-shipper.service'), 'utf-8');
+        const m = unit.match(/--loop['" ]+(\d+)/);
+        if (m) interval = Number(m[1]);
+      } catch { /* launchd or missing: fall through to plist */ }
+      try {
+        if (interval === 300 && process.platform === 'darwin') {
+          const plist = fs.readFileSync(require('path').join(os.homedir(), 'Library', 'LaunchAgents', 'com.memhouse.shipper.plist'), 'utf-8');
+          const m = plist.match(/--loop<\/string>\s*<string>(\d+)/);
+          if (m) interval = Number(m[1]);
+        }
+      } catch { /* keep default */ }
+      const r = svcmod.install({ shipJs: SHIP_JS, envFile: ENV_FILE, logDir: LOG_DIR, interval, home: HOME_DIR });
+      if (r.ok) console.log(ok(`service unit refreshed and restarted (${r.kind})`));
+      else {
+        console.log(warn(`could not refresh the service unit: ${r.msg}`));
+        console.log(svc.kind === 'systemd'
+          ? '  restart it yourself: systemctl --user restart memhouse-shipper'
+          : '  restart it yourself: launchctl kickstart -k gui/$(id -u)/com.memhouse.shipper');
+      }
+    } catch (e) {
+      console.log(warn(`could not refresh the service unit: ${e.message}`));
+    }
   }
   if (wasRunning.shipper || wasRunning.dashboard) {
     cmdStop();
@@ -1774,11 +1944,45 @@ async function cmdUpdate() {
     console.log(warn('no daemons were running — start them with: memhouse start'));
   }
 
-  // A shipper from a newer release can need a column an older house does not have. The
-  // shipper reports the drift and prints the rebuild; running it here means the pilot
-  // learns at upgrade time rather than from a warning in a log nobody reads.
+  // The new release may need the HOUSE moved too, and upgrade time is when the pilot is
+  // watching — a migration named here beats one discovered as a refusing service in a log
+  // nobody reads. Three behaviours, chosen by the pilot:
+  //   memhouse update --migrate   run whatever is pending, unasked (--yes implies it)
+  //   interactive                 name what is pending and ask
+  //   non-interactive, no flag    name it and print the command; NEVER auto-run — a cron
+  //                               or CI invocation must not start a house-wide copy
   const cfg = resolveConfig();
   if (cfg.url && cfg.user) {
+    try {
+      const r = await roomsFor(cfg);
+      const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
+      const mig = require(path.join(REPO_ROOT, 'memhouse', 'house', 'migrate.js'));
+      const q = {
+        sql: (sql, settings) => ch(cfg, sql, { settings }),
+        rows: (sql, settings) => chRows(cfg, sql, settings ? { settings } : undefined),
+      };
+      const pending = await mig.detectPending(q, { db: cfg.db, tpl, rooms: r, member: r.member });
+      if (pending.length) {
+        console.log(warn(`this release needs ${pending.length} migration(s) the house has not had:`));
+        for (const x of pending) console.log(`     ${x.migration.id} (schema ${x.migration.toVersion}, ${x.migration.component})`);
+        let go = flags.migrate === true || flags.yes === true;
+        if (!go && process.stdin.isTTY) {
+          const a = (await ask('Run them now? (yes/no)', 'no')).toLowerCase();
+          go = a === 'yes' || a === 'y';
+        }
+        if (go) {
+          const code = await cmdMigrate({ quiet: true, assumeYes: true });
+          if (code !== 0) return code;
+        } else {
+          console.log(warn('until they run, the shipper REFUSES every pass (nothing is lost, nothing ships):'));
+          console.log('     memhouse migrate');
+        }
+      }
+    } catch (e) {
+      // An unreachable house is not an upgrade failure — the files are updated either way.
+      console.log(warn(`could not check the house for pending migrations: ${e.message.split('\n')[0]}`));
+    }
+    // The column healer half: additive drift the migrations above do not cover.
     const code = run(SHIP_JS, ['--ensure-schema'], cfg);
     if (code !== 0) { console.log(warn('the house schema needs attention — memhouse doctor')); return code; }
   }
@@ -1790,7 +1994,7 @@ async function cmdUpdate() {
 // A pilot rarely has one. `~/.claude` is the stock install, `CLAUDE_CONFIG_DIR` points at
 // whichever they are running right now, and Kommander-style playbooks live under
 // `~/.claude-playbooks/<name>[/playbook]`, each a complete config directory with its own
-// skills/. Installing into one and calling it done leaves /memhouse:search missing from
+// skills/. Installing into one and calling it done leaves /mem:search missing from
 // every other instance the pilot uses — silently, because a missing skill does not announce
 // itself, it just never appears.
 //
@@ -1821,11 +2025,37 @@ function claudeTargets() {
 }
 
 const short = (p) => p.replace(os.homedir(), '~');
-const PLUGIN_MARK = path.join('skills', 'memhouse', '.claude-plugin', 'plugin.json');
+const PLUGIN_MARK = path.join('skills', 'mem', '.claude-plugin', 'plugin.json');
 const isPluginInstalled = (dir) => fs.existsSync(path.join(dir, PLUGIN_MARK));
 
 function installPluginInto(dir) {
-  const dst = path.join(dir, 'skills', 'memhouse');
+  // The plugin was named `memhouse` until 0.10.0. A leftover copy under the old name
+  // would load BESIDE the new one — /memhouse:search and /mem:search both resolving, one
+  // of them stale forever. Remove it only when it is provably OURS (it carries our
+  // plugin.json); a directory someone else named `memhouse` is not ours to delete.
+  const legacy = path.join(dir, 'skills', 'memhouse');
+  const legacyManifest = path.join(legacy, '.claude-plugin', 'plugin.json');
+  if (fs.existsSync(legacyManifest)) {
+    let lname = null;
+    try { lname = JSON.parse(fs.readFileSync(legacyManifest, 'utf-8')).name; } catch { /* unreadable */ }
+    if (lname === 'memhouse' || lname === 'mem') {
+      fs.rmSync(legacy, { recursive: true });
+      console.log(ok(`removed the pre-0.10 plugin at ${short(legacy)} (renamed to 'mem')`));
+    }
+  }
+  const dst = path.join(dir, 'skills', 'mem');
+  // REPLACE, not overlay. cpSync over an existing install refreshes the skills and
+  // leaves anything else standing — a machine that once had a build with extra skills
+  // kept offering /mem:replay and /mem:status forever, stale, beside the real ones.
+  // Ownership means OUR MANIFEST, checked by name — "any plugin.json" would have deleted
+  // an unrelated plugin that happened to pick the same directory name.
+  const dstManifest = path.join(dst, '.claude-plugin', 'plugin.json');
+  if (fs.existsSync(dstManifest)) {
+    let name = null;
+    try { name = JSON.parse(fs.readFileSync(dstManifest, 'utf-8')).name; } catch { /* unreadable */ }
+    if (name === 'mem' || name === 'memhouse') fs.rmSync(dst, { recursive: true });
+    else throw new Error(`skills/mem in ${dir} belongs to plugin '${name || '(unreadable manifest)'}' — refusing to replace it`);
+  }
   fs.mkdirSync(dst, { recursive: true });
   fs.cpSync(path.join(DELIVERY, 'plugin'), dst, { recursive: true });
   return dst;
@@ -1859,16 +2089,16 @@ async function chooseTargets(targets, verb) {
 //
 // Claude Code gives a skill a namespace only when it arrives inside a plugin: a directory
 // under <config>/skills/ containing .claude-plugin/plugin.json loads as
-// `memhouse@skills-dir` and its skills become /memhouse:search, /memhouse:sessions,
-// /memhouse:sql. Copied in flat, the same three files register as unrelated top-level
+// `mem@skills-dir` and its skills become /mem:search, /mem:sessions,
+// /mem:sql. Copied in flat, the same three files register as unrelated top-level
 // skills named after their folders — which is what this used to do, while plugin.json sat
 // unread one directory away claiming the colon form. Driving a real Claude Code is what
-// caught it: `/memhouse:search` answered `Unknown command. Did you mean /memhouse-search?`
+// caught it: `/mem:search` answered `Unknown command. Did you mean /memhouse-search?`
 async function cmdPlugins() {
   const sub = positional[0] || 'list';
   const pluginSrc = path.join(DELIVERY, 'plugin');
   const names = fs.readdirSync(path.join(pluginSrc, 'skills'));
-  const invocations = names.map((n) => `/memhouse:${n}`).join(', ');
+  const invocations = names.map((n) => `/mem:${n}`).join(', ');
   // --target overrides the discovery rather than joining it: given one, that is the only
   // directory touched.
   const targets = flags.target ? [{ dir: flags.target, why: '--target' }] : claudeTargets();
@@ -1897,7 +2127,7 @@ async function cmdPlugins() {
     const chosen = await chooseTargets(targets, 'Install');
     if (!chosen.length) { console.log(warn('nothing installed')); return 0; }
     for (const t of chosen) console.log(ok(`installed ${names.length} skills into ${short(installPluginInto(t.dir))}`));
-    console.log(`  loads as memhouse@skills-dir next session — invoke ${invocations}`);
+    console.log(`  loads as mem@skills-dir next session — invoke ${invocations}`);
     return 0;
   }
 
@@ -1907,11 +2137,11 @@ async function cmdPlugins() {
     const chosen = await chooseTargets(installed, 'Remove from');
     if (!chosen.length) { console.log(warn('nothing removed')); return 0; }
     for (const t of chosen) {
-      fs.rmSync(path.join(t.dir, 'skills', 'memhouse'), { recursive: true });
+      fs.rmSync(path.join(t.dir, 'skills', 'mem'), { recursive: true });
       // Remove the now-empty skills/ we created, but never a skills/ holding someone
       // else's work.
       try { fs.rmdirSync(path.join(t.dir, 'skills')); } catch { /* not empty: leave it */ }
-      console.log(ok(`removed ${short(path.join(t.dir, 'skills', 'memhouse'))}`));
+      console.log(ok(`removed ${short(path.join(t.dir, 'skills', 'mem'))}`));
     }
     return 0;
   }
@@ -1993,7 +2223,16 @@ const sqlStr = (s) => `'${String(s == null ? '' : s).replace(/\\/g, '\\\\').repl
 /** Append one row to house_events. Never fatal: paperwork must not stop a migration. */
 async function houseEvent(cfg, e) {
   const cols = ['kind', 'id', 'status', 'from_version', 'to_version', 'host', 'rows_before', 'rows_after', 'detail'];
-  const vals = cols.map((c) => (typeof e[c] === 'number' ? String(e[c]) : sqlStr(e[c] || '')));
+  // Numeric columns render as 0 when absent, NEVER as ''. An event without rows_after —
+  // which is every pending and every failed row — rendered '' into a UInt64, ClickHouse
+  // refused the whole INSERT, and the catch below swallowed it: the ledger silently held
+  // only applied rows, so unfinishedBy() could never see a pending marker and the
+  // concurrent-migrator lock never engaged. Found by reading the ledger after a real
+  // refused migration and counting two rows where six belonged.
+  const NUMERIC = new Set(['rows_before', 'rows_after']);
+  const vals = cols.map((c) => (NUMERIC.has(c)
+    ? String(Number(e[c]) || 0)
+    : sqlStr(e[c] || '')));
   try {
     await ch(cfg, `INSERT INTO house_events (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
       { settings: { async_insert: 0 } });
@@ -2008,169 +2247,262 @@ async function houseMeta(cfg, key, value) {
 }
 
 /**
- * Rebuild rooms whose sorting key predates the current schema generation.
+ * `memhouse migrate [--dry-run] [--yes]` — run whatever migrations this house still
+ * needs, in order. `memhouse migrate-rooms` is the same runner filtered to the 'rooms'
+ * component; the name stays because other components (a daemon, config layouts) will
+ * carry their own migrations one day and "migrate-rooms" will then mean exactly what it
+ * says.
  *
- * ORDER BY cannot be altered in place, so a key change is a copy — and this is the one
- * command in memhouse that moves an entire room. Its rules follow from that:
- *
- *   NOTHING IS DELETED. The old room is renamed to `<room>_pre_epoch` and left for the
- *   pilot to drop when they are satisfied. The whole point of this release is that the
- *   house stops destroying what it cannot rebuild; a migration that dropped the source
- *   would be the same mistake at a larger scale.
- *
- *   PROVENANCE IS COPIED, NOT RESTAMPED. `user_id` is MATERIALIZED currentUser(), so an
- *   ordinary INSERT SELECT would stamp every row of a shared house with the identity of
- *   whoever ran the migration — silently rewriting who said what. The copy lists user_id
- *   explicitly under insert_allow_materialized_columns=1.
- *
- *   THE SWAP IS ONE STATEMENT. `RENAME TABLE a TO a_pre_epoch, tmp TO a` is atomic, so
- *   there is no window where the room does not exist.
- *
- *   WRITES DURING THE COPY ARE NOT LOST. A shipper running through the migration keeps
- *   writing into the old table right up to the rename; a second pass afterwards copies
- *   anything that arrived after the snapshot. ReplacingMergeTree makes that idempotent.
+ * The machinery — registry, detection, executors, and the invariants every migration
+ * inherits (nothing deleted, provenance never restamped, atomic swap, late writes
+ * survive, everything recorded) — lives in memhouse/house/migrate.js. This function is
+ * transport and conversation: build the q/ledger adapters, show the plan, ask, run.
  */
-async function cmdMigrateRooms() {
-  const cfg = requireConfig(resolveConfig(), 'migrate-rooms');
+async function cmdMigrate({ component = null, quiet = false, assumeYes = false } = {}) {
+  const cfg = requireConfig(resolveConfig(), component === 'rooms' ? 'migrate-rooms' : 'migrate');
+  // The db name is spliced into system-table predicates and DDL below. install validates
+  // it at creation; this validates what an env FILE says, which a hand edit can break.
+  try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(cfg.db, 'house'); }
+  catch (e) { console.log(bad(e.message)); return 1; }
   const r = await roomsFor(cfg);
   const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
   const host = require(path.join(REPO_ROOT, 'memhouse', 'host.js')).identity().id;
-  const migration = MIGRATIONS[SCHEMA_VERSION];
+  const mig = require(path.join(REPO_ROOT, 'memhouse', 'house', 'migrate.js'));
 
-  // The house's record of itself, created here if it does not exist yet — a house built
-  // by 0.9.0 has no such tables, and a migration is precisely the event they exist to
-  // record. Best-effort: a member without CREATE TABLE can still be the one who notices
-  // the rooms need rebuilding, and the rebuild matters more than the paperwork.
-  for (const t of META_TYPES) {
+  const q = {
+    sql: (sql, settings) => ch(cfg, sql, { settings }),
+    rows: (sql, settings) => chRows(cfg, sql, settings ? { settings } : undefined),
+  };
+  const ctx = { db: cfg.db, tpl, rooms: r, host, member: r.member };
+  const ledger = { event: (e) => houseEvent(cfg, e), meta: (k, v) => houseMeta(cfg, k, v) };
+  const ui = { ok: (m) => console.log(ok(m)), warn: (m) => console.log(warn(m)) };
+
+  // Detection first, and NOTHING written before the dry-run gate: detect() reads only
+  // system tables, so a --dry-run (and an already-current house under --dry-run) truly
+  // changes nothing — the earlier order created the meta tables and stamped
+  // schema_version on the way to saying "nothing was changed".
+  // Read the recorded generation BEFORE anything else. This binary knows migrations up
+  // to SCHEMA_VERSION; a house recorded ABOVE that was moved forward by a newer release,
+  // and the two stamps at the bottom of this function would have quietly REWOUND its
+  // record (schema 3 -> 2) — defeating the writer guard for every old shipper whose key
+  // shapes happen to match. An older memhouse cannot migrate a newer house, only say so.
+  try {
+    const rec = await q.rows("SELECT value FROM house_meta FINAL WHERE key = 'schema_version'");
+    const recorded = rec.length ? Number(rec[0].value) || 0 : 0;
+    if (recorded > SCHEMA_VERSION) {
+      console.log(bad(`this house is at schema ${recorded}; this memhouse knows migrations up to ${SCHEMA_VERSION}.`));
+      console.log('  A newer release moved it forward. Update THIS machine:  memhouse update');
+      return 1;
+    }
+  } catch { /* no record yet — a pre-0.10 house; detection below owns it */ }
+
+  const pending = await mig.detectPending(q, ctx, { component });
+
+  if (flags['dry-run'] === true) {
+    if (!pending.length) { console.log(ok(`nothing to migrate — the house is at schema ${SCHEMA_VERSION}`)); return 0; }
+    for (const item of pending) {
+      for (const line of item.migration.plan(item.found)) console.log(line);
+      console.log('');
+    }
+    console.log(warn(`dry run — ${pending.length} migration(s) pending, nothing was changed`));
+    return 0;
+  }
+
+  // The house's record of itself, created here if absent — a pre-0.10 house has none,
+  // and a migration is precisely the event those tables exist to record. Best-effort: a
+  // member without CREATE TABLE can still be the one who notices the rooms need
+  // rebuilding, and the rebuild matters more than the paperwork.
+  const { META_TYPES: metas } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
+  for (const t of metas) {
     try {
       await ch(cfg, createStatement(tpl, t, t).replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
     } catch { /* no rights, or already there */ }
   }
 
-  const todo = [];
-  for (const t of ROOM_TYPES) {
-    const name = r[`${t}_raw`];
-    const rows = await chRows(cfg, `SELECT sorting_key AS k FROM system.tables WHERE database = '${cfg.db}' AND name = '${name}'`, { database: '' });
-    if (!rows.length) { console.log(warn(`${name} does not exist — run: memhouse install`)); continue; }
-    const problem = keyProblem(t, rows[0].k);
-    if (problem) todo.push({ t, name, key: rows[0].k });
-  }
-
-  if (!todo.length) {
-    console.log(ok(`every room already carries the schema ${SCHEMA_VERSION} sorting key`));
+  if (!pending.length) {
+    if (!quiet) console.log(ok(`nothing to migrate — the house is at schema ${SCHEMA_VERSION}`));
     await houseMeta(cfg, 'schema_version', String(SCHEMA_VERSION));
     return 0;
   }
 
-  console.log(`These rooms predate schema ${SCHEMA_VERSION} and the shipper refuses to write into them:\n`);
-  for (const x of todo) console.log(`  ${x.name}  (${x.key})`);
-  console.log('\nEach is copied into a room with the current key, swapped in atomically, and the');
-  console.log(`old one kept as <room>_pre_epoch. Nothing is deleted — you drop those when ready.\n`);
+  for (const item of pending) {
+    for (const line of item.migration.plan(item.found)) console.log(line);
+    console.log('');
+  }
+
+  // Another actor mid-copy: two concurrent rebuilds of one room end with one of them
+  // renaming the other's work.
+  for (const item of pending) {
+    const busy = await mig.unfinishedBy(q, ctx, item.migration.id);
+    if (busy) {
+      console.log(bad(`migration ${item.migration.id} is already pending by '${busy.actor}' (since ${busy.at})`));
+      console.log('  if that run is dead, its __migrating leftovers say so — inspect, clean, retry.');
+      return 1;
+    }
+  }
 
   const svc = shipperHealth();
   if (svc.running) {
     console.log(warn(`the shipper is running (${svc.via}) — rows it writes during the copy are picked up`));
     console.log('  by a second pass, but stopping it first makes the migration a single, quiet copy:');
-    console.log('  memhouse service stop   (or: memhouse stop)');
+    // The REAL command for how it is actually managed. This used to print
+    // `memhouse service stop`, which did not exist — the dispatcher showed status.
+    console.log(String(svc.via || '').startsWith('service')
+      ? (process.platform === 'darwin'
+        ? '  launchctl bootout gui/$(id -u)/com.memhouse.shipper   (memhouse service install brings it back)'
+        : '  systemctl --user stop memhouse-shipper   (systemctl --user start … brings it back)')
+      : '  memhouse stop');
   }
-  if (flags.yes !== true) {
-    const a = (await ask(`Migrate ${todo.length} room(s) in '${cfg.db}'? (yes/no)`, 'no')).toLowerCase();
+  // The one writer this migration CANNOT make safe is an old memhouse on ANOTHER machine.
+  // A 0.9.0 shipper passes its own key check against the migrated rooms (it only looks
+  // for `origin`) and keeps writing — harmless — but its per-session DELETE clear removes
+  // a re-shipped session's rows across ALL epochs, destroying exactly the superseded
+  // parses this schema exists to keep. Say so here, where the pilot is looking.
+  console.log(warn('if OTHER machines ship into this house as you, upgrade them promptly:'));
+  console.log('  a pre-0.10 shipper elsewhere still deletes before re-inserting, and on the');
+  console.log('  migrated rooms that delete reaches every retained parse of a session it re-ships.');
+  // assumeYes carries a consent ALREADY GIVEN one level up — `update` prompted (or took
+  // --migrate/--yes) before calling here, and asking twice teaches pilots that prompts
+  // are noise. It is never set on a direct `memhouse migrate`.
+  if (flags.yes !== true && !assumeYes) {
+    const what = pending.map((x) => x.migration.id).join(', ');
+    const a = (await ask(`Run ${pending.length} migration(s) (${what}) on '${cfg.db}'? (yes/no)`, 'no')).toLowerCase();
     if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
-  }
-
-  for (const x of todo) {
-    const tmp = `${x.name}__migrating`;
-    const kept = `${x.name}_pre_epoch`;
-    // A leftover from an interrupted run is never cleared automatically: it may hold the
-    // only copy of rows that were mid-flight, and this command's entire premise is that
-    // it removes nothing.
-    for (const clash of [tmp, kept]) {
-      const exists = await chRows(cfg, `SELECT name FROM system.tables WHERE database = '${cfg.db}' AND name = '${clash}'`, { database: '' });
-      if (exists.length) {
-        console.log(bad(`${clash} already exists — an earlier migration did not finish`));
-        console.log(`  inspect it, then rename or drop it yourself: DROP TABLE ${cfg.db}.${clash}`);
+    // Re-check AFTER the prompt: it is where a second migrator sits while the first one's
+    // pending marker lands. Checked only before it, two `memhouse update`s both saw a
+    // clean ledger, both got a yes, and both proceeded.
+    for (const item of pending) {
+      const busy = await mig.unfinishedBy(q, ctx, item.migration.id);
+      if (busy) {
+        console.log(bad(`while you decided, '${busy.actor}' started ${item.migration.id} (${busy.at}) — standing down.`));
         return 1;
       }
     }
+  }
 
-    const before = Number((await chRows(cfg, `SELECT count() AS c FROM ${x.name} FINAL`))[0]?.c || 0);
-    await houseEvent(cfg, {
-      kind: 'migration', id: migration, status: 'pending', host,
-      to_version: String(SCHEMA_VERSION), rows_before: before, detail: `${x.name} (${x.key})`,
-    });
-
+  for (const item of pending) {
     try {
-      // The columns both rooms have, minus the derived ones. text_ngram/text_word are
-      // MATERIALIZED from `text` and recompute on insert; user_id is MATERIALIZED too but
-      // must NOT recompute, so it is listed explicitly and carried across verbatim.
-      const oldCols = (await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${x.name}'`, { database: '' })).map((c) => c.name);
-      await ch(cfg, createStatement(tpl, x.t, tmp), { settings: { allow_experimental_full_text_index: 1 } });
-      const newCols = (await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${tmp}'`, { database: '' })).map((c) => c.name);
-      const carried = newCols.filter((c) => oldCols.includes(c) && !['text_ngram', 'text_word'].includes(c));
-      const list = carried.join(', ');
-      const copySettings = { insert_allow_materialized_columns: 1, allow_experimental_full_text_index: 1 };
-      // A room from before `origin` existed has no such column; the template's DEFAULT
-      // fills it as 'ship', which is what those rows were.
-      const started = (await chRows(cfg, "SELECT toString(now64(3, 'UTC')) AS t"))[0].t;
-
-      await ch(cfg, `INSERT INTO ${tmp} (${list}) SELECT ${list} FROM ${x.name} FINAL`, { settings: copySettings });
-      const copied = Number((await chRows(cfg, `SELECT count() AS c FROM ${tmp}`))[0]?.c || 0);
-      if (copied < before) throw new Error(`copied ${copied} of ${before} rows — refusing to swap`);
-
-      await ch(cfg, `RENAME TABLE ${x.name} TO ${kept}, ${tmp} TO ${x.name}`);
-      // Anything the shipper wrote into the old room while the copy ran.
-      const late = carried.includes('ingested_at')
-        ? await ch(cfg, `INSERT INTO ${x.name} (${list}) SELECT ${list} FROM ${kept} FINAL WHERE ingested_at >= toDateTime64('${started}', 3, 'UTC')`, { settings: copySettings }).then(() => true).catch(() => false)
-        : false;
-      const after = Number((await chRows(cfg, `SELECT count() AS c FROM ${x.name} FINAL`))[0]?.c || 0);
-
-      await houseEvent(cfg, {
-        kind: 'migration', id: migration, status: 'applied', host,
-        to_version: String(SCHEMA_VERSION), rows_before: before, rows_after: after,
-        detail: `${x.name}: old room kept as ${kept}${late ? '; late writes copied' : ''}`,
-      });
-      console.log(ok(`${x.name}: ${after} rows, old room kept as ${kept}`));
+      await mig.runMigration(q, ctx, item, { ledger, ui });
     } catch (e) {
-      await houseEvent(cfg, {
-        kind: 'migration', id: migration, status: 'failed', host,
-        to_version: String(SCHEMA_VERSION), rows_before: before, detail: `${x.name}: ${e.message}`,
-      });
-      console.log(bad(`${x.name}: ${e.message}`));
-      console.log(`  nothing was swapped; ${x.name} is untouched. The partial copy is in ${tmp}.`);
+      console.log(bad(`${item.migration.id}: ${e.message}`));
+      console.log('  what completed stands (house_events per room says which); what failed was not swapped.');
+      console.log(`  a partial copy may sit in <room>__migrating — inspect before dropping. Re-run when fixed:`);
+      console.log('     memhouse migrate');
       return 1;
     }
   }
 
-  // Heal the rooms the rebuild did NOT touch. `sessions` keeps its key across schema 2,
-  // so it is never in `todo` — but a 0.9.0 house's sessions room still lacks the new
-  // `epoch` column, and leaving it missing means the very next `ship` opens with a
-  // "fields are being DISCARDED" warning that sends the pilot to a second command. A
-  // migration should hand back a house with nothing left to heal.
-  try {
-    const { templateColumns } = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'));
-    const want = templateColumns(tpl);
-    for (const t of ROOM_TYPES) {
-      if (todo.some((x) => x.t === t)) continue; // rebuilt from the template — complete
-      const name = r[`${t}_raw`];
-      const have = new Set((await chRows(cfg, `SELECT name FROM system.columns WHERE database = '${cfg.db}' AND table = '${name}'`, { database: '' })).map((c) => c.name));
-      if (!have.size) continue;
-      for (const col of (want[t] || [])) {
-        if (have.has(col.name)) continue;
-        await ch(cfg, `ALTER TABLE ${name} ADD COLUMN IF NOT EXISTS ${col.name} ${col.type}`,
-          { settings: { allow_experimental_full_text_index: 1 } });
-        console.log(ok(`${name}: added missing column ${col.name}`));
-      }
-    }
-  } catch (e) { console.log(warn(`could not heal columns on the untouched rooms: ${e.message} — memhouse ship --ensure-schema does the same`)); }
+  // The floor under future writers: any 0.10+ memhouse reads this at pass start and
+  // refuses if it is too old for the house. Pre-0.10 releases read nothing — hence the
+  // REVOKE advice below, which is the only enforcement that reaches them.
+  await houseMeta(cfg, 'min_writer_schema', String(MIN_WRITER_SCHEMA));
 
-  await houseMeta(cfg, 'schema_version', String(SCHEMA_VERSION));
   console.log(`\n${ok(`house is at schema ${SCHEMA_VERSION}`)}`);
   console.log('  verify with: memhouse doctor');
   console.log(`  then, when you are satisfied: DROP TABLE ${cfg.db}.<room>_pre_epoch`);
+  console.log('');
+  console.log(warn('machines still on an older memhouse cannot be stopped by code — they never read'));
+  console.log('  this house\'s record. If any exist, either upgrade them now or take away the one');
+  console.log('  privilege whose misuse loses data (their shipping breaks LOUDLY instead of deleting');
+  console.log('  retained parses silently):');
+  console.log(`     REVOKE ALTER DELETE, ALTER UPDATE ON ${cfg.db}.* FROM <member>   -- per member, as admin`);
+  console.log('  Nothing in 0.10+ needs those grants except the interactive `memhouse reset`.');
   return 0;
 }
 
+/**
+ * `memhouse nightly [--out DIR]` — build an installable, version-stamped tarball from
+ * this checkout, without publishing anything.
+ *
+ * What it automates is exactly the by-hand recipe: stamp package.json with
+ * <base>-nightly.<YYYYMMDD.HHMM>, `npm pack` (prepack builds the dashboard bundle, so
+ * the tarball is what `npm publish` would upload), restore package.json. The stamp is
+ * the point — an unstamped pack says the RELEASE version, so `memhouse --version` lies
+ * on the test machine and `update --check` reports "already current".
+ *
+ * The tarball installs anywhere with `npm install -g <file>`. On such an install, use
+ * `memhouse update --no-install` — plain update's npm step installs memhouse@latest,
+ * which silently DOWNGRADES a nightly to the registry release.
+ */
+async function cmdNightly() {
+  const { kind, root } = installKind();
+  if (kind !== 'checkout') {
+    console.log(bad(`nightly builds come from a checkout — this is a ${kind} install (${root})`));
+    console.log('  git clone https://github.com/agent-realm/memhouse && cd memhouse && memhouse nightly');
+    return 1;
+  }
+  // A dirty package.json cannot be restored by checkout without eating the user's edits.
+  // npm version rewrites BOTH manifests; both must be clean and both are restored.
+  const dirty = spawnSync('git', ['status', '--porcelain', 'package.json', 'package-lock.json'], { cwd: root, encoding: 'utf-8' });
+  if ((dirty.stdout || '').trim()) {
+    console.log(bad('package.json / package-lock.json have uncommitted changes — commit or stash first;'));
+    console.log('  the stamp/restore cycle would destroy them.');
+    return 1;
+  }
+  const base = PKG.version.replace(/-.*$/, '');
+  const now = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  // One ALPHANUMERIC identifier ('20260820T0103'), not two numeric ones. Semver forbids
+  // leading zeros in numeric prerelease ids, so npm silently rewrote '.0103' to '.103'
+  // — measured — and two nightlies from the same day sorted wrong. The 'T' keeps the
+  // whole token alphanumeric, where leading zeros are legal and ordering is lexical.
+  const stamp = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}T${p2(now.getHours())}${p2(now.getMinutes())}`;
+  const version = `${base}-nightly.${stamp}`;
+  const outDir = flags.out && flags.out !== true ? path.resolve(String(flags.out)) : root;
+
+  console.log(`  building ${version} from ${root}`);
+  try {
+    let r = spawnSync('npm', ['version', version, '--no-git-tag-version'], { cwd: root, stdio: 'pipe' });
+    if (r.status !== 0) { console.log(bad(`npm version failed: ${(r.stderr || '').toString().trim().split('\n')[0]}`)); return 1; }
+    // prepack builds the ui — minutes, not seconds; inherit stdio so the wait is visible.
+    r = spawnSync('npm', ['pack'], { cwd: root, stdio: ['ignore', 'pipe', 'inherit'] });
+    if (r.status !== 0) { console.log(bad('npm pack failed — package.json is being restored')); return 1; }
+    const file = (r.stdout || '').toString().trim().split('\n').pop();
+    const src = path.join(root, file);
+    const dst = path.join(outDir, file);
+    if (src !== dst) { fs.mkdirSync(outDir, { recursive: true }); fs.renameSync(src, dst); }
+    console.log(ok(`built ${dst}`));
+    console.log('  install it:            npm install -g ' + dst);
+    console.log('  on that machine, use:  memhouse update --no-install   (plain update would');
+    console.log('  install memhouse@latest from the registry — a silent downgrade of a nightly)');
+    return 0;
+  } finally {
+    // ALWAYS restore, whatever pack did — a checkout left claiming to be a nightly would
+    // leak the stamp into the next real release. Both manifests: npm version touches the
+    // lockfile too (measured; the first version of this restored only package.json).
+    spawnSync('git', ['checkout', '--', 'package.json', 'package-lock.json'], { cwd: root, stdio: 'ignore' });
+  }
+}
+
 async function cmdUninstall() {
+  // Confirm FIRST, before the first destructive act. This used to start removing the
+  // service the moment it was typed — and "uninstall" is exactly the kind of command a
+  // person types to see what it would do. Name what THIS tier removes and keeps, ask
+  // once; --yes answers it for scripts, and a non-interactive run WITHOUT --yes refuses
+  // rather than proceeding — a destructive default in a pipeline should be spelled out.
+  if (flags.yes !== true) {
+    const fullT = flags['full-removal'] === true;
+    const credsT = fullT || flags.credentials === true;
+    const removes = ['the shipper/dashboard daemons and the OS service'];
+    if (credsT) removes.push(`the house connection and its credential (${ENV_FILE.replace(os.homedir(), '~')})`);
+    if (fullT) removes.push("this machine's host identity (a reinstall becomes a NEW host)");
+    const keeps = [];
+    if (!credsT) keeps.push('the house connection and credential');
+    if (!fullT) keeps.push("this machine's host identity");
+    keeps.push('ALL data in ClickHouse (no tier ever touches the house)');
+    console.log('This removes:');
+    for (const r of removes) console.log(`  - ${r}`);
+    console.log('Kept:');
+    for (const k of keeps) console.log(`  - ${k}`);
+    if (!process.stdin.isTTY) {
+      console.log(bad('not confirming a destructive command without a terminal — pass --yes to proceed'));
+      process.exitCode = 1;
+      return;
+    }
+    const a = (await ask('Uninstall? (yes/no)', 'no')).toLowerCase();
+    if (a !== 'yes' && a !== 'y') { console.log('aborted'); return; }
+  }
+
   // The OS service first, and this is not tidiness: it outlives the pidfile daemons by
   // design, it holds the credential inlined in its unit file, and it restarts itself. An
   // uninstall that stopped only the daemons would report success while a service kept
@@ -2366,7 +2698,9 @@ async function cmdUninstall() {
       }
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
-    case 'migrate-rooms': process.exitCode = await cmdMigrateRooms(); break;
+    case 'nightly': process.exitCode = await cmdNightly(); break;
+    case 'migrate': process.exitCode = await cmdMigrate({}); break;
+    case 'migrate-rooms': process.exitCode = await cmdMigrate({ component: 'rooms' }); break;
     case 'deploy': {
       const dep = require(path.join(REPO_ROOT, 'memhouse', 'deploy.js'));
       if (flags.down) {
@@ -2713,6 +3047,26 @@ async function cmdUninstall() {
         // A refusal is a failure. Silence here told automation the credential-bearing
         // unit was gone while it was still installed and possibly still shipping.
         if (!r.ok) process.exitCode = 1;
+      } else if (sub === 'stop' || sub === 'start' || sub === 'restart') {
+        // These existed only as advice text for a while — and the advice named
+        // `memhouse service stop`, which fell through to status. A command a message
+        // tells you to run has to exist.
+        const st = svc.status();
+        if (!st.kind || !st.installed) { console.log(warn('service not installed')); process.exitCode = 1; break; }
+        const args = st.kind === 'systemd'
+          ? [['systemctl', ['--user', sub, 'memhouse-shipper']]]
+          : (sub === 'stop'
+            ? [['launchctl', ['bootout', `gui/${process.getuid()}/com.memhouse.shipper`]]]
+            : sub === 'start'
+              ? [['launchctl', ['bootstrap', `gui/${process.getuid()}`, st.path]]]
+              : [['launchctl', ['kickstart', '-k', `gui/${process.getuid()}/com.memhouse.shipper`]]]);
+        let failed = false;
+        for (const [b, a] of args) {
+          const r = spawnSync(b, a, { stdio: 'pipe', encoding: 'utf-8' });
+          if (r.status !== 0) { console.log(bad(`${b} ${a.join(' ')}: ${(r.stderr || '').trim().split('\n')[0] || `exit ${r.status}`}`)); failed = true; }
+        }
+        if (!failed) console.log(ok(`service ${sub === 'stop' ? 'stopped' : sub === 'start' ? 'started' : 'restarted'} (${st.kind})`));
+        process.exitCode = failed ? 1 : 0;
       } else {
         const st = svc.status();
         if (!st.kind) { console.log(warn(`no service integration for '${process.platform}'`)); break; }

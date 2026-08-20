@@ -9,9 +9,10 @@ long-term conversation memory.
 
 You have persistent memory of past agent sessions — every conversation this user
 has had with coding agents (Claude Code, Codex, Gemini CLI, Cursor, and other
-editors), across all of YOUR machines, stored in your own rooms in a ClickHouse
-database called **{{DB}}**. Other members of the same house have their own rooms and
-you hold no grant on them.
+editors), across all of THEIR machines, stored in a ClickHouse database called
+**{{DB}}** (their "house"). The house outlives the transcripts on disk: editors
+compact and delete local session files after weeks, and the house is then the only
+copy.
 Connection: read `{{ENV_FILE}}` (`MEMHOUSE_URL/USER/PASSWORD/DB`); query over
 HTTP with `curl -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" "$MEMHOUSE_URL/?database=$MEMHOUSE_DB"`
 and always add `SETTINGS final=1, join_use_nulls=1` to reads — the second matters
@@ -22,9 +23,11 @@ work that is not in your current context ("that session where…", "how did I so
 X before", "did we ever…", "what was I working on last week"), search memhouse
 FIRST. Only say you don't know after a search comes back empty.
 
-**How to query.** Prefer the installed skills when present: `/memhouse:search`
-(full-text over messages), `/memhouse:sessions` (list/filter sessions),
-`/memhouse:sql` (free-form read-only SQL). Without skills, query directly.
+**How to query.** Prefer the installed skills when present: `/mem:ask` (answer a
+question from memory, with citations), `/mem:search` (full-text over messages),
+`/mem:sessions` (list/filter sessions), `/mem:sql` (free-form read-only SQL),
+`/mem:status` (what the system holds and its health), `/mem:share` and
+`/mem:users` (read-only sharing between users). Without skills, query directly.
 
 **Table names.** The house's rooms are three plain, shared tables — `messages`,
 `sessions`, `tool_calls` — in the connection's database. Everyone in the house writes
@@ -33,21 +36,39 @@ which machine. Query the whole house by default; add `WHERE user_id = '<name>'` 
 person. **There is no `sessions_v` object** — the rollup is a saved query, and
 `memhouse sessions-query` prints it ready to drop into a `FROM (...) AS c`.
 
+**One session can be stored more than once.** The shipper never deletes: when an editor
+compacts or shortens a session, the new parse is written under a higher `epoch` and the
+old one is retained. Every direct read of `messages`/`tool_calls` must filter to the
+current parse, or counts double and a replay interleaves two versions of the session:
+
+```sql
+-- call this CUR below
+WHERE origin != 'ship'
+   OR (session_id, user_id, epoch) IN (
+        SELECT session_id, user_id, max(epoch) FROM messages
+        WHERE origin = 'ship' GROUP BY session_id, user_id)
+```
+
+Drop CUR deliberately only when asked what a session said BEFORE it was compacted —
+the retained epochs are the only place that content still exists.
+
 - Find sessions about a topic (FTS, lowercase your terms):
   `SELECT DISTINCT session_id, any(project), min(ts) FROM messages
-   WHERE hasToken(text_word, 'clickhouse') GROUP BY session_id
+   WHERE hasToken(text_word, 'clickhouse') AND <CUR> GROUP BY session_id
    ORDER BY 3 DESC LIMIT 10 SETTINGS final=1, join_use_nulls=1 FORMAT PrettyCompact`
 - Recent sessions: `SELECT session_id, source, project, started, first_prompt
    FROM $(memhouse sessions-query) AS c ORDER BY started DESC LIMIT 20 SETTINGS final=1, join_use_nulls=1`
+  (the rollup applies the current-parse filter itself)
 - Replay one session: `SELECT role, text FROM messages
-   WHERE session_id = '<id>' ORDER BY seq SETTINGS final=1, join_use_nulls=1`
+   WHERE session_id = '<id>' AND <CUR> ORDER BY seq SETTINGS final=1, join_use_nulls=1`
 
 **Rules.**
 - Memory is READ-ONLY for you. Never INSERT/ALTER/DROP — ingestion belongs to the
   memhouse shipper alone.
 - Quote retrieved content as *the user's past sessions*, and cite the session_id
   when the user may want to dig deeper.
-- Other members' sessions are invisible to you unless they have granted you their rooms.
-  You hold no grant on them otherwise, so naming one fails rather than returning nothing.
-  An empty result means "nothing visible", not "nothing ever happened".
+- Other users' HOUSES (other databases on the same server) are readable only when
+  shared with this credential (`/mem:share` on their side). Query a shared house by
+  qualified names — `polat.messages` — with the same CUR filter. An empty result
+  means "nothing visible", not "nothing ever happened".
 - Do not paste credentials from `{{ENV_FILE}}` into responses, commits, or logs.

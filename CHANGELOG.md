@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## 0.10.0 — unreleased
+## 0.10.0 — 2026-08-20
 
 **The shipper stops deleting.** Breaking on the room schema: an existing house needs
 `memhouse migrate-rooms` before it can be shipped into.
@@ -24,7 +24,69 @@ migration path is planned work, not a promise the old versions can cash.
 - **Reads show one parse per session.** `roomNames()` resolves `messages` and `tool_calls`
   to a current-epoch subquery, and the bare tables only as `messages_raw` /
   `tool_calls_raw` for writes and DDL. Counts, tokens and cost are unchanged. Hand-written
-  SQL needs the filter — `/memhouse:sql` carries it.
+  SQL needs the filter — `/mem:sql` carries it.
+- **`memhouse migrate`** — a migration runner, not a one-off. Migrations live in
+  `memhouse/house/migrations/<id>.js` (registry: id, component, toVersion, detect, plan,
+  steps); the runner detects what a house still needs FROM ITS ROOMS (never from the
+  record — a hand-migrated house has no record), shows the plan, and executes in order.
+  `--dry-run` prints and touches nothing; `--yes` skips the confirm. Every migration
+  inherits the invariants: nothing deleted, provenance never restamped, atomic swap,
+  late writes survive, everything recorded in `house_events`. `memhouse migrate-rooms`
+  is the same runner scoped to the rooms component.
+- **`memhouse update` names, asks, or runs pending migrations.** After the files update
+  it detects what the house needs: `--migrate` (or `--yes`) runs them unasked,
+  an interactive session is asked once (the inner confirm is not repeated), and a
+  non-interactive run only names them and prints the command — a cron must never start
+  a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
+  who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **`memhouse uninstall` asks first.** It used to start removing the service the moment
+  it was typed. It now prints exactly what the chosen tier removes and keeps (the house
+  data is never touched, and says so), confirms once, takes `--yes` for scripts, and a
+  non-interactive run without `--yes` refuses rather than proceeding.
+- **`memhouse nightly [--out DIR]`** builds an installable, version-stamped tarball from
+  a checkout (`<base>-nightly.<YYYYMMDDTHHMM>`) without publishing — stamp, `npm pack`,
+  restore, so the checkout stays clean and the test machine's `--version` tells the
+  truth. On such an install use `memhouse update --no-install`; plain `update` installs
+  `memhouse@latest` and silently downgrades a nightly.
+- **`/mem:share` and `/mem:users`** — sharing as a skill. Members are now granted
+  `SELECT … WITH GRANT OPTION` beside their `ALL` (both install paths), so
+  `/mem:share <user>` opens a read-only window into your own house with no operator —
+  and can hand on nothing more, because the grant option stops at SELECT. `revoke` closes
+  it; bare `/mem:share` lists who can read you. On a pre-0.10 house (no grant option) the
+  skill prints the one statement the admin runs. `/mem:users` reports who writes into
+  your house, whose houses you can read, who can read yours, and (where permitted) the
+  server's user list — each section degrading legibly on a hardened server.
+- **`/mem:status`** reports the memory system's state from inside an agent: per-editor
+  holdings (current parses only), freshness and coverage bounds, schema generation and
+  migration state, and the writer fleet — including the rows-without-record signature of
+  a pre-0.10 machine still writing.
+- **The plugin is `mem` now, and it answers questions.** Skills install as `/mem:ask`,
+  `/mem:search`, `/mem:sessions`, `/mem:sql` (the `mem` short name belonged to the
+  retired memory-house and moves to the living product). `/mem:ask` is new: retrieve the
+  relevant past sessions, read the transcripts, answer with citations — the synthesis is
+  the agent's; memhouse itself still runs no LLM anywhere. The installer removes a
+  pre-0.10 `skills/memhouse/` copy (only when it is provably ours) so the old and new
+  namespaces never load side by side.
+- **`install` ends with a getting-started overview** — dashboard, service, skills,
+  search, doctor — instead of a single next-step line.
+- **Writer compatibility is enforced, both directions.** Each release declares which
+  schema generations it may write (`SUPPORTED_SCHEMAS`); every pass starts by reading the
+  house's own record and refuses — before touching a room — when the house is newer than
+  the shipper (`Update THIS machine: memhouse update`) or below the floor a migration set
+  (`house_meta['min_writer_schema']`). The room-shape checks stay: they catch what a
+  record cannot (a hand-built house with no record at all).
+- **The house knows its fleet.** Every writer records the schema it supports and a
+  per-pass heartbeat, keyed `member@host` (member-only keying let two machines of one
+  member clobber each other's entry). `memhouse status` shows the fleet — writer,
+  version, last ship — and `doctor` fails on the writers that matter: `legacy` (a
+  pre-0.10 memhouse, visible because its ROWS are in the house while it records nothing
+  about itself — its re-ships delete retained parses) and `outdated` (refusing every
+  pass until updated). Ground truth is the data, not the record, so a writer that
+  predates the record cannot hide.
+- **Mixed-version fleets: upgrade every machine of a member promptly.** A pre-0.10
+  shipper on another machine keeps working against migrated rooms (its key check only
+  looks for `origin`), but its delete-before-reinsert reaches every retained parse of a
+  session it re-ships. `memhouse migrate` warns about this at migration time.
 - **`memhouse migrate-rooms`** rebuilds rooms whose sorting key predates this version:
   copy, one atomic `RENAME`, old room kept as `<room>_pre_epoch` for the pilot to drop.
   Nothing is deleted, and `user_id` is carried across explicitly rather than restamped —
