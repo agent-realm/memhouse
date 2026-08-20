@@ -4,6 +4,20 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.4 — 2026-08-20
+
+- **Inserts are compressed and byte-bounded — the shipper stops choking slow links.**
+  Profiling a real house behind a Cloudflare tunnel showed the shipper's inserts taking up
+  to 77s each, and the ProfileEvents were unambiguous: `NetworkReceiveElapsed = 76s`,
+  full-text index build 0.8s, CPU 1.1s, disk 0.009s — the entire cost was **uploading a
+  ~27 MB uncompressed JSON batch through the tunnel**, not ClickHouse. Two fixes: the
+  shipper now (1) **gzip-compresses the request body** (`compression: { request: true }`) —
+  measured 3.6–8× smaller on the wire — and (2) **caps each insert batch at ~4 MB as well
+  as 2000 rows**, whichever comes first, so a handful of very wide messages can't build a
+  giant single upload (`MEMHOUSE_BATCH_BYTES` overrides the ceiling). Reads were never the
+  problem — server-side SELECTs are 20–70ms; the latency you feel over a tunnel is round
+  trip, and `FINAL` (needed for ReplacingMergeTree correctness) adds ~40ms.
+
 ## 0.12.3 — 2026-08-20
 
 - **`install` no longer blocks on the first ship — it ships in the background.** A fresh

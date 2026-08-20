@@ -9,8 +9,9 @@
 // columns instead of a raw JSON blob.
 //
 // Data-plane rules (binding, see DESIGN.md):
-//   - JSONEachRow, batches <= 2000 rows, async_insert=0 on EVERY insert — the house
-//     stamps user_id MATERIALIZED currentUser(), which is empty during async flushes.
+//   - JSONEachRow, gzip-compressed request body, batches capped at 2000 rows OR ~4 MB
+//     (whichever first), async_insert=0 on EVERY insert — the house stamps user_id
+//     MATERIALIZED currentUser(), which is empty during async flushes.
 //   - DateTime64 values travel as 'YYYY-MM-DD HH:MM:SS.mmm' UTC strings (plain
 //     format; ISO 'T'/'Z' forms parse unreliably under JSONEachRow). Nullable → null.
 //   - Int64-bound values are integer-coerced (some adapters emit fractional ms).
@@ -68,7 +69,12 @@ const {
 // house_events would otherwise roll out to nobody.
 const ALL_TABLES = [...ROOM_TYPES, ...META_TYPES];
 
-const BATCH_ROWS = 2000;   // insert batch ceiling (binding)
+const BATCH_ROWS = 2000;   // insert batch ceiling by ROW COUNT
+// …and by BYTES. A row cap alone let a batch of 2000 wide messages reach ~27 MB, and
+// pushing that up through a proxy/tunnel is what dominated insert time (see createClient).
+// Flush at whichever ceiling hits first so no single upload is enormous, even uncompressed.
+// Override with MEMHOUSE_BATCH_BYTES for a tighter (slow link) or looser (LAN) path.
+const BATCH_BYTES = Math.max(256 * 1024, Number(process.env.MEMHOUSE_BATCH_BYTES) || 4 * 1024 * 1024);
 const TEXT_MAX = 50000;    // messages.text truncation
 const ARGS_MAX = 20000;    // tool_calls.args truncation
 
@@ -218,6 +224,11 @@ function makeClient() {
     username: process.env.MEMHOUSE_USER,
     password: process.env.MEMHOUSE_PASSWORD || '',
     database: process.env.MEMHOUSE_DB || process.env.MEMHOUSE_USER, // house defaults to the user's own name
+    // gzip the INSERT body. Measured on a real house behind a Cloudflare tunnel: a
+    // 2000-row batch was ~27 MB of JSON and the insert spent 76s in NetworkReceive alone
+    // (index build was 0.8s, CPU 1.1s) — the upload, not ClickHouse, was the whole cost.
+    // Conversation text compresses ~5-10x, so this turns tens of MB on the wire into a few.
+    compression: { request: true },
     request_timeout: 300000, // full re-ships move tens of MB; don't cut inserts short
     clickhouse_settings: {
       // Int64/UInt64 back as JSON numbers — our values (counts, tokens) are < 2^53.
@@ -1011,6 +1022,7 @@ async function runShip(client, opts = {}) {
   reportAdapterErrors(warned);
 
   const batches = { sessions: [], messages: [], tool_calls: [] };
+  const batchBytes = { sessions: 0, messages: 0, tool_calls: 0 };
   const flush = async (table) => {
     if (!batches[table].length) return;
     await client.insert({
@@ -1020,10 +1032,15 @@ async function runShip(client, opts = {}) {
       clickhouse_settings: { async_insert: 0 }, // binding: user_id stamping breaks otherwise
     });
     batches[table] = [];
+    batchBytes[table] = 0;
   };
   const push = async (table, row) => {
     batches[table].push(row);
-    if (batches[table].length >= BATCH_ROWS) await flush(table);
+    // Accumulate the serialized size so a few very wide rows (a 50k-char message) flush the
+    // batch as readily as 2000 small ones. The client re-serializes on insert; this extra
+    // stringify is trivial next to the network time it exists to bound.
+    batchBytes[table] += Buffer.byteLength(JSON.stringify(row));
+    if (batches[table].length >= BATCH_ROWS || batchBytes[table] >= BATCH_BYTES) await flush(table);
   };
 
   const seen = new Set(); // adapters must not double-ship a session id within a pass
