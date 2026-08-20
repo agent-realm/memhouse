@@ -71,9 +71,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Restart=always, not on-failure: the shipper EXITS 0 ON PURPOSE when an upgrade replaces
+# the files underneath it (self-update.js, supervised path) and counts on the supervisor
+# to start the new version. Under on-failure that handover left the service dead after
+# every npm upgrade — found on testbed, service inactive(dead) status=0/SUCCESS.
+# RestartSec plus self-update's re-exec chain cap guard against restart loops.
 ${envLines(env)}
 ExecStart=${[node, script, ...args].map(execToken).join(' ')}
-Restart=on-failure
+Restart=always
 RestartSec=30
 StandardOutput=append:${path.join(logDir, logName)}
 StandardError=append:${path.join(logDir, logName)}
@@ -104,7 +109,7 @@ ${envEntries}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
-  <dict><key>SuccessfulExit</key><false/></dict>
+  <true/>
   <key>StandardOutPath</key><string>${xml(path.join(logDir, logName))}</string>
   <key>StandardErrorPath</key><string>${xml(path.join(logDir, logName))}</string>
 </dict>

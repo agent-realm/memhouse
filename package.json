@@ -1,6 +1,6 @@
 {
   "name": "memhouse",
-  "version": "0.9.0",
+  "version": "0.12.1",
   "description": "memhouse — agent conversation memory across 17 editors: parse-on-client shippers, a typed ClickHouse store with one set of rooms per member, kernel-agency install, and the agentlytics dashboard",
   "main": "bin/memhouse.js",
   "bin": {
@@ -27,6 +27,8 @@
     "build": "cd ui && npm install && npm run build",
     "dev": "cd ui && npm run dev",
     "test": "node misc/syntax-check.js && node misc/unit-test.js && node misc/mcp-unit-test.js",
+    "test:house": "node misc/house-test.js",
+    "test:mcp": "node misc/mcp-test.js && node misc/mcp-http-test.js",
     "prepack": "cd ui && npm install --no-audit --no-fund && npm run build"
   },
   "keywords": [

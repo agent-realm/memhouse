@@ -37,8 +37,198 @@ Windsurf, Copilot, Goose, and the rest read the same memory back.
   outgoing frame — including results that legitimately select it.
 - Tested at three levels: protocol units in `npm test`, and two live batteries
   over a throwaway house (`misc/mcp-test.js` for stdio, `misc/mcp-http-test.js`
-  for HTTP) — 57 checks total, including a real-client pass driven by Claude
-  Code itself via `--mcp-config`.
+  for HTTP) — 61 checks total, including a real-client pass driven by Claude
+  Code itself via `--mcp-config`, and a three-round adversarial review
+  (stderr scrub, HTTP route guard, stdio flow control) ending CLEAN.
+
+## 0.12.1 — 2026-08-20
+
+- **The skills no longer fall back to a hardcoded `mem` house.** A house is a database
+  named for its owner — `resolveConfig` defaults `MEMHOUSE_DB` to the connection's
+  username (`polat` ships into `polat.messages`), and `memhouse invite` mints a per-user
+  database. But the plugin skills hardcoded `${MEMHOUSE_DB:-mem}` in their connection
+  recipes, so a config missing `MEMHOUSE_DB` would silently query a `mem` house that the
+  user-named convention had moved on from. All eight skills now fall back to
+  `${MEMHOUSE_DB:-$MEMHOUSE_USER}`, matching the CLI. (The env file always sets
+  `MEMHOUSE_DB`, so this only bit an unset-DB config — but the stale default was wrong.)
+
+## 0.12.0 — 2026-08-20
+
+- **`memhouse relocate --to <url>` moves a whole house to a new ClickHouse.** The copy is
+  a server-to-server `remoteSecure()` INSERT SELECT — the destination pulls each room
+  directly from the source over the native protocol, so the pilot's laptop is never in the
+  data path and, crucially, **the shipper never re-ingests**: once the new host holds a
+  faithful copy, the shipper's skip predicate sees every old session already present and
+  ships only genuinely new work. Provenance is carried, not restamped
+  (`insert_allow_materialized_columns=1`), so a shared house keeps every member's
+  `user_id` — verified against two live ClickHouse instances (source rows stamped `alice`
+  arrive as `alice`, not the copier). `house_meta` carries only durable facts
+  (`schema_version`, `min_writer_schema`, `share:*`); per-host heartbeats regenerate. The
+  SOURCE is only ever read — a failed run leaves the old house intact — and a hard
+  row-count gate must pass before the local config is repointed (the previous env is kept
+  as `env.pre-relocate`). Flags: `--to-user/--to-password/--to-db`, `--from-native-host`
+  (when the destination's route to the source differs from the pilot's URL),
+  `--from-native-port` (default 9440 TLS), `--insecure-native` (`remote()` + 9000),
+  `--keep-shipper`, `--dry-run`, `--yes`. The source password reaches the destination's
+  `query_log` (never this transcript) — rotate it after if those logs are not yours.
+- This is the host-to-host data-copy piece named in
+  `docs/design/host-repoint-reconciliation.md`; the reconciliation gate (detecting an
+  *accidental* repoint at an empty host) remains deferred.
+
+## 0.11.3 — 2026-08-20
+
+- **Read a friend's shared memory by naming their house.** A share is a read-only GRANT on
+  a whole house (a ClickHouse database), and the rooms resolve by the connection's
+  database — so `/mem:ask`, `/mem:search` and `/mem:sql` now recognize a house named in the
+  question ("how did yigit fix X", "search … in yigit", "query yigit's house"), resolve it
+  against `SHOW DATABASES`, and point the connection at that house with your own
+  credentials, read-only. A name that matches a readable house wins over the `in <project>`
+  qualifier — otherwise "in yigit" silently filtered your own project column and returned
+  nothing. `/mem:hello` now names the phrase, and `/mem:users` still lists the houses shared
+  with you.
+
+## 0.11.2 — 2026-08-20
+
+- **`/mem:hello` leads with a what-is overview.** Before, the welcome skill only said
+  what memhouse *is* in its not-configured branch — a configured user got session counts
+  and a command tour but never the one-paragraph framing. It now gives a
+  state-independent overview first, in every state: a shipper reads 17 editors' session
+  files into a ClickHouse *house you own*, on any ClickHouse you point it at (local, your
+  own VM, or a managed/remote server — memhouse is not a hosted service and phones nothing
+  home), runs no LLM in its path, and outlives the transcripts editors delete after weeks.
+- **The tour now separates the three retrieval skills.** `/mem:ask`, `/mem:search` and
+  `/mem:sql` overlap enough that the same words work in each; the tour carries the rule
+  that tells them apart — **want a session → search, want an answer → ask, want a number →
+  sql** (ask runs a search then reads and cites; search stops at the list; sql aggregates).
+
+## 0.11.1 — 2026-08-20
+
+- **Upgrading from 0.9.x needs one manual step**, and the tool now says so plainly. `memhouse update` runs the OLD version's update code (it replaces itself mid-run), and 0.9.x predates migrations — so it cannot prompt to migrate the house the way an upgrade from 0.10+ does. The first ship after such an upgrade refuses (nothing is lost) and now leads with the exact fix: **run `memhouse migrate` once, by hand.** From 0.11 onward the interactive prompt works normally. (Found upgrading a real 87k-message house.)
+
+## 0.11.0 — 2026-08-20
+
+- **`memhouse invite <name>`** mints a member and their own house on the server (same
+  verified path as the admin install — grants, grant option, async pin, connect-as-member
+  proof) and writes the ONE env file their install needs; this machine's config is never
+  touched. Refuses loopback URLs (the file must work from the invitee's machine) and
+  states plainly that the file is a credential.
+- **`memhouse install --env <file>`** installs from an invite file: values load as if
+  typed, nothing prompts, nothing persists until the connection and rooms prove out.
+- **`memhouse passwd`** rotates this member's password and rewrites the env file —
+  admin-assisted by ClickHouse's rules (members deliberately hold no ALTER USER), and the
+  reason it exists: an invited member's password is known to the inviter until rotated.
+- **Self-service password rotation.** Members are granted `ALTER USER ON <self>` — a
+  self-scoped grant (verified non-escalating: the holder cannot alter or grant on any
+  other user), so `memhouse passwd` needs no admin. It tries self-rotation first and only
+  falls back to `--admin-*` for a pre-0.11 member.
+- **`memhouse invite` uses your own credential when it can.** If the configured user can
+  manage users (an install made as an admin-capable ClickHouse user), no `--admin-*` is
+  needed. The invite file carries `MEMHOUSE_INVITE=1`, and `memhouse install --env` then
+  OFFERS to rotate the inviter-set password to one only the invitee knows (`--yes` does it
+  unasked) — so the inviter's knowledge of the password expires at install.
+- **`/mem:invite` and `/mem:hello`** — the invite flow and a grounded introduction from
+  inside an agent. Inviting comes before sharing: a share can only grant a user who
+  exists.
+
+## 0.10.0 — 2026-08-20
+
+**The shipper stops deleting.** Breaking on the room schema: an existing house needs
+`memhouse migrate-rooms` before it can be shipped into.
+
+- **`DELETE FROM` is gone from the shipper**, and with it the only privilege whose misuse
+  loses data — nothing memhouse runs needs `ALTER DELETE` any more. The clear existed to
+  remove the stale `seq` tail a shorter re-parse leaves behind (ReplacingMergeTree dedupes
+  same-key rows; it cannot remove a row the new parse no longer produces). It could not
+  tell a fixed adapter bug from a **compacted or expired transcript** — Claude Code
+  rewrites sessions in place and deletes them after `cleanupPeriodDays`, 30 days by
+  default — so it destroyed content the house was the last copy of.
+- **`epoch` joins `origin` in the sorting key** of `messages` and `tool_calls`. A re-parse
+  that is shorter than the stored one, or that differs from it at a `seq` the house already
+  holds (compared on the stored `line_hash`), is written under a new epoch; the superseded
+  parse stays complete and readable. An unchanged or merely longer re-parse reuses its
+  epoch and dedupes exactly as before, so the common case costs nothing.
+- **Reads show one parse per session.** `roomNames()` resolves `messages` and `tool_calls`
+  to a current-epoch subquery, and the bare tables only as `messages_raw` /
+  `tool_calls_raw` for writes and DDL. Counts, tokens and cost are unchanged. Hand-written
+  SQL needs the filter — `/mem:sql` carries it.
+- **`memhouse migrate`** — a migration runner, not a one-off. Migrations live in
+  `memhouse/house/migrations/<id>.js` (registry: id, component, toVersion, detect, plan,
+  steps); the runner detects what a house still needs FROM ITS ROOMS (never from the
+  record — a hand-migrated house has no record), shows the plan, and executes in order.
+  `--dry-run` prints and touches nothing; `--yes` skips the confirm. Every migration
+  inherits the invariants: nothing deleted, provenance never restamped, atomic swap,
+  late writes survive, everything recorded in `house_events`. `memhouse migrate-rooms`
+  is the same runner scoped to the rooms component.
+- **`memhouse update` names, asks, or runs pending migrations.** After the files update
+  it detects what the house needs: `--migrate` (or `--yes`) runs them unasked,
+  an interactive session is asked once (the inner confirm is not repeated), and a
+  non-interactive run only names them and prints the command — a cron must never start
+  a house-wide copy on its own. `update --no-install` skips the npm/git step for pilots
+  who already upgraded by hand and want the half a bare `npm i -g` leaves undone.
+- **`memhouse uninstall` asks first.** It used to start removing the service the moment
+  it was typed. It now prints exactly what the chosen tier removes and keeps (the house
+  data is never touched, and says so), confirms once, takes `--yes` for scripts, and a
+  non-interactive run without `--yes` refuses rather than proceeding.
+- **`memhouse nightly [--out DIR]`** builds an installable, version-stamped tarball from
+  a checkout (`<base>-nightly.<YYYYMMDDTHHMM>`) without publishing — stamp, `npm pack`,
+  restore, so the checkout stays clean and the test machine's `--version` tells the
+  truth. On such an install use `memhouse update --no-install`; plain `update` installs
+  `memhouse@latest` and silently downgrades a nightly.
+- **`/mem:share` and `/mem:users`** — sharing as a skill. Members are now granted
+  `SELECT … WITH GRANT OPTION` beside their `ALL` (both install paths), so
+  `/mem:share <user>` opens a read-only window into your own house with no operator —
+  and can hand on nothing more, because the grant option stops at SELECT. `revoke` closes
+  it; bare `/mem:share` lists who can read you. On a pre-0.10 house (no grant option) the
+  skill prints the one statement the admin runs. `/mem:users` reports who writes into
+  your house, whose houses you can read, who can read yours, and (where permitted) the
+  server's user list — each section degrading legibly on a hardened server.
+- **`/mem:status`** reports the memory system's state from inside an agent: per-editor
+  holdings (current parses only), freshness and coverage bounds, schema generation and
+  migration state, and the writer fleet — including the rows-without-record signature of
+  a pre-0.10 machine still writing.
+- **The plugin is `mem` now, and it answers questions.** Skills install as `/mem:ask`,
+  `/mem:search`, `/mem:sessions`, `/mem:sql` (the `mem` short name belonged to the
+  retired memory-house and moves to the living product). `/mem:ask` is new: retrieve the
+  relevant past sessions, read the transcripts, answer with citations — the synthesis is
+  the agent's; memhouse itself still runs no LLM anywhere. The installer removes a
+  pre-0.10 `skills/memhouse/` copy (only when it is provably ours) so the old and new
+  namespaces never load side by side.
+- **`install` ends with a getting-started overview** — dashboard, service, skills,
+  search, doctor — instead of a single next-step line.
+- **Writer compatibility is enforced, both directions.** Each release declares which
+  schema generations it may write (`SUPPORTED_SCHEMAS`); every pass starts by reading the
+  house's own record and refuses — before touching a room — when the house is newer than
+  the shipper (`Update THIS machine: memhouse update`) or below the floor a migration set
+  (`house_meta['min_writer_schema']`). The room-shape checks stay: they catch what a
+  record cannot (a hand-built house with no record at all).
+- **The house knows its fleet.** Every writer records the schema it supports and a
+  per-pass heartbeat, keyed `member@host` (member-only keying let two machines of one
+  member clobber each other's entry). `memhouse status` shows the fleet — writer,
+  version, last ship — and `doctor` fails on the writers that matter: `legacy` (a
+  pre-0.10 memhouse, visible because its ROWS are in the house while it records nothing
+  about itself — its re-ships delete retained parses) and `outdated` (refusing every
+  pass until updated). Ground truth is the data, not the record, so a writer that
+  predates the record cannot hide.
+- **Mixed-version fleets: upgrade every machine of a member promptly.** A pre-0.10
+  shipper on another machine keeps working against migrated rooms (its key check only
+  looks for `origin`), but its delete-before-reinsert reaches every retained parse of a
+  session it re-ships. `memhouse migrate` warns about this at migration time.
+- **`memhouse migrate-rooms`** rebuilds rooms whose sorting key predates this version:
+  copy, one atomic `RENAME`, old room kept as `<room>_pre_epoch` for the pilot to drop.
+  Nothing is deleted, and `user_id` is carried across explicitly rather than restamped —
+  it is `MATERIALIZED currentUser()`, so a plain `INSERT SELECT` would reassign every row
+  in a shared house to whoever ran the migration. Rows a running shipper writes during the
+  copy are picked up afterwards.
+- **The house keeps a record of itself**: `house_meta` (schema version, per-member client
+  version) and the append-only `house_events` (migrations pending/applied/failed, version
+  changes, actor, host, row counts). `memhouse doctor` reads it back, so a migration that
+  died between the copy and the swap is reported rather than left to be noticed.
+- **Fixed: the schema column healer had been dead** since the rooms became plain shared
+  tables. It matched `<type>_{{MEMBER}}`, which no longer exists, so it compared zero
+  columns — while `ensureSchema`, `--ensure-schema`, `warnMissingColumns` and `doctor` all
+  reported success over that empty comparison.
+- `npm run test:house` — the first tests that run against a real ClickHouse (throwaway
+  container, fixture adapters). Green on 25.11 and 26.7.
 
 ## 0.9.0 — 2026-08-16
 

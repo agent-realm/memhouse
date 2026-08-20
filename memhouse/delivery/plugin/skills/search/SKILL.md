@@ -1,12 +1,12 @@
 ---
 name: search
-description: Full-text search across ALL shipped agent conversations — every session from all 17 supported editors (Claude Code, Codex, Cursor, VS Code, Zed, OpenCode, Gemini CLI, …), every project, every machine — stored in the memhouse ClickHouse. Use whenever the user refers to something from the past that isn't in the current context, e.g. "what did I say about X", "find that conversation about Y", "when did I work on Z", "did I ever try W", "the chat where we discussed it", "remind me how I did it". Reach for this before saying you don't know about prior work.
+description: Full-text search across ALL shipped agent conversations — every session from all 17 supported editors (Claude Code, Codex, Cursor, VS Code, Zed, OpenCode, Gemini CLI, …), every project, every machine — stored in the memhouse ClickHouse. Use whenever the user refers to something from the past that isn't in the current context, e.g. "what did I say about X", "find that conversation about Y", "when did I work on Z", "did I ever try W", "the chat where we discussed it", "remind me how I did it". Searches your own house by default, or a friend's house shared with you when they name it ("find X in yigit's memory"). Reach for this before saying you don't know about prior work.
 user-invocable: true
 argument-hint: "<search terms> [in <project>] [last <N> days] [from <editor>]"
 allowed-tools: Bash
 ---
 
-# /memhouse:search — search conversation memory
+# /mem:search — search conversation memory
 
 Search the full message history in the memhouse house. Every room is named for your
 ClickHouse user — `messages`, `sessions` — see **Room names** below.
@@ -50,7 +50,7 @@ fi
 # in 50 samples). What actually leaks a credential is PRINTING it, which the rule above
 # covers.
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
@@ -142,9 +142,32 @@ LIMIT 10
 FORMAT PrettyCompact
 ```
 
+## Reading another person's house (shared with you)
+
+Every house is its own ClickHouse database on the same server; a share is a read-only
+GRANT on that database. To read a friend's memory you keep YOUR credentials and point the
+connection at THEIR house — the rooms (`messages`, `sessions`, `tool_calls`) resolve by
+the connection's `database`, so one change redirects every query in this skill.
+
+1. **Resolve the target house.** `SHOW DATABASES` lists what your credential may read; the
+   names that are not `system` / `information_schema` / `default` and not your own
+   `$MEMHOUSE_DB` are houses shared with you. If the user names one — "yigit's memory",
+   "in yigit", "house yigit", "from yigit" — set `HOUSE=yigit`; otherwise leave
+   `HOUSE=$MEMHOUSE_DB`.
+2. **Point the connection at it:** in the recipe above, replace
+   `database=${MEMHOUSE_DB:-$MEMHOUSE_USER}` with `database=<HOUSE>`. Leave the table names bare —
+   they resolve to that house. Nothing else in the query changes.
+3. **A house wins over `in <project>`.** A name that matches a readable house is a HOUSE,
+   not a project filter — otherwise "in yigit" silently filters YOUR house's project
+   column and returns nothing. If a real project in your own house shares the name, keep
+   the possessive ("<name>'s memory") or say "project <name>" to force the project reading.
+4. **Read-only, thin by design.** If the SELECT is refused, that house was not shared with
+   you (or the share was revoked) — say so; never guess another database.
+
 ## Qualifiers
 
-- `in <project>` → `AND m.project ILIKE '%<project>%'`
+- `in <project>` → `AND m.project ILIKE '%<project>%'` — but a name matching a readable
+  house is a HOUSE (see above), not a project.
 - `last N days` → `AND m.ts > now() - INTERVAL N DAY`
 - `from <editor>` → `AND m.source = '<id>'` (ids: `claude-code`, `codex`,
   `cursor`, `cursor-agent`, `vscode`, `zed`, `opencode`, `gemini-cli`,

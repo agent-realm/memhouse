@@ -307,10 +307,10 @@ but deliberately **not** in `README.md`'s top half, which holds to the public re
 |---|---|
 | **agency** | `memhouse` — the memory agency: the `mem` house plus its shipper resident. Also the public word for what you install here |
 | **house** | the `mem` ClickHouse database (`MEMHOUSE_DB`, default `mem`; `memhouse` was the pre-0.4 default) |
-| **room** | one set per member — `sessions_<m>`, `messages_<m>`, `tool_calls_<m>` — plus the owner-managed `Merge` rooms `all_sessions` / `all_messages` / `all_tool_calls` for team-wide reads. There are no unsuffixed rooms; the shared `sessions`/`messages`/`tool_calls` layout was removed in 0.4.0 |
-| **resident** | the shipper — `mem-house/shipper/ship.js`; earlier `agency/ingest.js`. `kind = "worker"`, `on = "loop"`. **The only resident here** |
-| **routine** | the session rollup — SQL text, not an object (`per-member/rooms.js`), run under the caller over their own rooms; and `messages_v` / `sessions_v` in `agency/house-schema.sql`, the prior-art wrap. Called, return, write nothing |
-| **member** | a person with their own credential and their own three rooms, granted those and nothing else; rows stamped `user_id MATERIALIZED currentUser()` (a materialized column — identity, not residency) |
+| **room** | three plain shared tables per house — `sessions`, `messages`, `tool_calls`. Everyone in the house writes into the same ones with their own credential; `user_id MATERIALIZED currentUser()` says who. The per-member `sessions_<m>` layout and its `Merge` rooms were removed in 0.8.0: the database is the boundary, not the table name. `house_meta` / `house_events` are **not** rooms — they are the house's record of itself |
+| **resident** | the shipper — `memhouse/shipper/ship.js`; earlier `agency/ingest.js`. `kind = "worker"`, `on = "loop"`. **The only resident here**, and insert-only since 0.10.0 |
+| **routine** | the session rollup and the current-parse room filter — SQL text, not objects (`house/house.js`: `sessionsRollup`, `currentParse`), run under the caller over the house's rooms. Called, return, write nothing |
+| **member** | a person with their own credential on the house, sharing its three rooms with every other member; rows stamped `user_id MATERIALIZED currentUser()` (a materialized column — identity, not residency) |
 
 ## Terms this repo consumes from the kernel
 
@@ -335,6 +335,11 @@ Not in the canon, and not meant to be — these are memhouse's own words:
   parses when you query — work done during your call, for your call. memhouse parses before anyone
   asks and writes the result down. That is why memhouse's derived layer can afford to write nothing:
   it is routines over rows the shipper already wrote.
+- **epoch** — which parse of a session a transcript row belongs to. The shipper bumps it when a
+  re-parse is shorter than the stored one or diverges from it at an overlapping `seq`, so the
+  superseded parse is kept rather than overwritten. Reads take the newest epoch per session.
+- **accumulator, not a mirror** — the house keeps what the source no longer has. Absence of a
+  session on disk is never a signal, and neither `sync` nor `prune` may be built.
 - **adapter** / **editor** — the 17 per-editor session readers inherited from agentlytics
   (`editors/`). "editor" here means Claude Code, Cursor, Zed, … — not a text-editing UI.
 - **typed common schema** — physical typed columns across all 17 editors, versus derived-in-view.
@@ -395,12 +400,14 @@ Recorded so a later pass does not redo them:
   tree is an Express application object (`index.js`, `relay-server.js`) or a macOS `.app` bundle
   path in the editor-discovery table; `AGENTLYTICS-README.md`'s "requires their app to be running"
   means the Devin/Antigravity desktop application. None is the installable unit; none changed.
-- **`memorecall`** (retired 2026-07-29 → `/mem:recall`) — no occurrences. memhouse ships its own
-  skills under the `/memhouse:*` names (`/memhouse:search`, `/memhouse:sessions`,
-  `/memhouse:sql`), which are unaffected by that retirement. They earn the `memhouse:`
-  namespace by being installed as a PLUGIN — a directory carrying
-  `.claude-plugin/plugin.json`. Copied in as loose skill directories they would register
-  as unrelated top-level names, which is what happened until 0.4.5.
+- **`memorecall`** (retired 2026-07-29 → `/mem:recall`) — no occurrences. memhouse ships its
+  own skills under the `/mem:*` namespace (`/mem:ask`, `/mem:search`, `/mem:sessions`,
+  `/mem:sql`; the plugin was named `memhouse` until 0.10.0 and renamed `mem` by the
+  pilot's decision — memory-house, the previous holder of `/mem:*`, is retired and the
+  short name belongs to the living product). They earn the namespace by being installed
+  as a PLUGIN — a directory carrying `.claude-plugin/plugin.json`. Copied in as loose
+  skill directories they would register as unrelated top-level names, which is what
+  happened until 0.4.5.
 - **Manifest keys** — this repo has **no `realm.toml`**, so the `[[hall]]` → `[[house]]` /
   `[[house.room]]` / `entry_house` rename does not reach it. (The one `.toml` in the tree is an
   agent-gauntlet scenario config, `sandbox/vm-e2e/configs/`, which is not a manifest.) The

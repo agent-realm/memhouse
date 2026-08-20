@@ -76,7 +76,7 @@ memhouse update [--check]                  upgrade, restart daemons, check the s
 memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
-memhouse plugins install claude            /memhouse:search, :sessions, :sql —
+memhouse plugins install claude            /mem:search, :sessions, :sql —
                                            into every Claude Code config dir found
 memhouse mcp                               MCP server on stdio — the same memory for
                                            every MCP client, not just Claude Code
@@ -91,7 +91,7 @@ an agent — so an agent can install its own memory unattended.
 config directory on the machine** — `~/.claude`, whatever `CLAUDE_CONFIG_DIR` points
 at, and each Kommander-style playbook under `~/.claude-playbooks/`. All are selected by
 default; answer with numbers to narrow it, or pass `--target DIR` for exactly one.
-Installing into just the default config is how `/memhouse:search` ends up missing from
+Installing into just the default config is how `/mem:search` ends up missing from
 the instance you actually work in, silently, since a missing skill never announces
 itself.
 
@@ -234,24 +234,64 @@ which is also why joining a ClickHouse someone else runs (a kernel's, a team's) 
 no negotiation beyond a database and a credential. Housemates are collaborators;
 groups that should not see each other get separate houses.
 
-### Imported history is protected
+### The house never destroys what it cannot rebuild
 
-Rows carry an `origin`. The shipper clears a session before re-inserting it, so a
-shorter re-parse can't leave a stale tail behind — but that clear only removes rows
-the shipper itself wrote (`origin='ship'`). Anything you imported from an older
-house, another product, or a machine that no longer exists survives a re-ship.
+**The shipper is insert-only.** It runs no `DELETE`, no `TRUNCATE`, no mutation of any
+kind, so no privilege it holds can lose you a row.
 
-`origin` is in the sorting key of `messages` and `tool_calls` too, so
-ReplacingMergeTree can't quietly collapse an imported row against a shipped one. Both
-halves matter: guarding only the delete still loses data, through the merge instead of
-the mutation.
+That is not free, because ReplacingMergeTree is a dedupe engine, not a diff engine: a
+re-parse yielding *fewer* messages leaves the old higher-`seq` rows with nothing written
+over them. The shipper used to delete the session's rows first to clear that tail — and
+a shorter re-parse has two indistinguishable causes. Either an adapter bug was fixed and
+the extra rows are junk, or Claude Code **compacted** the transcript, or the retention
+window (`cleanupPeriodDays`, 30 days by default) took it. In the last two cases the house
+holds the only surviving copy, and the delete destroyed it.
 
-`sessions` is the deliberate exception — one row per session, no `origin` in its key.
-A session's metadata has a single current version, and keying it on origin gives the
-same session two rows, which makes every rollup count its messages twice.
+So rows carry an `epoch`: which parse of the session they belong to.
 
-The shipper checks both directions before it writes and prints the rebuild if a house
-has it wrong, so an old house cannot be corrupted by a new shipper.
+- **Nothing changed** (the common case, including ordinary growth): same epoch, rows
+  dedupe exactly as before, no extra storage.
+- **Shorter, or rewritten at a position the house already holds**: the new parse goes to
+  `epoch + 1`. The old one stays complete and readable. You pay storage only when the old
+  rows are irreplaceable.
+
+Reads show one parse per session — the newest — so counts, tokens and cost are unchanged.
+`/mem:sql` and any hand-written query should filter the same way; the skill carries
+the clause.
+
+**Imported history is protected the same way.** `origin` says who wrote a row, and it is
+in the sorting key of `messages` and `tool_calls`, so ReplacingMergeTree cannot collapse
+an imported row against a shipped one. Anything you imported from an older house, another
+product, or a machine that no longer exists survives every re-ship. `sessions` is the
+deliberate exception — one row per session, no `origin` and no `epoch` in its key, because
+a session's metadata has a single current version and a second row makes every rollup
+count its messages twice.
+
+The shipper verifies the sorting keys before it writes and refuses if they are wrong, so
+an old house cannot be corrupted by a new shipper. `memhouse migrate-rooms` rebuilds it:
+copy, atomic swap, and the old room kept as `<room>_pre_epoch` for you to drop. The house
+records the move in `house_events`, and `memhouse doctor` reads it back.
+
+## Upgrading
+
+`memhouse update` upgrades the code, restarts the daemons, and — from 0.10.0 onward —
+detects a schema migration the house needs and prompts to run it.
+
+**One exception: upgrading from 0.9.x.** That release predates migrations, and `update`
+runs the *old* version's code (it replaces itself mid-run), so it cannot prompt. After
+the upgrade the first ship refuses (nothing is lost) and tells you the one command to
+run by hand:
+
+```bash
+memhouse update      # installs the new version, refuses to ship the old-schema house
+memhouse migrate     # the one-time rebuild it named — copy + atomic swap, nothing deleted
+memhouse doctor      # every line a check mark
+```
+
+If other machines ship into the same house as the same member, upgrade them too — a
+pre-0.10 shipper still deletes-before-reinsert; `memhouse doctor` flags any that are
+behind, and prints the `REVOKE ALTER DELETE, ALTER UPDATE` fallback that stops them
+destructively until you can.
 
 ## Troubleshooting
 
@@ -330,6 +370,11 @@ Deeper reading: `memhouse/DESIGN.md` (the four bets),
 `memhouse/per-member/INSTALL.md` (the three install paths and every refusal),
 `memhouse/per-member/SCHEMA.md`, `memhouse/delivery/kernel-install.md`,
 `memhouse/COMPETITION.md`.
+
+Deferred designs (captured, not yet built): `docs/design/host-repoint-reconciliation.md`
+— what should happen when the shipper is repointed at a new, empty host (house identity,
+local binding state, and a refuse-then-`init-here` gate so transcripts never land on the
+wrong server).
 
 In constellation terms (`TERMINOLOGY.md`) memhouse is an **agency**: a **house**
 — the `mem` database — plus a **resident** working in it, the shipper. The house
