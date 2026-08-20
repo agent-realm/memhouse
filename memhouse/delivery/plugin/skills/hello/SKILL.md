@@ -26,7 +26,7 @@ set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
 if [ -n "${MEMHOUSE_URL:-}" ] && [ -n "${MEMHOUSE_USER:-}" ]; then
   curl -sS -m 5 --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
     --data-binary "SELECT uniqExact(session_id), count(), formatDateTime(min(ts),'%Y-%m-%d') FROM messages" \
-    "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&readonly=1" 2>&1
+    "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&final=1&readonly=1" 2>&1
 else
   echo "NOT_CONFIGURED"
 fi

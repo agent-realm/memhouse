@@ -84,7 +84,7 @@ fi
 # in 50 samples). What actually leaks a credential is PRINTING it, which the rule above
 # covers.
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
 <the query>
 FORMAT PrettyCompact
 SQL
@@ -106,7 +106,7 @@ friend's memory by pointing the connection at THEIR house — same credentials, 
 `database`. `SHOW DATABASES` lists what you may read; a name that is not `system` /
 `information_schema` / `default` and not your own `$MEMHOUSE_DB` is a house shared with
 you. When the user names one ("query yigit's house", "on yigit", "from yigit"), replace
-`database=${MEMHOUSE_DB:-mem}` with `database=<house>` in the connection recipe and leave
+`database=${MEMHOUSE_DB:-$MEMHOUSE_USER}` with `database=<house>` in the connection recipe and leave
 the table names bare — or, to join across houses in one query, qualify tables explicitly
 (`yigit.messages`). Read-only: a refused SELECT means that house was not shared with you.
 

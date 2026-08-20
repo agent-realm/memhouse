@@ -39,7 +39,7 @@ fi
 # NO readonly=1 on this skill's grant/revoke calls — GRANT is refused under readonly.
 # The list query below still pins it.
 curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-mem}" <<'SQL'
+  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}" <<'SQL'
 <the statement>
 SQL
 ```
