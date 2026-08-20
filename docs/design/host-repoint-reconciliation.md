@@ -79,11 +79,12 @@ The shipper ships from **local editor session files**, which editors delete afte
 A fresh target receives only what is still on disk; the **old house keeps the full
 archive.** Repointing = start a new archive, not move the old one.
 
-If the pilot actually wants history on the new host, that is a **house-to-house copy**
-(`remoteSecure()` INSERT SELECT, or a new `memhouse migrate --from <old-url> --to
-<new-url>`) — a separate, larger operation from repointing the shipper, and its own
-follow-up. State this plainly to the pilot, because "it was working up until some point"
-sounds like a continuity that a repoint alone will not give.
+If the pilot actually wants history on the new host, that is a **house-to-house copy** —
+now **BUILT** as `memhouse relocate --to <url>` (0.12.0): a server-to-server
+`remoteSecure()` INSERT SELECT that carries every room (provenance preserved), verifies
+row counts, and repoints the local config, all without the shipper re-ingesting. State the
+distinction plainly to the pilot, because "it was working up until some point" sounds like
+a continuity that a bare repoint does not give — `relocate` is the command that does.
 
 ## Scope when built
 
@@ -92,4 +93,5 @@ sounds like a continuity that a repoint alone will not give.
 2. `$MEMHOUSE_HOME/house.json` written on install / first ship.
 3. The reconciliation gate in `ship` (the matrix above), before any INSERT.
 4. `memhouse init-here` + the refusal message.
-5. (Separate, bigger) the host-to-host data-copy command.
+5. ~~(Separate, bigger) the host-to-host data-copy command.~~ **DONE — `memhouse relocate`
+   (0.12.0).**

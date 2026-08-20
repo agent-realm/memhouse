@@ -141,18 +141,21 @@ function writeEnvFile(cfg) {
 }
 
 // ── ClickHouse over HTTP (small read-only queries; heavy ops go via ship.js) ───
-async function ch(cfg, sql, { database = cfg.db, settings = null } = {}) {
+async function ch(cfg, sql, { database = cfg.db, settings = null, timeout = 30000 } = {}) {
   // Both settings, always: `final` collapses ReplacingMergeTree versions, and
   // `join_use_nulls` is what the session rollup's coalesce depends on now that it is a
   // saved query rather than a view carrying its own SETTINGS clause.
   const params = new URLSearchParams({ final: '1', join_use_nulls: '1' });
   for (const [k, v] of Object.entries(settings || {})) params.set(k, String(v));
   if (database) params.set('database', database);
+  // Most CLI queries are small reads and 30s is plenty; a `relocate` copy of a whole room
+  // runs server-side but the HTTP response only returns when it FINISHES, so a large
+  // transfer needs a far longer ceiling — passed per call rather than raised for all.
   const res = await fetch(`${cfg.url.replace(/\/$/, '')}/?${params}`, {
     method: 'POST',
     body: sql,
     headers: { Authorization: 'Basic ' + Buffer.from(`${cfg.user}:${cfg.password}`).toString('base64') },
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(timeout),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(text.trim().split('\n')[0]);
@@ -369,6 +372,12 @@ House        deploy --local       run ClickHouse in docker/podman, then install
              migrate              run every migration this house still needs
                                   [--dry-run] [--yes]  (copy + atomic swap; deletes nothing)
              migrate-rooms        the same, scoped to the rooms
+             relocate --to URL    copy this whole house to a NEW ClickHouse (server-to-
+                                  server) and repoint this install — the shipper does NOT
+                                  re-ingest. [--to-user --to-password --to-db]
+                                  [--from-native-host H] [--from-native-port N]
+                                  [--insecure-native] [--keep-shipper] [--dry-run] [--yes].
+                                  Source untouched.
              service install      run the shipper as a user service (systemd / launchd)
              service stop | start | restart | uninstall | status
 
@@ -2524,6 +2533,211 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
 }
 
 /**
+ * `memhouse relocate --to <url>` — copy a whole house to a NEW ClickHouse, server-to-
+ * server, then repoint this install at it. The point is to move WITHOUT the shipper
+ * re-ingesting: once the new host holds a faithful copy, the shipper's skip predicate
+ * sees every old session already present and ships only genuinely new work.
+ *
+ * The copy is a ClickHouse remoteSecure() INSERT SELECT — the destination pulls each room
+ * directly from the source over the native protocol; the pilot's laptop is never in the
+ * data path. Provenance is carried, not restamped (insert_allow_materialized_columns=1),
+ * exactly as `migrate`'s rebuildRoom does, so a shared house keeps every member's user_id.
+ *
+ * Nothing on the SOURCE is touched — relocate only reads it and only writes the
+ * destination and the local env file, so a failed run leaves the old house intact.
+ *
+ * SECURITY: the source password is spliced into the remoteSecure() call, which runs on
+ * the DESTINATION and lands in ITS query_log. Two consequences, both stated to the pilot:
+ * it never touches THIS transcript (the SQL is never printed), but rotate the source
+ * credential afterward if the destination's logs are not yours to trust.
+ *
+ * Flags: --to (required), --to-user/--to-password/--to-db (default: the source's),
+ * --from-native-port (default 9440), --insecure-native (remote()+9000, no TLS),
+ * --keep-shipper (don't stop it for the copy), --dry-run, --yes.
+ */
+async function cmdRelocate() {
+  const rel = require(path.join(REPO_ROOT, 'memhouse', 'house', 'relocate.js'));
+  const house = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
+  const stated = (f) => flags[f] !== undefined && flags[f] !== true;
+
+  const to = flags.to;
+  if (!to || to === true) { console.log(bad('relocate needs a destination:  memhouse relocate --to <url>')); return 1; }
+  const src = requireConfig(resolveConfig(), 'relocate');
+  const dest = {
+    url: to,
+    user: stated('to-user') ? flags['to-user'] : src.user,
+    password: stated('to-password') ? flags['to-password'] : src.password,
+    db: stated('to-db') ? flags['to-db'] : src.db,
+    port: src.port, stated: true,
+  };
+  if (sameEndpoint(src.url, dest.url)) {
+    console.log(bad(`source and destination are the same server (${dest.url}) — nothing to relocate`)); return 1;
+  }
+  for (const [n, who] of [[src.db, 'source house'], [dest.db, 'destination house']]) {
+    try { house.assertUsableName(n, who); } catch (e) { console.log(bad(e.message)); return 1; }
+  }
+
+  const sq = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  const bq = (s) => `\`${String(s).replace(/`/g, '``')}\``;
+  const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
+  let nat;
+  try {
+    nat = rel.nativeEndpoint(src.url, {
+      host: stated('from-native-host') ? flags['from-native-host'] : null,
+      port: stated('from-native-port') ? flags['from-native-port'] : null,
+      insecure: flags['insecure-native'] === true,
+    });
+  } catch (e) { console.log(bad(e.message)); return 1; }
+
+  const countFinal = async (cfg, t) => Number((await chRows(cfg, `SELECT count() AS c FROM ${bq(t)}`, { database: cfg.db }))[0]?.c || 0);
+
+  // ── preflight: source reachable, current schema, and its counts ──────────────────
+  let srcMember;
+  try { srcMember = (await chRows(src, 'SELECT currentUser() AS u', { database: '' }))[0]?.u; }
+  catch (e) { console.log(bad(`source not reachable: ${netReason(e)}`)); return 1; }
+  try {
+    const rec = await chRows(src, "SELECT value FROM house_meta FINAL WHERE key = 'schema_version'", { database: src.db });
+    const v = rec.length ? Number(rec[0].value) || 0 : 0;
+    if (v !== SCHEMA_VERSION) {
+      console.log(bad(`source house is at schema ${v || 'pre-record'}; this memhouse is ${SCHEMA_VERSION}.`));
+      console.log('  Migrate the source first, then relocate:  memhouse migrate');
+      return 1;
+    }
+  } catch {
+    console.log(bad('source house has no house_meta — migrate it first:  memhouse migrate'));
+    return 1;
+  }
+  const base = {};
+  for (const t of ROOM_TYPES) base[t] = await countFinal(src, t);
+
+  // ── preflight: destination reachable ─────────────────────────────────────────────
+  let destMember;
+  try { destMember = (await chRows(dest, 'SELECT currentUser() AS u', { database: '' }))[0]?.u; }
+  catch (e) { console.log(bad(`destination not reachable: ${netReason(e)}`)); return 1; }
+
+  console.log(`  relocate  ${src.user}@${new URL(src.url).host} (house '${src.db}')`);
+  console.log(`        ->  ${dest.user}@${new URL(dest.url).host} (house '${dest.db}')`);
+  console.log(`  source rooms: sessions ${base.sessions}, messages ${base.messages}, tool_calls ${base.tool_calls}`);
+  console.log(`  copy transport: ${nat.fn}(${nat.addr})  [source password never printed]`);
+
+  if (flags['dry-run'] === true) {
+    console.log(warn('dry run — nothing was created, copied, or repointed'));
+    return 0;
+  }
+  if (flags.yes !== true) {
+    const a = (await ask(`Copy this house to ${new URL(dest.url).host} and repoint this install? (yes/no)`, 'no')).toLowerCase();
+    if (a !== 'yes' && a !== 'y') return console.log('aborted'), 1;
+  }
+
+  // ── freeze the source shipper (best-effort) ──────────────────────────────────────
+  let restart = null;
+  const health = shipperHealth();
+  if (health.running && flags['keep-shipper'] !== true) {
+    if (String(health.via || '').startsWith('service')) {
+      const svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
+      const st = svc.status();
+      const stop = st.kind === 'systemd'
+        ? ['systemctl', ['--user', 'stop', 'memhouse-shipper']]
+        : ['launchctl', ['bootout', `gui/${process.getuid()}/com.memhouse.shipper`]];
+      const r = spawnSync(stop[0], stop[1], { stdio: 'pipe', encoding: 'utf-8' });
+      if (r.status === 0) { console.log(ok('shipper stopped for the copy')); restart = { kind: 'service', st }; }
+      else console.log(warn(`could not stop the shipper (${(r.stderr || '').trim().split('\n')[0] || 'exit ' + r.status}); continuing — late writes dedupe`));
+    } else {
+      const pid = pidOf('shipper');
+      if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`shipper daemon stopped (pid ${pid})`)); restart = { kind: 'daemon' }; } catch { /* raced */ } }
+    }
+  }
+
+  try {
+    // ── schema on the destination (no ingest) ──────────────────────────────────────
+    await ch(dest, `CREATE DATABASE IF NOT EXISTS ${bq(dest.db)}`, { database: '' });
+    for (const t of [...META_TYPES, ...ROOM_TYPES]) {
+      await ch(dest, createStatement(tpl, t, t).replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '),
+        { database: dest.db, settings: { allow_experimental_full_text_index: 1 } });
+    }
+    const destBefore = await countFinal(dest, 'messages');
+    if (destBefore > 0 && flags.yes !== true) {
+      console.log(warn(`destination already holds ${destBefore} messages — copy is idempotent (ReplacingMergeTree dedupes), continuing`));
+    }
+
+    // ── probe native reachability BEFORE the big copy (never logs the password) ─────
+    const probe = `SELECT count() AS c FROM ${nat.fn}(${sq(nat.addr)}, ${sq(src.db)}, 'sessions', ${sq(src.user)}, ${sq(src.password)})`;
+    try { await chRows(dest, probe, { database: dest.db, timeout: 60000 }); }
+    catch (e) {
+      console.log(bad(`the destination cannot reach the source over ${nat.fn} at ${nat.addr}: ${netReason(e)}`));
+      console.log('  open the source native port (default 9440 TLS), or pass --from-native-port / --insecure-native.');
+      throw new Error('relocate-preflight');
+    }
+
+    // ── copy each table, provenance carried ────────────────────────────────────────
+    for (const t of [...ROOM_TYPES, ...META_TYPES]) {
+      const destCols = (await chRows(dest, `SELECT name FROM system.columns WHERE database = ${sq(dest.db)} AND table = ${sq(t)}`, { database: dest.db })).map((r) => r.name);
+      const srcCols = (await chRows(src, `SELECT name FROM system.columns WHERE database = ${sq(src.db)} AND table = ${sq(t)}`, { database: src.db })).map((r) => r.name);
+      const cols = rel.copyColumns(destCols, srcCols);
+      if (!cols.length) { console.log(warn(`${t}: no shared columns — skipped`)); continue; }
+      const list = cols.map(bq).join(', ');
+      // house_meta carries only durable facts; the per-host heartbeats regenerate.
+      const where = t === 'house_meta'
+        ? " WHERE key IN ('schema_version','min_writer_schema','house_id') OR key LIKE 'share:%'" : '';
+      const copySql = `INSERT INTO ${bq(t)} (${list}) SELECT ${list} FROM ${nat.fn}(${sq(nat.addr)}, ${sq(src.db)}, ${sq(t)}, ${sq(src.user)}, ${sq(src.password)})${where}`
+        + ' SETTINGS insert_allow_materialized_columns = 1, allow_experimental_full_text_index = 1';
+      await ch(dest, copySql, { database: dest.db, timeout: 3600000 });
+      console.log(ok(`${t}: copied`));
+    }
+
+    // ── verify — the hard gate before repointing ───────────────────────────────────
+    let allGood = true;
+    for (const t of ROOM_TYPES) {
+      const d = await countFinal(dest, t);
+      const good = d >= base[t];
+      console.log((good ? ok : bad)(`${t}: source ${base[t]} -> dest ${d}`));
+      if (!good) allGood = false;
+    }
+    if (!allGood) {
+      console.log(bad('row counts do not match — NOT repointing. The source is untouched; inspect the destination.'));
+      throw new Error('relocate-verify');
+    }
+
+    // ── repoint the local config (old env kept alongside) ──────────────────────────
+    try { fs.copyFileSync(ENV_FILE, `${ENV_FILE}.pre-relocate`); console.log(ok(`previous config kept at ${`${ENV_FILE}.pre-relocate`.replace(os.homedir(), '~')}`)); }
+    catch { /* no prior env file — first config */ }
+    writeEnvFile(dest);
+    console.log(ok(`config repointed to ${dest.url} (house '${dest.db}')`));
+  } catch (e) {
+    if (!['relocate-preflight', 'relocate-verify'].includes(e.message)) console.log(bad(`relocate failed: ${e.message.split('\n')[0]}`));
+    console.log(warn('the SOURCE house was not touched — your data is safe there.'));
+    if (restart) console.log(warn('the shipper was stopped; restart it:  memhouse service start   (or  memhouse start)'));
+    return 1;
+  }
+
+  // ── restart the shipper against the new host ─────────────────────────────────────
+  if (restart) {
+    if (restart.kind === 'service') {
+      const st = restart.st;
+      const start = st.kind === 'systemd'
+        ? ['systemctl', ['--user', 'start', 'memhouse-shipper']]
+        : ['launchctl', ['bootstrap', `gui/${process.getuid()}`, st.path]];
+      const r = spawnSync(start[0], start[1], { stdio: 'pipe', encoding: 'utf-8' });
+      console.log(r.status === 0 ? ok('shipper restarted — now writing to the new host')
+        : warn('restart the shipper yourself:  memhouse service start'));
+    } else {
+      console.log(warn('restart the shipper to pick up the new host:  memhouse start  (or  memhouse service start)'));
+    }
+  } else if (shipperHealth().running) {
+    console.log(warn('a shipper is still running against the OLD host — restart it to pick up the new config.'));
+  }
+
+  console.log('');
+  console.log(ok('relocate complete.'));
+  console.log('  the shipper will NOT re-ingest: every copied session is already present, so its');
+  console.log('  skip predicate ships only new work from here.');
+  console.log('  verify:  memhouse status');
+  console.log('  keep the OLD house until you are satisfied, then decommission it.');
+  if (!flags['insecure-native']) console.log(warn('the source password reached the destination server (its query_log) — rotate it if those logs are not yours to trust.'));
+  return 0;
+}
+
+/**
  * `memhouse nightly [--out DIR]` — build an installable, version-stamped tarball from
  * this checkout, without publishing anything.
  *
@@ -3011,6 +3225,7 @@ async function cmdUninstall() {
     case 'nightly': process.exitCode = await cmdNightly(); break;
     case 'migrate': process.exitCode = await cmdMigrate({}); break;
     case 'migrate-rooms': process.exitCode = await cmdMigrate({ component: 'rooms' }); break;
+    case 'relocate': process.exitCode = await cmdRelocate(); break;
     case 'deploy': {
       const dep = require(path.join(REPO_ROOT, 'memhouse', 'deploy.js'));
       if (flags.down) {
