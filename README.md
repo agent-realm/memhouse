@@ -336,6 +336,11 @@ Deeper reading: `memhouse/DESIGN.md` (the four bets),
 `memhouse/per-member/SCHEMA.md`, `memhouse/delivery/kernel-install.md`,
 `memhouse/COMPETITION.md`.
 
+Deferred designs (captured, not yet built): `docs/design/host-repoint-reconciliation.md`
+— what should happen when the shipper is repointed at a new, empty host (house identity,
+local binding state, and a refuse-then-`init-here` gate so transcripts never land on the
+wrong server).
+
 In constellation terms (`TERMINOLOGY.md`) memhouse is an **agency**: a **house**
 — the `mem` database — plus a **resident** working in it, the shipper. The house
 alone would hold; the shipper is what makes it act. It competes with
