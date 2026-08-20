@@ -4,6 +4,29 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.0 — 2026-08-20
+
+- **`memhouse relocate --to <url>` moves a whole house to a new ClickHouse.** The copy is
+  a server-to-server `remoteSecure()` INSERT SELECT — the destination pulls each room
+  directly from the source over the native protocol, so the pilot's laptop is never in the
+  data path and, crucially, **the shipper never re-ingests**: once the new host holds a
+  faithful copy, the shipper's skip predicate sees every old session already present and
+  ships only genuinely new work. Provenance is carried, not restamped
+  (`insert_allow_materialized_columns=1`), so a shared house keeps every member's
+  `user_id` — verified against two live ClickHouse instances (source rows stamped `alice`
+  arrive as `alice`, not the copier). `house_meta` carries only durable facts
+  (`schema_version`, `min_writer_schema`, `share:*`); per-host heartbeats regenerate. The
+  SOURCE is only ever read — a failed run leaves the old house intact — and a hard
+  row-count gate must pass before the local config is repointed (the previous env is kept
+  as `env.pre-relocate`). Flags: `--to-user/--to-password/--to-db`, `--from-native-host`
+  (when the destination's route to the source differs from the pilot's URL),
+  `--from-native-port` (default 9440 TLS), `--insecure-native` (`remote()` + 9000),
+  `--keep-shipper`, `--dry-run`, `--yes`. The source password reaches the destination's
+  `query_log` (never this transcript) — rotate it after if those logs are not yours.
+- This is the host-to-host data-copy piece named in
+  `docs/design/host-repoint-reconciliation.md`; the reconciliation gate (detecting an
+  *accidental* repoint at an empty host) remains deferred.
+
 ## 0.11.3 — 2026-08-20
 
 - **Read a friend's shared memory by naming their house.** A share is a read-only GRANT on

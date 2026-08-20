@@ -742,5 +742,59 @@ test('SQLite is part of Node — there is no binding that can go missing', () =>
   assert.ok(errs.every((e) => !('missingBinding' in e)), 'missingBinding died with the native dep');
 });
 
+// ── relocate: the pure decisions of the host-to-host copy ─────────────────────────
+const relocate = require('../memhouse/house/relocate');
+
+test('nativeEndpoint derives the TLS native port from an HTTP url', () => {
+  const e = relocate.nativeEndpoint('https://test.memhouse.io:8443');
+  assert.strictEqual(e.fn, 'remoteSecure');
+  assert.strictEqual(e.addr, 'test.memhouse.io:9440', 'native TLS default is 9440, not the HTTP port');
+});
+
+test('nativeEndpoint --insecure-native drops to remote() + 9000', () => {
+  const e = relocate.nativeEndpoint('http://box.local:8123', { insecure: true });
+  assert.strictEqual(e.fn, 'remote');
+  assert.strictEqual(e.addr, 'box.local:9000');
+});
+
+test('nativeEndpoint honours an explicit port override', () => {
+  assert.strictEqual(relocate.nativeEndpoint('http://h:8123', { port: 19440 }).addr, 'h:19440');
+});
+
+test('nativeEndpoint honours a host override — the destination route can differ', () => {
+  // The pilot reaches the source at test.memhouse.io; the DESTINATION may reach it by a
+  // private peering name. The copy must use the destination's route, not the pilot's.
+  const e = relocate.nativeEndpoint('https://test.memhouse.io:8443', { host: 'source.internal', port: 9440 });
+  assert.strictEqual(e.addr, 'source.internal:9440');
+});
+
+test('nativeEndpoint rejects a non-url source', () => {
+  assert.throws(() => relocate.nativeEndpoint('not a url'), /not a url|no host/);
+});
+
+test('copyColumns carries the intersection minus the derived text indexes', () => {
+  // user_id (MATERIALIZED but stored) MUST be carried so a shared house is not restamped;
+  // text_ngram/text_word MUST NOT be — the destination recomputes them on insert.
+  const dest = ['session_id', 'user_id', 'text', 'text_ngram', 'text_word', 'epoch'];
+  const src = ['session_id', 'user_id', 'text', 'text_ngram', 'text_word', 'epoch', 'legacy_col'];
+  const cols = relocate.copyColumns(dest, src);
+  assert.deepStrictEqual(cols, ['session_id', 'user_id', 'text', 'epoch']);
+  assert.ok(cols.includes('user_id'), 'provenance is carried, never restamped');
+  assert.ok(!cols.includes('text_ngram') && !cols.includes('text_word'), 'derived columns are recomputed, not copied');
+  assert.ok(!cols.includes('legacy_col'), 'a source-only column the destination lacks is dropped');
+});
+
+test('copyColumns order follows the destination so SELECT and INSERT line up', () => {
+  assert.deepStrictEqual(relocate.copyColumns(['b', 'a'], ['a', 'b']), ['b', 'a']);
+});
+
+test('isDurableMetaKey keeps facts, drops per-host heartbeats', () => {
+  assert.ok(relocate.isDurableMetaKey('schema_version'));
+  assert.ok(relocate.isDurableMetaKey('min_writer_schema'));
+  assert.ok(relocate.isDurableMetaKey('share:alice'));
+  assert.ok(!relocate.isDurableMetaKey('last_ship:polat'), 'the new shipper rewrites its own heartbeat');
+  assert.ok(!relocate.isDurableMetaKey('client_version'));
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
