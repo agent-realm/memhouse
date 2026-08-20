@@ -4,6 +4,19 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.12.7 — 2026-08-20
+
+- **A member fully owns their house — `GRANT ALL ON <db>.* … WITH GRANT OPTION`.** Invite
+  and the admin install previously granted `ALL` plus only `SELECT` *with grant option*, so
+  a member could share read but not hand on anything more, and making them a true owner took
+  a manual `GRANT`. Now the single grant carries the option on everything: their database is
+  theirs to do anything with, including granting any of it onward. `/mem:share` is unchanged
+  — it still opens only a read-only `SELECT` window — this just stops boxing the owner into
+  read-only sharing of their *own* house. Still scoped to their db and still no `CREATE USER`,
+  so a member cannot mint accounts or reach another house. Both grant paths updated
+  (programmatic `adminBootstrap` + the `--print-sql` template); verified a fresh member gets
+  all 43 db privileges grantable. (Existing members already upgraded by hand are unaffected.)
+
 ## 0.12.6 — 2026-08-20
 
 - **Members can see who else is on the ClickHouse.** New accounts (via `memhouse invite`
