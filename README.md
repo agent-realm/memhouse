@@ -76,11 +76,21 @@ memhouse update [--check]                  upgrade, restart daemons, check the s
 memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
-memhouse plugins install claude            /mem:search, :sessions, :sql —
-                                           into every Claude Code config dir found
+memhouse invite <name>                     mint a member + house, hand them one env file
+memhouse passwd                            rotate this member's password
+memhouse migrate | migrate-rooms [--dry-run] [--yes]
+                                           run whatever this house still needs
+memhouse relocate --to <url>               copy this house to a new ClickHouse, then repoint
+memhouse nightly [--out DIR]               build an installable tarball from this checkout
+memhouse plugins install claude            9 skills — ask, hello, invite, search,
+                                           sessions, share, sql, status, users — into
+                                           every Claude Code config dir found
 memhouse prompt                            memory snippet for an agent's system prompt
 memhouse prompt --install                  an install prompt, rendered for this machine
 ```
+
+Any command's own usage: `memhouse <command> --help` (or `-h`) — always prints usage,
+never runs the command.
 
 Every command works both ways: interactive for you, `--yes` / flags / `--json` for
 an agent — so an agent can install its own memory unattended.
