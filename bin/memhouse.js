@@ -690,6 +690,12 @@ GRANT ALTER USER ON ${member} TO ${member};
 -- It grants no read of anyone's rows; reading a housemate's memory still needs /mem:share.
 GRANT SHOW USERS ON *.* TO ${member};
 
+-- \`memhouse relocate\` runs FROM the destination, pulling the source over remoteSecure() —
+-- a table function ClickHouse gates behind its own access type, separate from GRANT ALL on
+-- a database. Without this, relocate fails at the native-reachability probe with
+-- ACCESS_DENIED (source untouched, nothing lost — just unusable until granted).
+GRANT REMOTE ON *.* TO ${member};
+
 -- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
 -- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
 -- currentUser() is computed during the INSERT, and an async flush stores it as the empty
@@ -805,8 +811,16 @@ async function adminBootstrap(cfg, admin) {
     // Best-effort like ALTER USER above — an admin without access-management just skips it.
     try { await q(`GRANT SHOW USERS ON *.* TO ${admin.member}`, { database: '' }); }
     catch { /* no access-management: /mem:users section 4 stays admin-only for this member */ }
+    // REMOTE: `memhouse relocate` runs FROM the destination, pulling the source over
+    // remoteSecure() — a table function ClickHouse gates behind its own access type,
+    // separate from any GRANT ALL on a database. Without it every relocate a member runs
+    // fails at the native-reachability probe with ACCESS_DENIED, source untouched, no
+    // data lost — just relocate unusable until an admin grants this by hand. Best-effort
+    // like the two grants above.
+    try { await q(`GRANT REMOTE ON *.* TO ${admin.member}`, { database: '' }); }
+    catch { /* no access-management: relocate stays admin-assisted for this member */ }
     await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
-    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', SHOW USERS, async_insert pinned`));
+    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', SHOW USERS, REMOTE, async_insert pinned`));
   } catch (e) {
     console.log(bad(`could not grant the house to '${admin.member}': ${e.message}`));
     if (createdUser) {
