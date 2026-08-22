@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.13.0 — 2026-08-23
 
 - **New skill: `/mem:admin`.** Every other skill is scoped to the caller's own house, so
   anything server-wide — list the accounts, size the houses, provision or remove a member,
