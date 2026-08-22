@@ -161,9 +161,20 @@ tools.js  → queries.js q()  → applyRooms({{messages}} → messages_polat)
           → ClickHouse
 ```
 
-For `sql`, one extra setting: `readonly=1`, pinned server-side per request. No parser,
-no table-function policy — see `GRANTS.md` for why enforcement belongs to the
-credential the pilot hands us, and what a `GRANT SELECT`-only user is refused.
+For `sql`, one extra setting: `readonly=1`, pinned server-side per request, plus
+exactly one memhouse-side rule: **table functions that reach off this ClickHouse are
+refused before the query is sent** (`memhouse/server/sql-guard.js`, shared with the
+dashboard's `/api/query`).
+
+Everything else about what the query may touch is still the credential's grants,
+enforced by ClickHouse and passed through verbatim — including reading a housemate's
+shared database by name, which this tool must keep and the dashboard does not. The one
+exception exists because the server stopped enforcing it: `memhouse relocate` pulls
+over `remoteSecure()`, so every member is granted `REMOTE ON *.*`, and `remote()` now
+runs happily under a pinned `readonly` — see the 2026-08-22 addendum in `GRANTS.md`
+for the probe. A model writing SQL from transcripts it did not author is the caller
+here, so the boundary has to be stated somewhere; it is stated in one file, tested
+directly, rather than in a second parser beside the first.
 
 ### 5. `tools/call resume_command`
 

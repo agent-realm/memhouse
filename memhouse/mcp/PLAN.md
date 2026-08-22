@@ -129,7 +129,25 @@ Throwaway ClickHouse in docker (`docker rm -f -v`, always `-v`), `MEMHOUSE_HOME`
 temp dir, fixture house seeded through the normal install path. **Never**
 `localhost:8123` / `localhost:18999` — those are the pilot's real houses.
 
-## P2 — ~~extract the SQL guard~~ · **CUT 2026-08-16**
+## P2 — extract the SQL guard · CUT 2026-08-16 · **REOPENED AND DONE 2026-08-22**
+
+**Reopened.** The cut below rests on one fact — a member holds no global grant, so
+ClickHouse itself refuses every way out of this server — and that fact was revoked
+from outside while this branch sat unmerged. `memhouse relocate` pulls the source
+house over `remoteSecure()`, so invite and install now grant every member
+`REMOTE ON *.*`. Re-probed with `readonly=2` pinned: `remote()` returns rows, an
+unreachable host times out instead of being denied, and the password argument folds a
+subquery — a way out for anything the credential can read. `url()` and `file()` are
+still refused; `remote()` is not.
+
+So the guard was extracted after all, as `memhouse/server/sql-guard.js`: the same
+construct-aware reader, moved out of the `/api/query` route and shared, plus unit
+tests it never had on either surface (the four bypasses in its comments were all found
+by hand). The MCP `sql` tool refuses any table function outside the allowlist and
+keeps nothing else the route does — no statement-shape rule, no own-database
+confinement, because reading a housemate's shared house by name is a feature here.
+Everything below is the reasoning as it stood on 2026-08-16; it is kept because the
+argument is still right about *authorization*, which is not what the guard does now.
 
 Deleted, not deferred. The parser stays in `/api/query`; the MCP `sql` tool does not
 call it. No `sql-guard.js`, no merge-order constraint on `server.js`, no second copy

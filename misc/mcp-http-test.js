@@ -234,6 +234,39 @@ async function test(name, fn) {
       assert.strictEqual(ping.app, 'agentlytics');
       assert.strictEqual(ping.pid, server.pid, 'same process serves both');
     });
+
+    await test("the dashboard's own SQL console keeps its guard after the extraction", async () => {
+      // /api/query's construct-aware reader moved into memhouse/server/sql-guard.js so
+      // the MCP `sql` tool could share it. Nothing about this endpoint's answers may
+      // change: reads work, a dial-out is 403, another database is 403, a write shape
+      // is 403 — the route keeps its own policy on top of the shared reader.
+      const post = async (sql) => {
+        const res = await fetch(`http://127.0.0.1:${HTTP_PORT}/api/query`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql }),
+        });
+        return { status: res.status, body: await res.json() };
+      };
+      const ok = await post('SELECT count() AS n FROM messages');
+      assert.strictEqual(ok.status, 200, JSON.stringify(ok.body).slice(0, 120));
+      assert.ok(Number(ok.body.rows[0].n) > 0, 'the console reads the seeded house');
+
+      const dial = await post("SELECT * FROM remote('192.0.2.7:9000', 'system', 'one')");
+      assert.strictEqual(dial.status, 403);
+      assert.ok(/table function remote\(\) is not allowed here/.test(dial.body.error), dial.body.error);
+
+      const other = await post('SELECT count() FROM system.users');
+      assert.strictEqual(other.status, 403);
+      assert.ok(/another database/.test(other.body.error), other.body.error);
+
+      const write = await post("INSERT INTO messages (session_id, seq) VALUES ('x', 1)");
+      assert.strictEqual(write.status, 403);
+      assert.ok(/Only SELECT queries are allowed/.test(write.body.error), write.body.error);
+
+      // The disguises are the reader's whole reason to exist; one on this surface too.
+      const hidden = await post("SELECT '--' AS a, * FROM remote('192.0.2.7:9000', 'system', 'one')");
+      assert.strictEqual(hidden.status, 403);
+    });
+
   } finally {
     if (server) server.kill();
     sh('docker', ['rm', '-f', '-v', NAME]);

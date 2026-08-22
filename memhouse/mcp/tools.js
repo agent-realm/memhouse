@@ -14,6 +14,7 @@
 
 const os = require('os');
 const path = require('path');
+const guard = require('../server/sql-guard');
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
 const ENV_FILE = path.join(HOME_DIR, 'env');
@@ -145,8 +146,10 @@ const TOOLS = [
     name: 'sql',
     description:
       'Free-form read-only SQL over the house (ClickHouse dialect). Runs under the credential this server ' +
-      'was configured with — its limits ARE that credential\'s grants, enforced by ClickHouse itself, and a ' +
-      'server refusal (readonly mode, not enough privileges) is returned verbatim as the answer. ' +
+      'was configured with — writes, and anything that credential may not read, are refused by ClickHouse ' +
+      'itself and its refusal is returned verbatim as the answer. One rule is memhouse\'s own: table ' +
+      'functions that reach off this server (remote, remoteSecure, cluster, url, s3, mysql, …) are refused ' +
+      'here whatever the credential is granted; numbers, values, null, generateSeries and format are fine. ' +
       'readonly is pinned per request; results are capped at 10000 rows / 64MB / 30s. ' +
       'The main tables are sessions, messages, and tool_calls. Prefer search/get_session for transcript ' +
       'work — this tool is for aggregations they cannot express.',
@@ -158,8 +161,28 @@ const TOOLS = [
       required: ['query'],
     },
     async handler(args) {
+      const sql = String(args.query);
+      // Checked BEFORE requireHouse(): a query that reaches off this server is refused
+      // whether or not a house is configured, and the caller gets the reason rather than
+      // "no house configured" standing in front of it.
+      // The one thing ClickHouse no longer refuses on its own. A member holds
+      // `REMOTE ON *.*` since relocate needed it, so `remote()` runs under this
+      // tool's pinned `readonly` — it returns rows, an unreachable host times out
+      // instead of being denied, and the password argument folds a subquery, which
+      // is a way out for anything this credential can read. The model writing this
+      // SQL is reading transcripts it did not author, so "the grants contain it" is
+      // no longer true and memhouse has to say so itself. Refused as a tool result,
+      // with the reason: a model that knows why picks a different query.
+      const fn = guard.disallowedTableFunction(sql);
+      if (fn) {
+        throw new RefusalError(
+          `table function ${fn}() is refused here — this tool reads this ClickHouse and does not reach out of it. ` +
+          'Functions that dial out (remote, remoteSecure, cluster, url, s3, mysql, …) are refused whatever the ' +
+          'credential is granted; numbers, values, null, generateSeries and format are available. ' +
+          "Query the house's own tables — sessions, messages, tool_calls — instead.");
+      }
       requireHouse();
-      return qy().readonlySql(String(args.query));
+      return qy().readonlySql(sql);
     },
   },
 ];

@@ -1125,9 +1125,12 @@ async function sessionRowFor(sessionId, userId) {
 // server-enforced read gate (2, not 1: level 1 also refuses the per-query limit
 // settings this call itself sends). Everything else is rawQuery's self-protection
 // verbatim — q() buffers rows into JS, so ClickHouse has to stop sending.
-// There is deliberately NO SQL parser here: what this credential may read is the
-// pilot's GRANT choice, and the server's own refusal (Code 164/497) is passed
-// through as the answer.
+// What this credential may READ stays the pilot's GRANT choice — the server's own
+// refusal (Code 164/497) is passed through as the answer, and nothing here second-
+// guesses it. The single exception lives one layer up, in the MCP tool: table
+// functions that dial off this server are refused by `server/sql-guard.js` before
+// the query is sent, because a member now holds `REMOTE ON *.*` and ClickHouse
+// therefore no longer refuses `remote()` on its own.
 async function readonlySql(sql) {
   const rows = await q(sql, {}, {
     readonly: 2,

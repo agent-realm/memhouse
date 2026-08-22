@@ -16,11 +16,20 @@ Windsurf, Copilot, Goose, and the rest read the same memory back.
   text; slices by `seq`; with two members holding the same session id it answers
   with the holder list instead of guessing), `stats`, `resume_command` (the same
   print-never-run contract as `memhouse resume`), and `sql` (free-form read-only).
-- **No SQL parser.** `sql` pins `readonly` server-side and passes ClickHouse's own
-  refusal through verbatim — what the credential may read is the operator's GRANT
-  choice, enforced by the server, not by application code. Results are capped
-  (10000 rows / 64MB / 30s) as self-protection, exactly like the dashboard's SQL
-  console.
+- **`sql` refuses to leave the server, and refuses nothing else.** What the credential
+  may READ stays the operator's GRANT choice, enforced by ClickHouse and passed through
+  verbatim — including a housemate's shared house, read by name. One rule is memhouse's
+  own: table functions that dial out (`remote`, `remoteSecure`, `cluster`, `url`, `s3`,
+  `mysql`, …) are refused before the query is sent. That rule exists because the server
+  stopped enforcing it — `memhouse relocate` pulls the source over `remoteSecure()`, so
+  every member is granted `REMOTE ON *.*`, and `remote()` then runs happily under a
+  pinned `readonly`, with a subquery foldable into its password argument. The check is
+  the dashboard's own construct-aware reader, extracted to `memhouse/server/sql-guard.js`
+  and shared by both surfaces rather than written twice — and unit-tested for the first
+  time, including the four disguises (a quote in a comment, a comment marker in a string,
+  a `$tag$` heredoc, a `#` line comment) that were previously only found by hand.
+  `readonly` is still pinned per request and results are still capped (10000 rows / 64MB
+  / 30s) as self-protection.
 - Two transports, one protocol layer: stdio (`memhouse mcp`) and `POST /mcp`
   mounted on the running dashboard — same process, loopback, no new daemon. Both
   are dual-era: the stateless 2026-07-28 revision (per-request `_meta`,

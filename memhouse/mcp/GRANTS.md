@@ -153,11 +153,21 @@ tool. `GRANT REMOTE ON *.*` — added so `memhouse relocate` can pull over `remo
 — revoked it for every member on every surface, not just MCP: `/mem:sql` curls the same
 credential with `readonly=1` and reaches exactly as far.
 
-**Not introduced by this branch.** The reach ships in master today via `/mem:sql`. The
-options are the pilot's: narrow the grant to when relocate actually needs it, deny
-`remote`/`remoteSecure`/`cluster`/`clusterAllReplicas` at the application layer on
-agent-facing surfaces (against the "ClickHouse enforces" ruling, but defence in depth),
-or accept and document it. Nothing here is decided.
+**Not introduced by this branch.** The reach ships in master today via `/mem:sql`.
+
+**Decided 2026-08-22 (pilot): fix it in the MCP layer.** The `sql` tool now refuses any
+table function outside the allowlist — `remote`, `remoteSecure`, `cluster`, `url`, `s3`,
+`mysql` and the rest — before the query is sent, using the same construct-aware reader
+the dashboard has always used, extracted to `memhouse/server/sql-guard.js` and unit-
+tested there for the first time. This does not overturn "ClickHouse enforces; memhouse
+declares": what the credential may READ is still the pilot's GRANT choice, passed
+through verbatim, and the tool still reads a housemate's shared house by name. It draws
+one line the server no longer draws — the query does not leave this ClickHouse.
+
+**Still open, and not this branch's to close:** `/mem:sql` on master reaches just as far
+with `readonly=1`, and the grant itself is wider than relocate needs. Narrowing
+`GRANT REMOTE` to when relocate actually runs is the fix at the source, in the parent
+repo.
 
 Everything else in this file re-verified unchanged: `url()`/`file()` still fenced,
 delegation still cannot widen, `readonly` still unpinnable by the client.

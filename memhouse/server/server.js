@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const qy = require('./queries');
+const guard = require('./sql-guard');
 
 const PORT = parseInt(process.env.MEMHOUSE_PORT || '4640', 10);
 // Localhost by default: the dashboard exposes full transcripts and a SQL console
@@ -195,81 +196,22 @@ app.post('/api/query', route(async (req, res) => {
   await refreshKnownDbs();
   const { sql } = req.body;
   if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'sql string required' });
-  // ONE pass, and it has to know every construct ClickHouse does, because each one can
-  // contain another's opening marker:
-  //
-  //   SELECT * FROM /* ' */ url('http://…')      a quote inside a comment
-  //   SELECT '--', url('http://…')               a comment marker inside a string
-  //   SELECT $d$'$d$ AS x, * FROM url('http://…') a quote inside a heredoc literal
-  //   SELECT * FROM # '⏎ url('http://…') --'     a quote inside a # comment
-  //
-  // Every one of those desyncs a scanner that does not model the construct it appears in.
-  // ClickHouse supports `$tag$…$tag$` heredocs and treats `#` and `#!` as line comments as
-  // well as `--`; the first two forms above were bypasses of the previous version.
-  const CLICKHOUSE_SQL = /* for the reader: single quotes are literals, double quotes and
-     backticks are IDENTIFIERS — the identifier text must survive, or `FROM "url"(…)` hides
-     the function name. */ null;
-  let bare = '';
-  for (let i = 0; i < sql.length;) {
-    const c = sql[i];
-    const two = sql.slice(i, i + 2);
-    const heredoc = /^\$[A-Za-z0-9_]*\$/.exec(sql.slice(i));
-    if (c === "'" || c === '"' || c === '`') {
-      const quote = c;
-      i++;
-      let inner = '';
-      while (i < sql.length) {
-        if (sql[i] === '\\') { inner += sql.slice(i, i + 2); i += 2; continue; }
-        if (sql[i] === quote) {
-          if (quote === "'" && sql[i + 1] === "'") { inner += "''"; i += 2; continue; }
-          i++; break;
-        }
-        inner += sql[i];
-        i++;
-      }
-      bare += quote === "'" ? "''" : inner;
-    } else if (heredoc) {
-      const tag = heredoc[0];
-      const end = sql.indexOf(tag, i + tag.length);
-      i = end === -1 ? sql.length : end + tag.length;
-      bare += "''";
-    } else if (two === '/*') {
-      const end = sql.indexOf('*/', i + 2);
-      i = end === -1 ? sql.length : end + 2;
-      bare += ' ';
-    } else if (two === '--' || c === '#') {
-      const nl = sql.indexOf('\n', i);
-      i = nl === -1 ? sql.length : nl;
-      bare += ' ';
-    } else {
-      bare += c;
-      i++;
-    }
-  }
 
-  const first = bare.trim().split(/\s+/)[0].toUpperCase();
-  if (!['SELECT', 'WITH', 'EXPLAIN', 'DESCRIBE', 'DESC', 'SHOW'].includes(first)) {
+  // The construct-aware reader that used to be inline here now lives in `sql-guard.js`,
+  // shared with the MCP `sql` tool: a model writes the SQL on both surfaces, and every
+  // member now holds `REMOTE ON *.*` (relocate needs it), so the dial-out refusal is no
+  // longer something ClickHouse issues on its own. Same normalisation, same allowlist,
+  // same four paid-for bypasses — read that file's comments before touching either.
+  //
+  // What stays HERE is this endpoint's own policy: read shapes only, and this house's
+  // database only. The MCP tool deliberately keeps neither — reading a housemate's
+  // shared database by name is a feature there, and `readonly` is its write gate.
+  const bare = guard.normalize(sql);
+
+  const first = guard.firstKeyword(bare);
+  if (!guard.READ_STATEMENTS.includes(first)) {
     return res.status(403).json({ error: 'Only SELECT queries are allowed' });
   }
-
-  // Which identifiers are in TABLE position — the only place a table function can appear.
-  //
-  // Checking every call inside a FROM clause refused ordinary read SQL: `count()` and
-  // `any()` in a derived table, `USING (…)`, `toString()` in an ON condition,
-  // `splitByChar()` in an ARRAY JOIN. That is the shape of this endpoint's own session
-  // rollup, on the endpoint whose job is querying transcripts. A table expression follows
-  // FROM, JOIN or a comma DIRECTLY, at the same paren depth — anything nested inside
-  // parentheses is a subquery or an argument, not a table function introduced here.
-  //
-  // DESCRIBE takes a table expression too, with no FROM at all: `DESCRIBE url('http://…')`
-  // performs schema inference, which dials out.
-  // `view` and `merge` are gone from this list. Both take a table expression or a database
-  // name as an ARGUMENT, so allowing them re-opened everything the list is for:
-  // `view(SELECT count() FROM system.tables)` returned 190, and
-  // `merge('other_db','^messages_')` returned 5,000 rows from a database this house does
-  // not own. The house's own team rooms are Merge TABLES, not calls to merge(), so nothing
-  // legitimate needs them here.
-  const ALLOWED_FN = new Set(['numbers', 'values', 'null', 'generateseries', 'format']);
 
   // A table function was never the only way out. `SELECT count() FROM system.users`
   // returned 2, and a database-qualified name reads any database the credential can see —
@@ -286,74 +228,8 @@ app.post('/api/query', route(async (req, res) => {
     }
   }
 
-  // Walk the normalised text once, tracking paren depth and whether the current depth is
-  // inside a FROM clause. A table function is an identifier-call that appears where a
-  // TABLE EXPRESSION goes: directly after FROM, after JOIN, or after a comma that
-  // separates table expressions in a FROM clause AT THE SAME DEPTH.
-  //
-  // Both qualifiers are load-bearing. Without the depth rule, `FROM (SELECT session_id,
-  // count() AS c FROM …)` reads the comma in the SELECT list as a table separator and
-  // refuses `count()`. Without excluding ARRAY JOIN, `ARRAY JOIN splitByChar(',', text)`
-  // matches on JOIN and refuses `splitByChar()`. Both are ordinary read SQL on the
-  // endpoint whose purpose is reading transcripts — and `any()` in a derived table is the
-  // shape of this product's own session rollup.
-  // ON and USING do NOT end the FROM clause — they are part of a JOIN, and a comma join
-  // can follow them: `FROM a JOIN b ON 1=1, file('/etc/hostname')` is ordinary SQL and
-  // walked straight through when they were listed here. Neither does a quoted alias that
-  // merely SPELLS one of these words: `FROM numbers(1) AS "WHERE", file(…)` was the same
-  // bypass with two characters of disguise. Only a keyword in KEYWORD POSITION ends it —
-  // that is, one that was not just introduced by AS.
-  const CLAUSE_END = /^(WHERE|PREWHERE|GROUP|ORDER|LIMIT|HAVING|SETTINGS|UNION|INTO|FORMAT|WINDOW|QUALIFY)$/i;
-  const tableFns = [];
-  const inFrom = [];
-  let depth = 0;
-  // Three tokens of history: at the '(' we need the identifier (prev), what introduced it
-  // (prevPrev), and what preceded THAT (prev3) — because distinguishing `JOIN f(` from
-  // `ARRAY JOIN f(` needs the token before the JOIN.
-  let prev = '';        // previous significant token, upper-cased
-  let prevPrev = '';
-  let prev3 = '';
-  const tok = /[A-Za-z_][A-Za-z0-9_]*|[(),]|[^\s(),]+/g;
-  let m;
-  while ((m = tok.exec(bare)) !== null) {
-    const raw = m[0];
-    const up = raw.toUpperCase();
-    if (raw === '(') {
-      // An identifier immediately before '(' is a call; decide it here, where we still
-      // know what preceded the identifier.
-      const isCall = /^[A-Za-z_][A-Za-z0-9_]*$/.test(prev === '' ? '' : bare.slice(0, m.index).match(/[A-Za-z_][A-Za-z0-9_]*\s*$/)?.[0]?.trim() || '');
-      if (isCall) {
-        const name = bare.slice(0, m.index).match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/)[1];
-        const introducer = prevPrev;
-        const tablePos = (introducer === 'FROM')
-          || (introducer === 'JOIN' && prev3 !== 'ARRAY')
-          || (introducer === ',' && inFrom[depth]);
-        if (tablePos) tableFns.push(name);
-      }
-      depth++;
-      prev3 = prevPrev; prevPrev = prev; prev = raw;
-      continue;
-    }
-    if (raw === ')') { depth = Math.max(0, depth - 1); prev3 = prevPrev; prevPrev = prev; prev = raw; continue; }
-    // `prev === 'AS'` means this token is an ALIAS, whatever it spells. A quoted alias
-    // arrives here as its bare text (the tokenizer keeps identifier content so that
-    // `FROM "url"(…)` is still visible), so `AS "WHERE"` would otherwise close the clause.
-    const isAlias = prev === 'AS';
-    if (up === 'FROM' && !isAlias) inFrom[depth] = true;
-    else if (CLAUSE_END.test(up) && !isAlias) inFrom[depth] = false;
-    prev3 = prevPrev; prevPrev = prev; prev = (raw === ',') ? ',' : up;
-  }
-
-  // DESCRIBE takes a table expression with no FROM at all, and schema inference on
-  // `DESCRIBE url('http://…')` dials out.
-  if (['DESCRIBE', 'DESC'].includes(first)) {
-    const after = bare.trim().replace(/^\w+\s+/, '').replace(/^TABLE\s+/i, '');
-    const d = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(after);
-    if (d) tableFns.push(d[1]);
-  }
-
-  for (const name of tableFns) {
-    if (!ALLOWED_FN.has(name.toLowerCase())) {
+  for (const name of guard.tableFunctions(bare)) {
+    if (!guard.ALLOWED_TABLE_FNS.has(name.toLowerCase())) {
       return res.status(403).json({ error: `table function ${name}() is not allowed here — this endpoint reads only this house` });
     }
   }

