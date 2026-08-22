@@ -6,6 +6,18 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **`/mem:invite` now finishes the handoff.** The skill provisioned the member and
+  stopped, leaving the user to work out where the credential file went and to compose the
+  covering message themselves. It now runs the invite from the user's downloads directory
+  (the file has to be attached to something, and it must never be left in a git repo —
+  `invite-*.env` is gitignored here but not in whatever checkout they were standing in),
+  confirms the file is present at mode 600 without ever printing its contents, reports
+  whether the house was actually fresh, and drafts the message to send the invitee —
+  install steps, that the file is a password, rotation on install, and `ship --full` when
+  they are replacing an existing credential. It also handles the new occupied-house
+  refusal: report the row count and let the user choose, never reach for `--adopt` on its
+  own.
+
 - **`memhouse invite` refuses a house that already holds someone's messages.** The house
   is created with `CREATE DATABASE IF NOT EXISTS`, so inviting a name whose database
   already existed silently *adopted* it — identical output to a fresh house, and the
