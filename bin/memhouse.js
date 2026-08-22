@@ -326,7 +326,8 @@ Setup        onboard              interactive wizard: discover → configure →
              invite <name>        mint a member + house on the server and write the env
                                   file their install needs (--url --admin-user
                                   --admin-password [--db NAME] [--out FILE]); local
-                                  machine untouched
+                                  machine untouched. Refuses a house that already holds
+                                  someone's messages — --adopt if sharing it is intended
              passwd               rotate this member's password + rewrite the env file
                                   (admin-assisted: --admin-user --admin-password)
                                   --print-sql            print the SQL, run it yourself
@@ -2912,7 +2913,7 @@ async function cmdNightly() {
  */
 async function cmdInvite() {
   const name = positional[0];
-  if (!name) { console.log('usage: memhouse invite <name> --url <house-url> --admin-user … --admin-password … [--db <house>] [--out <file>]'); return 2; }
+  if (!name) { console.log('usage: memhouse invite <name> --url <house-url> --admin-user … --admin-password … [--db <house>] [--out <file>] [--adopt]'); return 2; }
   try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(name, 'member'); }
   catch (e) { console.log(bad(e.message)); return 1; }
   const cfg = resolveConfig();
@@ -2965,6 +2966,42 @@ async function cmdInvite() {
   // EXPLICIT --admin-* (where the admin typed the target themselves) provisions at --url.
   // Either way the invite FILE carries --url, the invitee's path.
   const provisionUrl = flags['admin-user'] ? url : cfg.url;
+
+  // Is there already a house here, with somebody's memory in it? The house is created
+  // with CREATE DATABASE IF NOT EXISTS, so inviting a name whose database already exists
+  // ADOPTS it — same output as a fresh one, and the invitee lands on top of rows that are
+  // not theirs. (The user half is safe: adminBootstrap refuses an existing ClickHouse
+  // user, so no sitting member's password is ever rotated out from under them.)
+  //
+  // Found the hard way: an invite meant for one person was sent to another, who shipped
+  // 3,733 messages under it. Re-inviting the intended person reported success and handed
+  // them the first person's memory, with nothing on any surface saying so.
+  //
+  // Read-only, best-effort: an admin that cannot count rows should not lose the ability
+  // to invite, and a house that does not exist yet is the ordinary case.
+  const adminCfg = { ...cfg, url: provisionUrl, user: adminUser, password: adminPass || '', db, stated: true };
+  let occupied = null;
+  try {
+    const exists = await chRows(adminCfg, `SELECT count() AS n FROM system.tables WHERE database = '${db.replace(/'/g, "\\'")}' AND name = 'messages'`, { database: '' });
+    if (Number(exists[0] && exists[0].n) > 0) {
+      const r = await chRows(adminCfg, 'SELECT count() AS msgs, uniqExact(user_id) AS writers FROM messages', { database: db });
+      const msgs = Number(r[0] && r[0].msgs) || 0;
+      if (msgs > 0) occupied = { msgs, writers: Number(r[0].writers) || 0 };
+    }
+  } catch { /* cannot tell — provisioning below will surface any real access problem */ }
+  if (occupied && flags.adopt !== true) {
+    console.log(bad(`house '${db}' already exists and holds ${occupied.msgs} messages from ${occupied.writers} writer(s) — NOT inviting.`));
+    console.log(`  Inviting '${name}' here would hand them somebody else's memory, and their`);
+    console.log('  first ship would land on top of it. Nothing has been changed.');
+    console.log('  Pick a different handle:   memhouse invite <other-name> --url …');
+    console.log(`  Or a different house:      memhouse invite ${name} --url … --db <house>`);
+    console.log(`  If sharing this house IS the intent, say so:  --adopt`);
+    return 1;
+  }
+  if (occupied) {
+    console.log(warn(`adopting existing house '${db}' — ${occupied.msgs} messages already here (--adopt)`));
+  }
+
   const built = await adminBootstrap({ ...cfg, url: provisionUrl, db, stated: true }, {
     user: adminUser, password: adminPass || '', member: name, quiet: true,
   });

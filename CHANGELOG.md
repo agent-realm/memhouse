@@ -6,6 +6,19 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **`memhouse invite` refuses a house that already holds someone's messages.** The house
+  is created with `CREATE DATABASE IF NOT EXISTS`, so inviting a name whose database
+  already existed silently *adopted* it — identical output to a fresh house, and the
+  invitee landed on top of rows that were not theirs. Found the hard way: an invite meant
+  for one person was sent to another, who shipped 3,733 messages under it; re-inviting the
+  intended person reported success and would have handed over the first person's memory,
+  with nothing on any surface saying so. Invite now counts the target's `messages` first
+  and refuses with the row count, the writer count and three ways forward (different
+  handle, different `--db`, or `--adopt` when sharing the house is the actual intent).
+  Read-only and best-effort, so an admin that cannot count rows can still invite. The
+  *user* half already behaved: `adminBootstrap` refuses an existing ClickHouse user, so an
+  invite has never rotated a sitting member's password.
+
 - **`memhouse relocate` needs `GRANT REMOTE ON *.*`, and no bootstrap granted it.**
   relocate runs from the *destination*, pulling the source over `remoteSecure()` — a
   table function ClickHouse gates behind its own access type, separate from `GRANT ALL`
