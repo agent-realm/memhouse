@@ -670,15 +670,13 @@ CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'
 
 ${rooms.trim()}
 
--- The whole database. ALL on your own house reaches nothing outside it — the database is
--- the boundary — and it is what lets the shipper create and evolve its own tables.
-GRANT ALL ON ${db}.* TO ${member};
-
--- SELECT again, WITH GRANT OPTION — sharing, made self-serve and read-only by
--- construction. This is what lets the member run \`GRANT SELECT ON ${db}.* TO <friend>\`
--- themselves (/mem:share) without an operator, while the grant-option stops at SELECT:
--- they can open a read-only window into their own memory and can hand on nothing more.
-GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
+-- The whole database, WITH GRANT OPTION. ALL on your own house reaches nothing outside it
+-- — the database is the boundary — and it lets the shipper create and evolve its own
+-- tables. The grant option makes the member the real owner: they can hand on any of their
+-- own data (\`/mem:share\` still opens only a read-only SELECT window, but the owner is not
+-- boxed into read-only sharing of their own house). Scoped to this db, and no CREATE USER
+-- rides with it — a member still cannot mint accounts or reach another house.
+GRANT ALL ON ${db}.* TO ${member} WITH GRANT OPTION;
 
 -- Self-scoped ALTER USER: the member may change THEIR OWN password and no one else's.
 -- \`ON ${member}\` names exactly this user, so \`memhouse passwd\` needs no admin, and an
@@ -689,6 +687,17 @@ GRANT SELECT ON ${db}.* TO ${member} WITH GRANT OPTION;
 -- makes their OWN rows land with an empty user_id — self-inflicted, within the collaborator
 -- trust model, flagged by \`memhouse doctor\`, and re-asserted on every \`ship --ensure-schema\`.
 GRANT ALTER USER ON ${member} TO ${member};
+
+-- See the OTHER members, read-only. SHOW USERS lets \`/mem:users\` list who is on this
+-- ClickHouse (names only — no passwords, no data) so a member can find who to share with.
+-- It grants no read of anyone's rows; reading a housemate's memory still needs /mem:share.
+GRANT SHOW USERS ON *.* TO ${member};
+
+-- \`memhouse relocate\` runs FROM the destination, pulling the source over remoteSecure() —
+-- a table function ClickHouse gates behind its own access type, separate from GRANT ALL on
+-- a database. Without this, relocate fails at the native-reachability probe with
+-- ACCESS_DENIED (source untouched, nothing lost — just unusable until granted).
+GRANT REMOTE ON *.* TO ${member};
 
 -- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
 -- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
@@ -786,11 +795,12 @@ async function adminBootstrap(cfg, admin) {
   // reaches nothing outside the database, and it is what lets the member's own shipper
   // create and evolve the rooms (--ensure-schema below).
   try {
-    await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member}`, { database: '' });
-    // SELECT again, WITH GRANT OPTION: what /mem:share rides on. The member can open a
-    // read-only window into their OWN house for a housemate-to-be — and can hand on
-    // nothing more, because the grant option stops at SELECT.
-    await q(`GRANT SELECT ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
+    // ALL, WITH GRANT OPTION: the database is theirs, so they may do anything with their
+    // own data AND hand any of it on. /mem:share still opens only a read-only window (it
+    // grants SELECT), but the owner is not boxed into read-only sharing of their own house.
+    // Scoped to their db: the grant option reaches nothing outside it, and no CREATE USER
+    // comes with it, so a member still cannot mint accounts or touch another house.
+    await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
     // Self-scoped ALTER USER — the member owns their own password (memhouse passwd needs
     // no admin; an invitee can rotate the password the inviter set). Non-escalating: the
     // grant names this one user, so it reaches no other account. Best-effort: a house on
@@ -798,8 +808,22 @@ async function adminBootstrap(cfg, admin) {
     // self-rotation.
     try { await q(`GRANT ALTER USER ON ${admin.member} TO ${admin.member}`, { database: '' }); }
     catch { /* admin without access-management: passwd stays admin-assisted for this member */ }
+    // See the OTHER members, read-only: SHOW USERS lets `/mem:users` list who is on this
+    // ClickHouse (names only — no passwords, no data) so a member can find who to share
+    // with. It grants no read of anyone's rows; that still needs an explicit /mem:share.
+    // Best-effort like ALTER USER above — an admin without access-management just skips it.
+    try { await q(`GRANT SHOW USERS ON *.* TO ${admin.member}`, { database: '' }); }
+    catch { /* no access-management: /mem:users section 4 stays admin-only for this member */ }
+    // REMOTE: `memhouse relocate` runs FROM the destination, pulling the source over
+    // remoteSecure() — a table function ClickHouse gates behind its own access type,
+    // separate from any GRANT ALL on a database. Without it every relocate a member runs
+    // fails at the native-reachability probe with ACCESS_DENIED, source untouched, no
+    // data lost — just relocate unusable until an admin grants this by hand. Best-effort
+    // like the two grants above.
+    try { await q(`GRANT REMOTE ON *.* TO ${admin.member}`, { database: '' }); }
+    catch { /* no access-management: relocate stays admin-assisted for this member */ }
     await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
-    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', async_insert pinned`));
+    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', SHOW USERS, REMOTE, async_insert pinned`));
   } catch (e) {
     console.log(bad(`could not grant the house to '${admin.member}': ${e.message}`));
     if (createdUser) {
@@ -877,6 +901,40 @@ async function sortingKeyProblem(cfg) {
     }
     return wrong.length ? wrong.join('; ') : null;
   } catch { return null; }  // unreachable house is a different check's problem
+}
+
+// Start the shipper as a BACKGROUND daemon instead of blocking install on a full first
+// pass. A fresh member's first ship loads the ENTIRE local backlog — yigido's was 558
+// sessions / 224s — and running it synchronously (the old `run(SHIP_JS)`) made `install`
+// sit silent for minutes and read as hung. Detached, install returns at once, the history
+// loads in the background, and the loop keeps shipping. Mirrors cmdStart's shipper daemon,
+// and defers to an installed service rather than running a second shipper beside it.
+//
+// Must be called AFTER finishInvite: rotation rewrites the env file, so the daemon has to
+// be spawned from a RE-READ config (resolveConfig()) or it would carry the old password.
+function startShipperBackground(cfg) {
+  let svc = { installed: false, running: false };
+  try { svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { /* unsupported platform */ }
+  if (svc.installed) {
+    console.log(svc.running
+      ? ok('shipping runs under the installed service — nothing to start')
+      : warn('a shipper service is installed but stopped — start it:  memhouse service start'));
+    return;
+  }
+  const existing = pidOf('shipper');
+  if (existing) { console.log(ok(`shipper already running in the background (pid ${existing})`)); return; }
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  const logPath = path.join(LOG_DIR, 'shipper.log');
+  const log = fs.openSync(logPath, 'a');
+  const child = spawn(process.execPath, [SHIP_JS, '--loop', String(flags.interval || 300)], {
+    env: childEnv(cfg), detached: true, stdio: ['ignore', log, log],
+  });
+  fs.writeFileSync(path.join(RUN_DIR, 'shipper.pid'), String(child.pid));
+  child.unref();
+  console.log(ok(`shipper started in the background (pid ${child.pid}) — loading your history now`));
+  console.log('  a large first ship can take a few minutes; watch it finish with:  memhouse status');
+  console.log('  dashboard (browse / search / analyze):  memhouse start');
 }
 
 async function cmdInstall({ interactive }) {
@@ -974,12 +1032,14 @@ async function cmdInstall({ interactive }) {
       console.log(ok(`host identity: ${me.id}`));
       console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
     }
-    if (flags['no-ship'] !== true && run(SHIP_JS, [], cfg) !== 0) return 1;
     console.log(ok('installed'));
     console.log('  adding a housemate later is two statements for the admin:');
     console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
     printGettingStarted(cfg);
     await finishInvite(cfg);
+    // The first ship loads the whole backlog; do it in the background so install returns
+    // now. resolveConfig() re-reads the env file finishInvite may have just rotated.
+    if (flags['no-ship'] !== true) startShipperBackground(resolveConfig());
     return 0;
   }
 
@@ -1130,12 +1190,11 @@ async function cmdInstall({ interactive }) {
     console.log(ok(`host identity: ${me.id}`));
     console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
   }
-  if (flags['no-ship'] !== true) {
-    if (run(SHIP_JS, [], cfg) !== 0) return 1;
-  }
   console.log(ok('installed'));
   printGettingStarted(cfg);
   await finishInvite(cfg);
+  // Background first ship — same reasoning as the invite branch above.
+  if (flags['no-ship'] !== true) startShipperBackground(resolveConfig());
   return 0;
 }
 
@@ -2022,6 +2081,30 @@ async function cmdUpdate() {
   }
   console.log(ok('files updated'));
 
+  // Refresh the Claude plugin wherever it is ALREADY installed, so `update` keeps the
+  // skills in lockstep with the package instead of leaving a stale `/mem:*` behind. Only
+  // dirs that already have it are touched — update never installs the plugin somewhere new.
+  // The files copied are the ones npm/git just put on disk; the manifest is stamped with
+  // the FRESH package version read off disk (this process still runs the pre-upgrade code,
+  // so its in-memory PKG.version is a release behind).
+  try {
+    let fresh = PKG.version;
+    try { fresh = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8')).version || fresh; } catch { /* keep in-memory */ }
+    const installed = claudeTargets().filter((t) => isPluginInstalled(t.dir));
+    for (const t of installed) {
+      const dst = installPluginInto(t.dir);
+      try {
+        const mf = path.join(dst, '.claude-plugin', 'plugin.json');
+        const m = JSON.parse(fs.readFileSync(mf, 'utf-8'));
+        if (m.version !== fresh) { m.version = fresh; fs.writeFileSync(mf, `${JSON.stringify(m, null, 2)}\n`); }
+      } catch { /* leave the stamp installPluginInto wrote */ }
+      console.log(ok(`plugin refreshed in ${short(t.dir)}`));
+    }
+    if (installed.length) console.log('  reload it in Claude Code:  /reload-plugins  (or restart the session)');
+  } catch (e) {
+    console.log(warn(`could not refresh Claude plugins: ${e.message.split('\n')[0]}`));
+  }
+
   // Restarting is the half a bare `npm i -g` leaves undone. The daemons notice on their own
   // within a loop interval (memhouse/self-update.js), but a pilot who typed `update` should
   // not have to wait for it, and the dashboard's stale bundle is visible immediately.
@@ -2183,6 +2266,17 @@ function installPluginInto(dir) {
   }
   fs.mkdirSync(dst, { recursive: true });
   fs.cpSync(path.join(DELIVERY, 'plugin'), dst, { recursive: true });
+  // Stamp the manifest with THIS memhouse's version. The source plugin.json carries a
+  // FROZEN number — it sat at 0.11.0 through several releases, so every install
+  // advertised the wrong version (`memhouse --version` said one thing, the plugin
+  // another). The package version is the single truth; write it into the copy.
+  try {
+    const m = JSON.parse(fs.readFileSync(dstManifest, 'utf-8'));
+    if (m.version !== PKG.version) {
+      m.version = PKG.version;
+      fs.writeFileSync(dstManifest, `${JSON.stringify(m, null, 2)}\n`);
+    }
+  } catch { /* manifest unreadable — leave the copied one rather than guess */ }
   return dst;
 }
 
@@ -3124,6 +3218,13 @@ async function cmdUninstall() {
   // spellings are what people type for a version.
   if (flags.version === true || process.argv.slice(2).some((a) => a === '-v' || a === '-V')) {
     console.log(PKG.version); return;
+  }
+  // `memhouse <cmd> --help` (or `-h`) must never reach a command's own logic — passwd,
+  // invite, uninstall and friends act on first call with no separate confirm step, so a
+  // --help that fell through to the default branch would DO the thing instead of
+  // describing it. One check ahead of the switch, for every command, is the whole fix.
+  if (cmd && (flags.help === true || process.argv.slice(2).some((a) => a === '-h' || a === '--help'))) {
+    console.log(HELP); return;
   }
   const cfg = resolveConfig();
 

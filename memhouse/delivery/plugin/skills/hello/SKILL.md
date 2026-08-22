@@ -103,5 +103,19 @@ Also worth naming: `memhouse start` serves a dashboard at http://localhost:4640 
 browsing and analytics outside the chat, and everything here is read-only for agents —
 only the shipper writes.
 
+**Freshness check** — quietly compare the installed client to the latest release; mention
+it ONLY if there's a real gap (don't clutter the welcome otherwise):
+
+```bash
+INSTALLED=$(memhouse version 2>/dev/null | head -1 | tr -d '[:space:]')
+LATEST=$(curl -sS -m 5 https://registry.npmjs.org/memhouse/latest 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+echo "installed=${INSTALLED:-unknown} latest=${LATEST:-unknown}"
+```
+
+If the installed version is a MINOR or MAJOR behind (or many patches), add one line:
+"heads-up — you're on 0.A.B, 0.C.D is out; `memhouse update` upgrades it and refreshes
+these `/mem:*` skills." A patch or two behind isn't worth mentioning here. Never run the
+update yourself.
+
 End by offering one concrete action: a search for something they mentioned recently, or
 `/mem:status` if they seem unsure it's working. One offer, not a menu.

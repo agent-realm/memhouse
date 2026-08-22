@@ -106,9 +106,34 @@ rows but NO `client_*` record is a **pre-0.10 memhouse still writing** — flag 
 re-ships delete retained parses, and the fixes are upgrade it or (as admin)
 `REVOKE ALTER DELETE, ALTER UPDATE ON <db>.* FROM <member>`.
 
+**5. Client freshness** — is the installed memhouse behind the published release? This is a
+shell check, not SQL (it reads the local binary and the npm registry, no house involved):
+
+```bash
+INSTALLED=$(memhouse version 2>/dev/null | head -1 | tr -d '[:space:]')
+LATEST=$(curl -sS -m 5 https://registry.npmjs.org/memhouse/latest 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+echo "installed=${INSTALLED:-unknown} latest=${LATEST:-unknown}"
+```
+
+Compare the two as `MAJOR.MINOR.PATCH`. Report freshness, and size the nudge to the gap:
+
+- **up to date** (installed ≥ latest) — one line: "client 0.X.Y, current."
+- **small gap** (same major+minor, a patch or two behind) — a gentle note: "a newer patch
+  0.X.Z is out; `memhouse update` when convenient."
+- **big gap** (latest MAJOR or MINOR is ahead, or many patches) — surface it prominently and
+  **offer to update**: "your memhouse is 0.A.B but 0.C.D is released — run **`memhouse
+  update`** to upgrade; it also refreshes the `/mem:*` plugin, then `/reload-plugins`."
+- either side **unknown** (no binary on PATH, or the registry did not answer) — say which,
+  don't guess. A plugin-only install with no CLI can't self-update; point at
+  `npm i -g memhouse`.
+
+Never run `memhouse update` yourself — it restarts daemons and may migrate the house.
+Offer the command; the pilot runs it.
+
 ## Presenting it
 
 Lead with one line of verdict ("healthy: N sessions across M editors, last ingest X
 minutes ago" — or the one thing wrong). Then the per-editor table, then anything from
-sections 3–4 that needs action. Skip empty sections; do not pad. If the house is
-unreachable, say which URL refused and stop — never guess another endpoint.
+sections 3–5 that needs action. A **big version gap (section 5) is an action** — put the
+`memhouse update` offer near the top, not buried. Skip empty sections; do not pad. If the
+house is unreachable, say which URL refused and stop — never guess another endpoint.

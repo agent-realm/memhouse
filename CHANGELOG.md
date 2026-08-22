@@ -40,6 +40,94 @@ Windsurf, Copilot, Goose, and the rest read the same memory back.
   for HTTP) — 61 checks total, including a real-client pass driven by Claude
   Code itself via `--mcp-config`, and a three-round adversarial review
   (stderr scrub, HTTP route guard, stdio flow control) ending CLEAN.
+- **`memhouse relocate` needs `GRANT REMOTE ON *.*`, and no bootstrap granted it.**
+  relocate runs from the *destination*, pulling the source over `remoteSecure()` — a
+  table function ClickHouse gates behind its own access type, separate from `GRANT ALL`
+  on a database. Every member created via `invite` or the admin install had `ALL`,
+  `SHOW USERS` and self-`ALTER USER`, but not this — so `relocate` failed at the
+  native-reachability probe with `ACCESS_DENIED` for any member, source always left
+  untouched. Found by running it. Both grant paths (`adminBootstrap` and the
+  `--print-sql` template) now include `GRANT REMOTE ON *.* TO <member>`, best-effort
+  like the other two. Existing members are unaffected; grant them by hand:
+  `GRANT REMOTE ON *.* TO <member>`.
+
+## 0.12.7 — 2026-08-20
+
+- **A member fully owns their house — `GRANT ALL ON <db>.* … WITH GRANT OPTION`.** Invite
+  and the admin install previously granted `ALL` plus only `SELECT` *with grant option*, so
+  a member could share read but not hand on anything more, and making them a true owner took
+  a manual `GRANT`. Now the single grant carries the option on everything: their database is
+  theirs to do anything with, including granting any of it onward. `/mem:share` is unchanged
+  — it still opens only a read-only `SELECT` window — this just stops boxing the owner into
+  read-only sharing of their *own* house. Still scoped to their db and still no `CREATE USER`,
+  so a member cannot mint accounts or reach another house. Both grant paths updated
+  (programmatic `adminBootstrap` + the `--print-sql` template); verified a fresh member gets
+  all 43 db privileges grantable. (Existing members already upgraded by hand are unaffected.)
+
+## 0.12.6 — 2026-08-20
+
+- **Members can see who else is on the ClickHouse.** New accounts (via `memhouse invite`
+  and the admin install) now get `GRANT SHOW USERS ON *.* ` — read-only visibility of the
+  user list (names only; no passwords, no data), so `/mem:users` can answer "every user on
+  the server" and a member can find who to share with. It grants no read of anyone's rows;
+  that still needs an explicit `/mem:share`. Best-effort, like the self-`ALTER USER` grant:
+  an admin without access-management just skips it. Both grant paths carry it — the
+  programmatic `adminBootstrap` and the `--print-sql` template. (Existing members are
+  unaffected; grant them by hand: `GRANT SHOW USERS ON *.* TO <member>`.)
+- **The plugin nudges you when the client is behind.** `/mem:status` (and, quietly,
+  `/mem:hello`) now compare the installed `memhouse version` against the latest npm release
+  and, on a real gap (a minor/major behind, or many patches), offer `memhouse update` —
+  which upgrades the CLI and, since 0.12.5, refreshes the `/mem:*` plugin too. A patch or
+  two behind is mentioned gently or not at all; the skills never run the update themselves.
+
+## 0.12.5 — 2026-08-20
+
+- **`memhouse update` now refreshes the Claude plugin too.** Before, update upgraded the
+  package, the service unit, and the house, but left the installed `/mem:*` skills as
+  whatever an earlier `plugins install` had copied — so the plugin drifted behind the CLI
+  (and showed an old version). Update now re-copies the plugin into every Claude config dir
+  that ALREADY has it (never installs it somewhere new), from the files just put on disk,
+  and stamps the manifest with the freshly-installed version. It prints each dir refreshed
+  and a `/reload-plugins` reminder. (Self-update note: because `update` runs the
+  pre-upgrade code, this takes effect from the update AFTER the one that installs 0.12.5.)
+
+## 0.12.4 — 2026-08-20
+
+- **Inserts are compressed and byte-bounded — the shipper stops choking slow links.**
+  Profiling a real house behind a Cloudflare tunnel showed the shipper's inserts taking up
+  to 77s each, and the ProfileEvents were unambiguous: `NetworkReceiveElapsed = 76s`,
+  full-text index build 0.8s, CPU 1.1s, disk 0.009s — the entire cost was **uploading a
+  ~27 MB uncompressed JSON batch through the tunnel**, not ClickHouse. Two fixes: the
+  shipper now (1) **gzip-compresses the request body** (`compression: { request: true }`) —
+  measured 3.6–8× smaller on the wire — and (2) **caps each insert batch at ~4 MB as well
+  as 2000 rows**, whichever comes first, so a handful of very wide messages can't build a
+  giant single upload (`MEMHOUSE_BATCH_BYTES` overrides the ceiling). Reads were never the
+  problem — server-side SELECTs are 20–70ms; the latency you feel over a tunnel is round
+  trip, and `FINAL` (needed for ReplacingMergeTree correctness) adds ~40ms.
+
+## 0.12.3 — 2026-08-20
+
+- **`install` no longer blocks on the first ship — it ships in the background.** A fresh
+  member's first ship loads the entire local backlog (a real invitee's was 558 sessions /
+  170k rows / **224 seconds**), and the installer ran it synchronously and near-silently,
+  so `install` looked hung for minutes after "config written". Now install finishes
+  immediately and starts the shipper as a detached background daemon (the same one
+  `memhouse start` runs), which loads the history and keeps shipping — `memhouse status`
+  shows it fill in. It defers to an installed service rather than running a second shipper,
+  skips if one is already running, and is started AFTER the invite password rotation from a
+  re-read config so the daemon never holds the pre-rotation password. `--no-ship` still
+  skips it. Both install paths (invite `--env` and direct `--url/--user`) and `onboard`
+  (which calls install) are covered. Verified end to end: install returns in ~0s and the
+  detached shipper comes up alive.
+
+## 0.12.2 — 2026-08-20
+
+- **The Claude plugin now reports the real version.** `plugin.json` carried a hardcoded
+  `"version": "0.11.0"` in the source, copied verbatim on install — so the plugin
+  advertised 0.11.0 no matter which memhouse produced it, disagreeing with
+  `memhouse --version`. `plugins install` now stamps the installed manifest with the
+  package version (the single source of truth), and the source manifest was bumped to
+  match. Re-run `memhouse plugins install claude` to refresh an already-installed plugin.
 
 ## 0.12.1 — 2026-08-20
 
