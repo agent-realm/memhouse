@@ -4,6 +4,19 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`memhouse relocate` needs `GRANT REMOTE ON *.*`, and no bootstrap granted it.**
+  relocate runs from the *destination*, pulling the source over `remoteSecure()` — a
+  table function ClickHouse gates behind its own access type, separate from `GRANT ALL`
+  on a database. Every member created via `invite` or the admin install had `ALL`,
+  `SHOW USERS` and self-`ALTER USER`, but not this — so `relocate` failed at the
+  native-reachability probe with `ACCESS_DENIED` for any member, source always left
+  untouched. Found by running it. Both grant paths (`adminBootstrap` and the
+  `--print-sql` template) now include `GRANT REMOTE ON *.* TO <member>`, best-effort
+  like the other two. Existing members are unaffected; grant them by hand:
+  `GRANT REMOTE ON *.* TO <member>`.
+
 ## 0.12.7 — 2026-08-20
 
 - **A member fully owns their house — `GRANT ALL ON <db>.* … WITH GRANT OPTION`.** Invite

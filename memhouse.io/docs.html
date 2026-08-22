@@ -183,7 +183,7 @@
           <tr><td>prompt</td><td>Print the memory system-prompt snippet. <code>--install</code> prints an install prompt for an agent instead.</td></tr>
           <tr><td>deploy --local</td><td>Run ClickHouse in docker/podman, bound to loopback, then install. <code>--down</code> removes it (container + volume).</td></tr>
           <tr><td>migrate / migrate-rooms</td><td>Run every migration the house still needs (or just the rooms) — copy + atomic swap, deletes nothing. <code>[--dry-run] [--yes]</code></td></tr>
-          <tr><td>relocate --to URL</td><td>Copy the whole house to a new ClickHouse, server-to-server, and repoint this install. The shipper does not re-ingest; source is untouched until confirmed.</td></tr>
+          <tr><td>relocate --to URL</td><td>Copy the whole house to a new ClickHouse, server-to-server, and repoint this install. The shipper does not re-ingest; source is untouched until confirmed. Needs <code>GRANT REMOTE ON *.*</code> on the destination user.</td></tr>
           <tr><td>service install</td><td>Run the shipper as a real user service (systemd <code>--user</code> / launchd). Also <code>stop | start | restart | uninstall | status</code>.</td></tr>
         </tbody>
       </table>
@@ -256,6 +256,10 @@
     (<code>remoteSecure()</code>/<code>remote()</code> INSERT SELECT, preserving provenance) and repoints this
     install at the new one. It gates on a matching row count before switching, and the old env is kept until
     you confirm.</p>
+    <p>The destination user needs <code>GRANT REMOTE ON *.*</code> — it's what lets
+    <code>remoteSecure()</code> pull from the source. Members invited or installed since this grant was
+    added get it automatically; on an older account, an admin runs <code>GRANT REMOTE ON *.* TO
+    &lt;member&gt;</code> once.</p>
   </div>
 </section>
 
