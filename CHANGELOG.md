@@ -6,6 +6,19 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **New skill: `/mem:admin`.** Every other skill is scoped to the caller's own house, so
+  anything server-wide — list the accounts, size the houses, provision or remove a member,
+  grant and revoke, read mutations and running queries — had no surface and became
+  hand-written SQL with an admin password pasted into a chat that memhouse then archives.
+  The skill resolves an admin credential from `MEMHOUSE_ADMIN_USER`/`MEMHOUSE_ADMIN_PASSWORD`,
+  then `~/.memhouse/admin.env`, then the ordinary member credential (which IS the superuser
+  on a `deploy --local` house), and *proves* it by checking `SHOW GRANTS` for
+  `ACCESS MANAGEMENT` / `CREATE USER` / `CREATE DATABASE ON *.*` rather than assuming —
+  `SHOW USERS` alone is a member privilege and does not qualify. Without one it refuses and
+  names the two ways to supply it; it never asks for a password in the conversation and
+  never echoes one. Destructive statements must be preceded by a SELECT of the same
+  predicate, a report of what is actually there, and an explicit yes for that object.
+
 - **`/mem:invite` now finishes the handoff.** The skill provisioned the member and
   stopped, leaving the user to work out where the credential file went and to compose the
   covering message themselves. It now runs the invite from the user's downloads directory
