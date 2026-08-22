@@ -22,7 +22,10 @@
 //     memhouse is an accumulator, not a mirror: absence of a session is never a signal,
 //     and no "sync" or "prune" feature may ever be built here.
 //   - Re-shipping is always safe: ReplacingMergeTree(ingested_at) collapses to
-//     latest-wins at FINAL. Keyed (session_id, user_id, origin, epoch, seq) on messages
+//     latest-wins at FINAL. Safe is not free, though — see tailRows: a re-ship sends
+//     only the rows the house does not already hold byte for byte, because collapsing
+//     duplicates is work every reader pays for on every request.
+//     Keyed (session_id, user_id, origin, epoch, seq) on messages
 //     and (…, epoch, idx) on tool_calls, so an imported row and a shipped one at the same
 //     seq are two rows, and so are two parses of the same session. sessions is
 //     (session_id, user_id) with NO origin and NO epoch — one metadata row per session is
@@ -104,6 +107,16 @@ function chTs(ms) {
     `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}.${p(d.getUTCMilliseconds(), 3)}`;
 }
 
+// Whether the adapter gave this message its own timestamp, or the shipper has to
+// interpolate one. The distinction matters beyond accuracy: an interpolated ts is a
+// function of `seq / (total - 1)`, so EVERY already-stored row's ts moves when the
+// session grows. That is what forces a session with no per-message timestamps to
+// re-ship whole rather than tail-only. See rowsForChat's `tsInterpolated` and tailSafe.
+function hasOwnTs(msg) {
+  const at = Number(msg && msg._ts);
+  return Number.isFinite(at) && at > 0;
+}
+
 // When a message was actually sent.
 //
 // Prefer the adapter's own `_ts` (epoch ms). It is optional by contract — `getMessages`
@@ -124,7 +137,7 @@ function messageTs(chat, seq, total, msg) {
   // Seconds or milliseconds, depending on the format: goose stores seconds, Claude Code
   // and opencode milliseconds. Real epoch-ms is > 1e12 and real epoch-seconds ~1.7e9, so
   // the split point is unambiguous for any date this side of 1973.
-  if (Number.isFinite(at) && at > 0) return chTs(at < 1e11 ? at * 1000 : at);
+  if (hasOwnTs(msg)) return chTs(at < 1e11 ? at * 1000 : at);
   const start = chat.createdAt || chat.lastUpdatedAt || Date.now();
   const end = chat.lastUpdatedAt || chat.createdAt || start;
   if (total <= 1) return chTs(start);
@@ -747,7 +760,7 @@ async function assertWriterSupported(client, rooms) {
 // must be decidable WITHOUT calling getMessages on every chat.
 async function loadExisting(client, rooms) {
   const rs = await client.query({
-    query: `SELECT session_id, last_updated_at, message_count, extra FROM ${rooms.sessions_raw} FINAL WHERE user_id = currentUser()`,
+    query: `SELECT session_id, last_updated_at, message_count, extra, host, folder FROM ${rooms.sessions_raw} FINAL WHERE user_id = currentUser()`,
     format: 'JSONEachRow',
   });
   // Actual message rows per session: an interrupted re-ship (a crash mid-flush on a
@@ -848,6 +861,11 @@ async function loadExisting(client, rooms) {
       maxSeq: msgs.maxSeq,
       maxIdx: tools.maxIdx,
       hasRows: msgEpoch.has(r.session_id) || toolEpoch.has(r.session_id),
+      // Denormalized onto every message and tool_call row, and NOT covered by
+      // line_hash. A change in either means the stored rows are stale in a way the
+      // hash cannot see, so the session must re-ship whole. See tailRows.
+      host: String(r.host || ''),
+      folder: String(r.folder || ''),
     });
   }
   return map;
@@ -903,8 +921,13 @@ function rowsForChat(chat, host) {
   const msgRows = [];
   const toolRows = [];
   let idx = 0; // session-wide tool-call index
+  // Set as soon as one message has no timestamp of its own. One is enough: the
+  // interpolation denominator is the SESSION's length, so a single interpolated row
+  // means this session's stored timestamps drift the next time it grows.
+  let tsInterpolated = false;
   for (let seq = 0; seq < total; seq++) {
     const m = messages[seq];
+    if (!hasOwnTs(m)) tsInterpolated = true;
     const raw = typeof m.content === 'string' ? m.content : JSON.stringify(m.content) ?? '';
     const text = truncate(raw, TEXT_MAX);
     const ts = messageTs(chat, seq, total, m);
@@ -969,7 +992,7 @@ function rowsForChat(chat, host) {
   // message half; without the tool half a pass that dies between the messages insert and
   // the tool_calls insert leaves a session that looks finished forever. See loadExisting.
   session.extra.toolCallCount = toolRows.length;
-  return { session, msgRows, toolRows };
+  return { session, msgRows, toolRows, tsInterpolated };
 }
 
 /**
@@ -1040,6 +1063,78 @@ function decideEpoch(stored, incoming) {
     }
   }
   return { epoch, reason: null };
+}
+
+/**
+ * Whether this session's already-stored rows can be left alone, or have to be rewritten.
+ *
+ * `line_hash` deliberately covers CONTENT only — session_id, seq, role, model, the four
+ * token counts, text. Three shipped columns sit outside it and are not derived from
+ * anything inside it, so a row can be stale in a way no hash comparison can see:
+ *
+ *   ts. Interpolated across [createdAt, lastUpdatedAt] as `seq / (total - 1)` for the
+ *   adapters that record no per-message time. The denominator is the session's length,
+ *   so every stored row's ts moves the moment the session grows. Adapters that DO supply
+ *   `_ts` (Claude Code, opencode, goose, …) are exempt — their timestamps are facts, not
+ *   functions of the parse.
+ *
+ *   host. The machine that shipped the row. Two machines shipping one session (a synced
+ *   home directory) must keep overwriting each other, as they do today.
+ *
+ *   folder / project. Denormalized onto every message and tool_call row; a moved or
+ *   renamed project has to reach the rows that carry it.
+ *
+ * `source` cannot change (it is the session_id prefix), `is_subagent` is derived from
+ * `text`, and messages' `extra` is always empty — so those three need no check.
+ *
+ * When this returns false the session ships whole, exactly as it always has. Pure.
+ */
+function tailSafe(prev, rows, host) {
+  if (rows.tsInterpolated) return false;
+  if (String(prev.host || '') !== String(host || '')) return false;
+  return String(prev.folder || '') === String((rows.session && rows.session.folder) || '');
+}
+
+/**
+ * Drop the rows the house already holds, byte for byte, and keep only what is new.
+ *
+ * A session that is still being written grows a few messages at a time, but the shipper
+ * re-parses and re-sends the WHOLE transcript every pass. ReplacingMergeTree accepts all
+ * of it — every already-stored row lands again under its own key as another version — so
+ * an actively used session accumulates one full copy of itself per pass. Measured on a
+ * real 1,230-session house: 1,226,770 stored rows for 685,649 real ones, 1.79 copies of
+ * the average row and seven copies of the worst. Every read carries `final=1`, so the
+ * dashboard pays for all of them on every request.
+ *
+ * The versions are not merely redundant, they are IDENTICAL: same key, same content.
+ * decideEpoch has already established that (it forks the session to a new epoch the
+ * moment anything in the overlap differs), so by the time this runs, a row whose stored
+ * line_hash equals the incoming one cannot differ in any column line_hash covers.
+ *
+ * Pure, and exported, for the same reason decideEpoch is: it decides what does and does
+ * not reach the house, and it is unit tested without a server.
+ *
+ * PRECONDITION, enforced by the caller: only valid when decideEpoch reused the epoch AND
+ * the columns line_hash does NOT cover are stable for this session — see
+ * `tsInterpolated`, `host` and `folder` in runShip. A gap in the overlap (a seq the house
+ * is missing, from a pass that died mid-flush) has no stored hash, so it is kept and the
+ * next pass repairs itself.
+ *
+ * @param {object} stored    { hashes: Map<seq,string>, tools: Map<idx,{tool_name,args}> }
+ * @param {object} incoming  { msgRows, toolRows } as built by rowsForChat.
+ * @returns {{ msgRows: object[], toolRows: object[] }} the subset worth sending.
+ */
+function tailRows(stored, incoming) {
+  const hashes = stored.hashes || new Map();
+  const tools = stored.tools || new Map();
+  return {
+    msgRows: incoming.msgRows.filter((r) => hashes.get(r.seq) !== String(r.line_hash)),
+    // Tool calls carry no hash — same comparison decideEpoch makes.
+    toolRows: incoming.toolRows.filter((r) => {
+      const was = tools.get(r.idx);
+      return !was || was.tool_name !== r.tool_name || was.args !== r.args;
+    }),
+  };
 }
 
 /**
@@ -1159,6 +1254,7 @@ async function runShip(client, opts = {}) {
 
   const seen = new Set(); // adapters must not double-ship a session id within a pass
   let sessions = 0, skipped = 0, msgRows = 0, toolRows = 0, unreadable = 0, bumped = 0, withheld = 0;
+  let msgRowsDeduped = 0, toolRowsDeduped = 0;
   for (const chat of chats) {
     if (chat.encrypted) continue;
     // Same canonical '<source>:<adapter-local id>' as rowsForChat: dedup and
@@ -1235,6 +1331,9 @@ async function runShip(client, opts = {}) {
     // default), so a shorter re-parse is at least as likely to mean "the source lost it"
     // as "the adapter was fixed". The house is supposed to outlive the source.
     let epoch = 0;
+    // What actually gets sent. Defaults to the whole parse; narrowed to the tail below
+    // when — and only when — every row it drops is already in the house unchanged.
+    let send = rows;
     if (prev && prev.hasRows) {
       const stored = await loadStoredParse(client, rooms, id, rooms.user, prev.epoch);
       const d = decideEpoch({ ...prev, ...stored }, rows);
@@ -1242,6 +1341,12 @@ async function runShip(client, opts = {}) {
       if (d.reason) {
         bumped++;
         console.log(`[memhouse] ${id} → epoch ${epoch} (${d.reason}); the previous parse is kept`);
+      } else if (!full && tailSafe(prev, rows, host)) {
+        // Same epoch, and nothing outside line_hash's reach has moved: every row the
+        // house already holds would land again byte-identical. Send the tail only.
+        send = tailRows(stored, rows);
+        msgRowsDeduped += rows.msgRows.length - send.msgRows.length;
+        toolRowsDeduped += rows.toolRows.length - send.toolRows.length;
       }
     } else if (prev) {
       epoch = toInt(prev.epoch);
@@ -1249,8 +1354,8 @@ async function runShip(client, opts = {}) {
     rows.session.epoch = epoch;
     await push('sessions', scrub(rows.session));
     sessions++;
-    for (const r of rows.msgRows) { r.epoch = epoch; await push('messages', scrub(r)); msgRows++; }
-    for (const r of rows.toolRows) { r.epoch = epoch; await push('tool_calls', scrub(r)); toolRows++; }
+    for (const r of send.msgRows) { r.epoch = epoch; await push('messages', scrub(r)); msgRows++; }
+    for (const r of send.toolRows) { r.epoch = epoch; await push('tool_calls', scrub(r)); toolRows++; }
   }
   for (const table of Object.keys(batches)) await flush(table);
   // The dashboard's tables, recomputed from what this pass just wrote. Skipped on a pass
@@ -1259,7 +1364,7 @@ async function runShip(client, opts = {}) {
   // Anything that only failed while reading messages — the sink is reset by the
   // next getAllChats(), so unreported here means never reported at all.
   reportAdapterErrors(warned);
-  return { sessions, skipped, msgRows, toolRows, unreadable, bumped, withheld };
+  return { sessions, skipped, msgRows, toolRows, unreadable, bumped, withheld, msgRowsDeduped, toolRowsDeduped };
 }
 
 // Warn once per adapter per pass. `warned` carries across the two call sites so one
@@ -1365,7 +1470,12 @@ async function main() {
           + `${r.unreadable ? `, ${r.unreadable} unreadable-will-retry` : ''}`
           + `${r.withheld ? `, ${r.withheld} withheld-empty` : ''}`
           + `${r.bumped ? `, ${r.bumped} kept an earlier parse` : ''}) → ` +
-          `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+          `${r.msgRows} msg rows, ${r.toolRows} tool rows` +
+          // What the tail-only path saved. Worth printing: it is the difference between a
+          // house that grows with the conversation and one that grows with the passes.
+          `${r.msgRowsDeduped || r.toolRowsDeduped
+            ? ` (${r.msgRowsDeduped + r.toolRowsDeduped} unchanged rows not re-sent)` : ''}` +
+          ` in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         failed = true;
         var adoptedCredential = false;
@@ -1431,7 +1541,7 @@ async function main() {
   }
 }
 
-module.exports = { runShip, ensureSchema, refreshStats, templateColumns, decideEpoch };
+module.exports = { runShip, ensureSchema, refreshStats, templateColumns, decideEpoch, tailRows, tailSafe };
 
 if (require.main === module) {
   main().catch((e) => {

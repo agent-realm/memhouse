@@ -140,6 +140,20 @@ Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
 - Incremental shipping: read existing `(session_id, last_updated_at, message_count)`
   (FINAL) and skip chats that haven't grown/changed; a full re-ship must remain
   safe (ReplacingMergeTree collapses).
+- **A session that is re-shipped sends only its tail.** Collapsing at FINAL makes a
+  re-ship *safe*, not *free*: a growing session that re-sent its whole transcript every
+  pass accumulated one full copy of itself per pass, and because every read carries
+  `final: 1`, readers pay to collapse all of them. Measured on a real 1,230-session
+  house: 1,226,770 stored message rows for 685,649 real ones. So once `decideEpoch` has
+  reused the epoch — which already proves nothing in the overlap changed — `tailRows`
+  drops every row whose stored `line_hash` matches the incoming one, and every tool call
+  matching on `(tool_name, args)`. A seq the house is missing has no stored hash, so a
+  pass that died mid-flush still repairs itself.
+  `tailSafe` withholds the tail path for the three shipped columns `line_hash` does not
+  cover and cannot derive: `ts` when the adapter supplies none (it is interpolated as
+  `seq / (total - 1)`, so every stored row's ts moves as the session grows), `host`, and
+  `folder`/`project`. Those sessions re-ship whole, as does `--full`, which stays the
+  repair hammer.
 - **The shipper is insert-only, and nothing may reintroduce a destructive verb.**
   `ReplacingMergeTree` collapses same-key rows but cannot remove a row the new parse no
   longer produces, so a shrunken re-parse leaves a stale `seq` tail. The shipper used to

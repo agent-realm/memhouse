@@ -89,7 +89,7 @@ const T0 = Date.parse('2026-08-16T09:00:00Z');
  * One fixture session. `texts` become messages alternating user/assistant; an assistant
  * message carries a tool call so the tool_calls room is exercised by the same shrink.
  */
-function chat(id, texts, { updatedAt = T0 + texts.length * 1000 } = {}) {
+function chat(id, texts, { updatedAt = T0 + texts.length * 1000, noTs = false } = {}) {
   return {
     source: 'claude',
     composerId: id,
@@ -103,7 +103,10 @@ function chat(id, texts, { updatedAt = T0 + texts.length * 1000 } = {}) {
     _messages: texts.map((t, i) => ({
       role: i % 2 === 0 ? 'user' : 'assistant',
       content: t,
-      _ts: T0 + i * 1000,
+      // `noTs` models the adapters that record no per-message time (the shipper then
+      // interpolates across [createdAt, lastUpdatedAt]), which is what makes a session
+      // ineligible for the tail-only path.
+      ...(noTs ? {} : { _ts: T0 + i * 1000 }),
       _model: i % 2 === 0 ? '' : 'claude-opus-5',
       _inputTokens: i % 2 === 0 ? 0 : 100,
       _outputTokens: i % 2 === 0 ? 0 : 50,
@@ -354,6 +357,82 @@ async function main() {
     const rows = await raw(`SELECT seq FROM messages FINAL WHERE session_id = {s:String}`, { s: `claude:${id}` });
     assert.strictEqual(rows.length, 4,
       `${rows.length} physical rows for a 4-message session — appending must not fork the session`);
+  });
+
+  await test('a growing session ships its tail, not its transcript', async () => {
+    // The defect: every pass re-parsed and re-sent the WHOLE session, and
+    // ReplacingMergeTree took every copy as another version of the same key. An actively
+    // used session gained one full copy of itself per pass — measured on a real house as
+    // 1,226,770 stored rows for 685,649 real ones, seven copies of the worst row.
+    //
+    // Counted WITHOUT FINAL, deliberately. Every assertion in this suite that reads with
+    // FINAL is blind to this: the duplicates collapse at read time, which is precisely
+    // why they survived, and why every dashboard request pays to collapse them.
+    const id = 'tail-1';
+    const sid = `claude:${id}`;
+    const physical = async (room) => Number((await raw(
+      `SELECT count() AS n FROM ${room} WHERE session_id = {s:String}`, { s: sid }))[0].n);
+
+    fixture.chats = [chat(id, ['t1', 't2', 't3', 't4'])];
+    await ship.runShip(client, { full: true });
+    assert.strictEqual(await physical('messages'), 4, 'the first ship did not write one row per message');
+
+    fixture.chats = [chat(id, ['t1', 't2', 't3', 't4', 't5', 't6'], { updatedAt: T0 + 60000 })];
+    const grown = await ship.runShip(client);
+    assert.strictEqual(grown.msgRows, 2,
+      `${grown.msgRows} message rows sent for two new messages — the prefix was re-sent`);
+    assert.strictEqual(grown.toolRows, 1, `${grown.toolRows} tool rows sent for one new tool call`);
+    assert.strictEqual(grown.msgRowsDeduped, 4, 'the four unchanged rows were not recognised as unchanged');
+    assert.strictEqual(await physical('messages'), 6,
+      'the house holds more physical rows than the session has messages');
+
+    // Same rows, same order, same text: the saving is invisible to every reader.
+    const shown = (await read(
+      `SELECT text FROM {{messages}} WHERE session_id = {s:String} ORDER BY seq`, { s: sid })).map((r) => r.text);
+    assert.deepStrictEqual(shown, ['t1', 't2', 't3', 't4', 't5', 't6']);
+
+    // Touched but unchanged: the source file's mtime moved, so the incremental skip does
+    // NOT fire and the session is re-parsed in full — and then sends nothing at all. This
+    // is the pass that ran every five minutes against every session the pilot had open.
+    fixture.chats = [chat(id, ['t1', 't2', 't3', 't4', 't5', 't6'], { updatedAt: T0 + 120000 })];
+    const touched = await ship.runShip(client);
+    assert.strictEqual(touched.skipped, 0, 'the incremental skip absorbed the case under test');
+    assert.strictEqual(touched.msgRows, 0, `${touched.msgRows} rows sent for a session that did not change`);
+    assert.strictEqual(touched.toolRows, 0);
+    assert.strictEqual(await physical('messages'), 6,
+      'a re-ship of an unchanged session added physical rows');
+
+    // --full stays the repair hammer: it bypasses the tail path outright, so a session
+    // whose rows need rewriting (a moved project, a fixed adapter) still gets rewritten.
+    // That it duplicates is the POINT — the newest version wins at FINAL.
+    const repaired = await ship.runShip(client, { full: true });
+    assert.strictEqual(repaired.msgRowsDeduped, 0, '--full took the tail path and stopped being a repair');
+    assert.strictEqual(repaired.msgRows, 6, '--full did not re-send the whole transcript');
+    assert.strictEqual(await physical('messages'), 12);
+  });
+
+  await test('a session with interpolated timestamps still re-ships whole', async () => {
+    // ts is the one shipped column that is a function of the PARSE rather than the
+    // source: adapters with no per-message time get `seq / (total - 1)` across
+    // [createdAt, lastUpdatedAt], so every already-stored row's ts moves when the session
+    // grows. Taking the tail path there would freeze the old rows at timestamps computed
+    // from a shorter session. line_hash cannot see it — it covers content only.
+    const id = 'nots-1';
+    const sid = `claude:${id}`;
+    const tsAt = async (seq) => (await read(
+      `SELECT toString(ts) AS ts FROM {{messages}} WHERE session_id = {s:String} AND seq = {q:UInt32}`,
+      { s: sid, q: seq }))[0].ts;
+
+    fixture.chats = [chat(id, ['n1', 'n2', 'n3'], { noTs: true })];
+    await ship.runShip(client, { full: true });
+    const before = await tsAt(1);
+
+    fixture.chats = [chat(id, ['n1', 'n2', 'n3', 'n4', 'n5'], { noTs: true, updatedAt: T0 + 600000 })];
+    const r = await ship.runShip(client);
+    assert.strictEqual(r.msgRowsDeduped, 0, 'the tail path ran for a session whose stored timestamps drift');
+    assert.strictEqual(r.msgRows, 5, 'an interpolating adapter must re-ship the whole session');
+    assert.notStrictEqual(await tsAt(1), before,
+      'the middle row kept a timestamp interpolated from a shorter session');
   });
 
   // ── the house's record of itself ──────────────────────────────────────────────

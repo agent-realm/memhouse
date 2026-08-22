@@ -159,6 +159,74 @@ test('a re-parse that only grows reuses its epoch — the common case must stay 
   assert.deepStrictEqual(decideEpoch(null, grown), { epoch: 0, reason: null });
 });
 
+test('tailRows sends the tail, not the transcript, when nothing in the overlap moved', () => {
+  const { tailRows } = require('../memhouse/shipper/ship');
+  // The defect this fixes: a growing session re-parsed and re-sent WHOLE on every pass.
+  // ReplacingMergeTree took every copy, so a real 1,230-session house held 1,226,770 rows
+  // for 685,649 real ones — 1.79 copies of the average row, seven of the worst — and every
+  // read carries final=1, so the dashboard paid for all of them.
+  const stored = {
+    hashes: new Map([[0, '111'], [1, '222']]),
+    tools: new Map([[0, { tool_name: 'Read', args: '{}' }]]),
+  };
+  const grown = {
+    msgRows: [{ seq: 0, line_hash: '111' }, { seq: 1, line_hash: '222' }, { seq: 2, line_hash: '333' }],
+    toolRows: [{ idx: 0, tool_name: 'Read', args: '{}' }, { idx: 1, tool_name: 'Edit', args: '{}' }],
+  };
+  const sent = tailRows(stored, grown);
+  assert.deepStrictEqual(sent.msgRows.map((r) => r.seq), [2]);
+  assert.deepStrictEqual(sent.toolRows.map((r) => r.idx), [1]);
+
+  // Re-shipping a settled session sends NOTHING. This is the case that ran every five
+  // minutes, forever, on every session the pilot still had open.
+  const settled = tailRows(stored, {
+    msgRows: grown.msgRows.slice(0, 2), toolRows: grown.toolRows.slice(0, 1),
+  });
+  assert.deepStrictEqual(settled.msgRows, []);
+  assert.deepStrictEqual(settled.toolRows, []);
+
+  // line_hash is a UInt64 on the row and a string out of the house. Comparing them
+  // without the coercion would find every row "changed" and send the transcript anyway —
+  // the fix would be inert and nothing would fail.
+  assert.deepStrictEqual(
+    tailRows({ hashes: new Map([[0, '111']]), tools: new Map() },
+      { msgRows: [{ seq: 0, line_hash: 111 }], toolRows: [] }).msgRows, []);
+
+  // A gap the house is missing — a pass that died mid-flush — is NOT in the hash map, so
+  // it is kept and the next pass repairs itself. Without this the hole would be permanent.
+  const gapped = tailRows(
+    { hashes: new Map([[0, '111'], [2, '333']]), tools: new Map() },
+    { msgRows: [{ seq: 0, line_hash: '111' }, { seq: 1, line_hash: '222' }, { seq: 2, line_hash: '333' }], toolRows: [] });
+  assert.deepStrictEqual(gapped.msgRows.map((r) => r.seq), [1]);
+
+  // Belt and braces: a changed row in the overlap is kept. decideEpoch forks the session
+  // before this ever runs, so this can only fire if that guard is bypassed — and sending
+  // the row is the safe direction to be wrong in.
+  const changed = tailRows(stored, {
+    msgRows: [{ seq: 0, line_hash: 'DIFFERENT' }], toolRows: [{ idx: 0, tool_name: 'Read', args: '{"p":1}' }],
+  });
+  assert.deepStrictEqual(changed.msgRows.map((r) => r.seq), [0]);
+  assert.deepStrictEqual(changed.toolRows.map((r) => r.idx), [0]);
+});
+
+test('tailSafe refuses the tail path for the columns line_hash cannot see', () => {
+  const { tailSafe } = require('../memhouse/shipper/ship');
+  const rows = { tsInterpolated: false, session: { folder: '/w/p' } };
+  const prev = { host: 'macminim-1', folder: '/w/p' };
+  assert.ok(tailSafe(prev, rows, 'macminim-1'));
+
+  // ts is interpolated as seq/(total-1) for adapters with no per-message time, so EVERY
+  // stored row's ts moves when the session grows. Those must keep re-shipping whole.
+  assert.ok(!tailSafe(prev, { ...rows, tsInterpolated: true }, 'macminim-1'));
+  // A second machine shipping the same session keeps overwriting, as it does today.
+  assert.ok(!tailSafe(prev, rows, 'macbokum-2'));
+  // folder/project is denormalized onto every message row; a moved project must reach them.
+  assert.ok(!tailSafe({ ...prev, folder: '/w/old' }, rows, 'macminim-1'));
+  // Absent on both sides is agreement, not a mismatch — sessions shipped before these
+  // columns carried anything must not re-ship whole forever.
+  assert.ok(tailSafe({ host: 'macminim-1' }, { tsInterpolated: false, session: {} }, 'macminim-1'));
+});
+
 test('a shrunken or rewritten re-parse moves to a new epoch instead of overwriting', () => {
   const { decideEpoch } = require('../memhouse/shipper/ship');
   const stored = {
