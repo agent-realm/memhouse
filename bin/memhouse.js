@@ -3202,6 +3202,13 @@ async function cmdUninstall() {
   if (flags.version === true || process.argv.slice(2).some((a) => a === '-v' || a === '-V')) {
     console.log(PKG.version); return;
   }
+  // `memhouse <cmd> --help` (or `-h`) must never reach a command's own logic — passwd,
+  // invite, uninstall and friends act on first call with no separate confirm step, so a
+  // --help that fell through to the default branch would DO the thing instead of
+  // describing it. One check ahead of the switch, for every command, is the whole fix.
+  if (cmd && (flags.help === true || process.argv.slice(2).some((a) => a === '-h' || a === '--help'))) {
+    console.log(HELP); return;
+  }
   const cfg = resolveConfig();
 
   switch (cmd) {
