@@ -106,3 +106,58 @@ application code had to be right for that to happen.
 - Provisioning (`memhouse onboard` / `install`) should offer to create the reader user
   alongside the owner. One extra statement at install time is worth more than any
   amount of parser.
+
+---
+
+## Addendum, 2026-08-22 — finding #1 no longer holds: a member CAN dial out
+
+Re-probed against the grant set `bin/memhouse.js` writes **today** (master 0.12.7 +
+the unreleased relocate fix), on a throwaway 25.11:
+
+```sql
+GRANT ALL ON <db>.* TO <member> WITH GRANT OPTION;   -- 0.12.7 (was ALL + SELECT WITH GRANT OPTION)
+GRANT ALTER USER ON <member> TO <member>;
+GRANT SHOW USERS ON *.* TO <member>;                 -- 0.12.6, new, GLOBAL
+GRANT REMOTE  ON *.* TO <member>;                    -- unreleased, new, GLOBAL
+```
+
+Every probe below ran as the member with `readonly=2` pinned — exactly what the MCP
+`sql` tool sends:
+
+| Probe | Result |
+|---|---|
+| `SELECT 1` | ALLOWED |
+| `CREATE TABLE` (any write) | REFUSED `164 … Cannot execute query in readonly mode` |
+| `SHOW USERS`, `SELECT … FROM system.users` | ALLOWED (new since 0.12.6 — names only) |
+| `url('http://…')` | REFUSED `497 … Not enough privileges` |
+| `file('/etc/hostname')` | REFUSED `291 ACCESS_DENIED` |
+| **`remote('127.0.0.1:9000', 'system','one', 'default', '…')`** | **ALLOWED — returns the row** |
+| `remote('192.0.2.7:9000', …)` | `519 NetException … Timeout` — *dialed*, not denied |
+| `cluster('test_shard_localhost', …)` | `701` unknown cluster — the access type is not the blocker |
+
+And the argument shapes:
+
+| Shape | Result |
+|---|---|
+| `remote(<literal>, …, <literal password>)` | dialed |
+| `remote(<literal>, …, (SELECT 'stolen'))` | **dialed** — the password argument folds a subquery |
+| `remote((SELECT '…'), …)` / `remote(concat(…), …)` | `36 … Hosts pattern must be string literal` |
+
+So: the host must be written into the SQL as a literal, but a **data-dependent value
+can be carried out in the password argument**. `readonly` does not bound this — it is
+a SELECT.
+
+**What this changes.** Section "What this establishes" #1 said a member "already cannot
+dial out", and that premise is what cut P2 (the SQL-parser extraction) for the MCP `sql`
+tool. `GRANT REMOTE ON *.*` — added so `memhouse relocate` can pull over `remoteSecure()`
+— revoked it for every member on every surface, not just MCP: `/mem:sql` curls the same
+credential with `readonly=1` and reaches exactly as far.
+
+**Not introduced by this branch.** The reach ships in master today via `/mem:sql`. The
+options are the pilot's: narrow the grant to when relocate actually needs it, deny
+`remote`/`remoteSecure`/`cluster`/`clusterAllReplicas` at the application layer on
+agent-facing surfaces (against the "ClickHouse enforces" ruling, but defence in depth),
+or accept and document it. Nothing here is decided.
+
+Everything else in this file re-verified unchanged: `url()`/`file()` still fenced,
+delegation still cannot widen, `readonly` still unpinnable by the client.
