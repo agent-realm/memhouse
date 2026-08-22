@@ -130,6 +130,15 @@ function tableFunctions(bare) {
   const CLAUSE_END = /^(WHERE|PREWHERE|GROUP|ORDER|LIMIT|HAVING|SETTINGS|UNION|INTO|FORMAT|WINDOW|QUALIFY)$/i;
   const found = [];
   const inFrom = [];
+  // What opened each paren we are currently inside, so a call wrapped in parentheses is
+  // still judged by the clause it sits in. `FROM (remote(…))` puts '(' — not FROM —
+  // immediately before the function name, and today's ClickHouse happens to reject that
+  // as a syntax error (`Code: 62`) rather than dialling. Leaning on a parser quirk of one
+  // version is not a boundary, so a paren opened by FROM / JOIN / a table comma is table
+  // position too, and a paren opened by another paren inherits its parent's opener
+  // (`FROM ((remote(…)))`). A paren opened by anything else — `ON (…)`, `IN (…)`,
+  // `GROUP BY (…)` — is not, which is what keeps `JOIN … ON (toDate(ts) = d)` legal.
+  const openedBy = [];
   let depth = 0;
   // Three tokens of history: at the '(' we need the identifier (prev), what introduced it
   // (prevPrev), and what preceded THAT (prev3) — because distinguishing `JOIN f(` from
@@ -149,11 +158,18 @@ function tableFunctions(bare) {
       if (isCall) {
         const name = bare.slice(0, m.index).match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/)[1];
         const introducer = prevPrev;
+        const wrapper = introducer === '(' ? openedBy[depth - 1] : null;
         const tablePos = (introducer === 'FROM')
           || (introducer === 'JOIN' && prev3 !== 'ARRAY')
-          || (introducer === ',' && inFrom[depth]);
+          || (introducer === ',' && inFrom[depth])
+          || (wrapper === 'FROM')
+          || (wrapper === 'JOIN')
+          || (wrapper === ',' && inFrom[depth - 1]);
         if (tablePos) found.push(name);
       }
+      // Record what opened THIS paren before descending. A paren opened by a paren
+      // inherits, so nesting cannot launder the clause a call sits in.
+      openedBy[depth] = prev === '(' ? (openedBy[depth - 1] ?? '(') : prev;
       depth++;
       prev3 = prevPrev; prevPrev = prev; prev = raw;
       continue;

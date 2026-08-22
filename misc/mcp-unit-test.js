@@ -216,6 +216,14 @@ test('the guard refuses every way out of this server, including the four disguis
     ['SELECT * FROM numbers(1) AS "WHERE", remote(\'h:9000\', \'system\', \'one\')', 'remote'],
     ["SELECT * FROM numbers(1) WHERE 1 IN (SELECT * FROM remote('h:9000', 'system', 'one'))", 'remote'],
     ["DESCRIBE url('http://example.invalid/x')", 'url'],                            // inference dials out
+    // Wrapped in parentheses, the token before the name is '(' and not FROM. Today's
+    // ClickHouse rejects these itself with a syntax error; the guard does not rely on
+    // that staying true, so a paren opened by FROM / JOIN / a table comma counts, and
+    // nesting inherits it.
+    ["SELECT * FROM (remote('h:9000', 'system', 'one'))", 'remote'],
+    ["SELECT * FROM ((remote('h:9000', 'system', 'one')))", 'remote'],
+    ["SELECT * FROM numbers(1), (remote('h:9000', 'system', 'one'))", 'remote'],
+    ["SELECT * FROM numbers(1) JOIN (remote('h:9000', 'system', 'one')) AS t ON 1 = 1", 'remote'],
   ];
   for (const [sql, fn] of out) {
     assert.strictEqual(refuses(sql), fn, `must refuse ${fn}(): ${sql}`);
@@ -240,6 +248,12 @@ test('the guard lets ordinary read SQL — and a housemate\'s shared house — t
     'SELECT count() FROM system.tables',
     // A dial-out name that is not in table position is not a table function.
     "SELECT url FROM messages WHERE content LIKE '%remote(%'",
+    // Parens opened by something that is NOT a table introducer still hold calls that
+    // are ordinary expressions — this is what the wrapper rule must not break.
+    'SELECT * FROM messages AS a JOIN sessions AS b ON (toDate(a.ts) = toDate(b.ts))',
+    "SELECT count() FROM messages WHERE session_id IN (SELECT session_id FROM sessions WHERE lower(name) LIKE '%x%')",
+    'SELECT * FROM (SELECT session_id, count() AS c FROM messages GROUP BY session_id) WHERE c > 1',
+    'SELECT toDate(ts) AS d, count() FROM messages GROUP BY (toDate(ts)) ORDER BY d',
   ];
   for (const sql of fine) {
     assert.strictEqual(refuses(sql), null, `must allow: ${sql}`);
