@@ -325,9 +325,11 @@ Setup        onboard              interactive wizard: discover → configure →
                                   --env FILE installs from an invite file (see: invite)
              invite <name>        mint a member + house on the server and write the env
                                   file their install needs (--url --admin-user
-                                  --admin-password [--db NAME] [--out FILE]); local
-                                  machine untouched. Refuses a house that already holds
-                                  someone's messages — --adopt if sharing it is intended
+                                  [--admin-password, else prompted] [--db NAME]
+                                  [--out FILE]); local machine untouched. Refuses a house
+                                  that already holds someone's messages — --adopt if
+                                  sharing it is intended. Not an admin? --print-sql gives
+                                  the statements to hand to whoever is
              passwd               rotate this member's password + rewrite the env file
                                   (admin-assisted: --admin-user --admin-password)
                                   --print-sql            print the SQL, run it yourself
@@ -2913,7 +2915,7 @@ async function cmdNightly() {
  */
 async function cmdInvite() {
   const name = positional[0];
-  if (!name) { console.log('usage: memhouse invite <name> --url <house-url> --admin-user … --admin-password … [--db <house>] [--out <file>] [--adopt]'); return 2; }
+  if (!name) { console.log('usage: memhouse invite <name> --url <house-url> [--admin-user … [--admin-password …]] [--db <house>] [--out <file>] [--adopt] [--print-sql]'); return 2; }
   try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(name, 'member'); }
   catch (e) { console.log(bad(e.message)); return 1; }
   const cfg = resolveConfig();
@@ -2936,27 +2938,81 @@ async function cmdInvite() {
   try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(db, 'house'); }
   catch (e) { console.log(bad(e.message)); return 1; }
 
+  // The way out for someone who is NOT the administrator. Being unable to invite is not a
+  // bug to be worked around — a member holds no CREATE USER by design — but "ask your
+  // admin" is only useful if you can hand them something exact. This prints the same
+  // statements adminBootstrap would run, so the person with the credential runs four
+  // lines instead of installing anything. Nothing is contacted and nothing is written.
+  if (flags['print-sql'] === true) {
+    const password = flags['member-password'] && flags['member-password'] !== true
+      ? String(flags['member-password']) : generatePassword();
+    console.log(`-- memhouse: give '${name}' an account and their own house on this ClickHouse.`);
+    console.log(`-- Run as a user with ACCESS MANAGEMENT (a stock 'default' will do).`);
+    console.log(memberSql(db, name, password));
+    console.log('-- Then send them these four lines — they are a credential, so use a channel');
+    console.log('-- you trust (croc, a password manager), not chat:');
+    console.log(`--   MEMHOUSE_URL='${url}'`);
+    console.log(`--   MEMHOUSE_USER='${name}'`);
+    console.log(`--   MEMHOUSE_PASSWORD='${password}'`);
+    console.log(`--   MEMHOUSE_DB='${db}'`);
+    console.log(`-- They install with:  memhouse install --url ${url} --user ${name} --password '…' --db ${db}`);
+    return 0;
+  }
+
   // Whose credential mints the member. Explicit --admin-* wins; otherwise TRY THE
-  // CONFIGURED ONE — an install made as an admin-capable ClickHouse user (access
-  // management) can invite with no extra flags, which is the common case for the person
-  // who set the house up. Fall back to asking only when the stored credential cannot
-  // read system.users (the proxy for "can it provision").
+  // CONFIGURED ONE — a `deploy --local` house makes its member the superuser
+  // (CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1), so the person who stood the house up
+  // invites with no extra flags.
   let adminUser = flags['admin-user'];
   let adminPass = flags['admin-password'];
   if (!adminUser) {
     const c = requireConfig(cfg, 'invite');
     if (!c.user) return 1;
+    // Ask what this credential may actually DO, not whether it can look at a table.
+    // The old probe was `SELECT 1 FROM system.users` — but since 0.12.6 every member is
+    // granted SHOW USERS, so every member passed it, was told "it can manage users on
+    // this house", and then died at CREATE DATABASE with a raw ACCESS_DENIED. A probe
+    // that says yes to everyone is worse than no probe: it turns "you are not an admin"
+    // into a confusing failure three steps later.
+    let grants = '';
     try {
-      await ch({ ...c, url }, 'SELECT 1 FROM system.users LIMIT 1', { database: '' });
+      const g = await chRows({ ...c, url }, `SHOW GRANTS FOR ${c.user} FORMAT JSONEachRow`, { database: '' });
+      grants = JSON.stringify(g);
+    } catch { /* cannot read own grants — fall through to the capability test below */ }
+    const canProvision = /ACCESS MANAGEMENT|CREATE USER/.test(grants)
+      && /CREATE DATABASE|\bCREATE\b[^"]*ON \*\.\*/.test(grants);
+    if (canProvision) {
       adminUser = c.user; adminPass = c.password;
-      console.log(ok(`inviting as your own credential '${c.user}' (it can manage users on this house)`));
-    } catch {
-      console.log(bad('your configured credential cannot create users on this house.'));
-      console.log('  Pass an admin that can:  --admin-user <a> --admin-password <p>');
+      console.log(ok(`inviting as your own credential '${c.user}' (it can create users and houses here)`));
+    } else {
+      console.log(bad(`'${c.user}' is a MEMBER of this ClickHouse, not an administrator — it cannot create accounts.`));
+      console.log('  Inviting mints a ClickHouse user and a database, which needs CREATE USER and');
+      console.log('  CREATE DATABASE. A member deliberately holds neither: that is the boundary that');
+      console.log('  keeps one housemate out of another house.');
+      console.log('');
+      console.log('  If you RUN this ClickHouse — use the admin credential you created it with');
+      console.log('  (for a stock server that is `default`); memhouse never stores it, so pass it');
+      console.log('  per invite and it is used for one connection and discarded:');
+      console.log(`     memhouse invite ${name} --url ${url} --admin-user default`);
+      console.log('     (leave --admin-password off and it is prompted for, so it stays out of');
+      console.log('      your shell history and the process list)');
+      console.log('');
+      console.log('  If SOMEONE ELSE runs it — you cannot invite, and no flag changes that.');
+      console.log('  Print the statements and send them to whoever administers the server:');
+      console.log(`     memhouse invite ${name} --url ${url} --print-sql`);
       return 1;
     }
   } else if (adminPass === undefined) {
-    console.log(bad('--admin-user given without --admin-password')); return 1;
+    // Prompt rather than refuse. A password given as --admin-password lands in the
+    // process list for the life of the request and in shell history unless the caller
+    // remembered a leading space; asking for it keeps it in this process only.
+    // Non-TTY (an agent, CI) still gets the old refusal — there is nobody to ask.
+    if (!process.stdin.isTTY) {
+      console.log(bad('--admin-user given without --admin-password (no TTY to prompt on)'));
+      return 1;
+    }
+    adminPass = await askSecret(`  password for '${adminUser}'`);
+    if (!adminPass) { console.log(bad('no password given')); return 1; }
   }
 
   // WHERE to connect to provision. --url is the address the INVITEE will use — it may be

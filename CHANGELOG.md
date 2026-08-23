@@ -4,6 +4,25 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`memhouse invite` tells you the truth about your own credential, and gives a
+  non-admin a way forward.** The capability probe was `SELECT 1 FROM system.users` — but
+  since 0.12.6 every member is granted `SHOW USERS`, so *every member passed it*, was told
+  "it can manage users on this house", and then failed three steps later at
+  `CREATE DATABASE` with a raw `ACCESS_DENIED`. The probe now reads the credential's actual
+  grants and requires real provisioning rights. When they are absent it says plainly that
+  this is a member account, why a member cannot mint accounts, and splits the two cases:
+  if you run the ClickHouse, pass the admin credential you created it with; if someone else
+  runs it, you cannot invite at all — so `memhouse invite <name> --print-sql` now prints the
+  exact statements to hand to whoever administers the server, contacting nothing.
+- **`--admin-password` is prompted for when omitted.** Passing it as a flag puts the
+  password in the process list for the life of the request and in shell history unless the
+  caller remembered a leading space. With a TTY it is now asked for instead; without one
+  (an agent, CI) the old refusal stands, since there is nobody to ask. memhouse still never
+  stores an admin credential — that stays deliberate.
+
+
 ## 0.13.0 — 2026-08-23
 
 - **New skill: `/mem:admin`.** Every other skill is scoped to the caller's own house, so
