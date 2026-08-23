@@ -28,6 +28,7 @@ const {
   SCHEMA_VERSION, MIN_WRITER_SCHEMA, MIGRATIONS, META_TYPES, createStatement,
 } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
+const { consumeSecretChunk } = require(path.join(REPO_ROOT, 'memhouse', 'secret-input'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
 const ENV_FILE = path.join(HOME_DIR, 'env');
@@ -270,16 +271,20 @@ function askSecret(label, dflt = '') {
     const wasRaw = stdin.isRaw;
     stdin.setRawMode(true); stdin.resume(); stdin.setEncoding('utf-8');
     let buf = '';
-    const onData = (ch) => {
-      if (ch === '\r' || ch === '\n' || ch === '\u0004') {
-        stdin.removeListener('data', onData);
-        stdin.setRawMode(!!wasRaw); stdin.pause();
-        process.stdout.write('\n');
-        return resolve(buf || dflt);
-      }
-      if (ch === '\u0003') { process.stdout.write('\n'); process.exit(130); }
-      if (ch === '\u007f' || ch === '\b') { buf = buf.slice(0, -1); return; }
-      buf += ch;
+    // One 'data' event carries a CHUNK, not a keystroke — see memhouse/secret-input.js
+    // for why that distinction is load-bearing and what it broke.
+    let done = false;
+    const onData = (chunk) => {
+      if (done) return;
+      const r = consumeSecretChunk(buf, chunk);
+      buf = r.buf;
+      if (r.interrupted) { process.stdout.write('\n'); process.exit(130); }
+      if (!r.done) return;
+      done = true;
+      stdin.removeListener('data', onData);
+      stdin.setRawMode(!!wasRaw); stdin.pause();
+      process.stdout.write('\n');
+      resolve(buf || dflt);
     };
     stdin.on('data', onData);
   });

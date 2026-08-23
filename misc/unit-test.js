@@ -16,6 +16,7 @@
 const assert = require('assert');
 const rooms = require('../memhouse/house/house');
 const envfile = require('../memhouse/envfile');
+const { consumeSecretChunk } = require('../memhouse/secret-input');
 
 let passed = 0;
 function test(name, fn) {
@@ -794,6 +795,50 @@ test('isDurableMetaKey keeps facts, drops per-host heartbeats', () => {
   assert.ok(relocate.isDurableMetaKey('share:alice'));
   assert.ok(!relocate.isDurableMetaKey('last_ship:polat'), 'the new shipper rewrites its own heartbeat');
   assert.ok(!relocate.isDurableMetaKey('client_version'));
+});
+
+// ── hidden input: a chunk is not a keystroke ────────────────────────────────────
+// A raw-mode 'data' event carries however many characters arrived at once. The handler
+// used to compare the WHOLE chunk against a terminator, which is right while someone
+// types (one char per event) and hangs forever the moment they paste — the exact way a
+// password out of a manager arrives. Caught by driving the real prompt through a pty.
+test('a pasted line resolves, and the terminator is not part of the secret', () => {
+  const r = consumeSecretChunk('', 'hunter2\r');
+  assert.strictEqual(r.done, true);
+  assert.strictEqual(r.buf, 'hunter2');
+});
+
+test('typing one character at a time still accumulates', () => {
+  let buf = '';
+  for (const ch of 'pw') { const r = consumeSecretChunk(buf, ch); buf = r.buf; assert.strictEqual(r.done, false); }
+  assert.strictEqual(buf, 'pw');
+  assert.strictEqual(consumeSecretChunk(buf, '\r').done, true);
+});
+
+test('LF and EOT terminate as well as CR', () => {
+  assert.strictEqual(consumeSecretChunk('', 'a\n').done, true);
+  assert.strictEqual(consumeSecretChunk('', 'a\u0004').done, true);
+});
+
+test('anything after the terminator is discarded, not leaked into the secret', () => {
+  const r = consumeSecretChunk('', 'secret\rleftover');
+  assert.strictEqual(r.buf, 'secret');
+  assert.strictEqual(r.done, true);
+});
+
+test('backspace erases inside a chunk', () => {
+  assert.strictEqual(consumeSecretChunk('', 'abX\u007fc').buf, 'abc');
+});
+
+test('ctrl-C is reported, never swallowed into the secret', () => {
+  const r = consumeSecretChunk('ab', 'c\u0003d');
+  assert.strictEqual(r.interrupted, true);
+  assert.strictEqual(r.done, false);
+});
+
+test('an empty chunk changes nothing', () => {
+  const r = consumeSecretChunk('abc', '');
+  assert.deepStrictEqual([r.buf, r.done, r.interrupted], ['abc', false, false]);
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
