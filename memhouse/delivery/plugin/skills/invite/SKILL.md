@@ -42,14 +42,42 @@ substituted into a command — that burns the credential into the transcript on 
    If it prints `invite written: …`, go to step 4 — you are done, and no admin secret
    ever touched this conversation.
 
-   ONLY if it fails with "your configured credential cannot create users" does
-   provisioning need a real admin. Do NOT take the admin password in chat — memhouse
-   archives this transcript. Hand the user the line to run THEMSELVES (a leading space
-   keeps it out of shell history):
+   Otherwise read WHICH refusal came back; they need different answers.
 
-   ```
-   memhouse invite <name> --url <url> [--db <shared-house>] --admin-user <admin> --admin-password 'PASTE_IT_HERE'
-   ```
+   **"cannot reach `<url>` …"** — nothing to do with privileges. The address is wrong,
+   or the house is bound to loopback (`memhouse deploy --local` binds to 127.0.0.1 on
+   purpose, so no LAN address reaches it and no invitee could either). Ask the user for
+   the address the invitee will actually use; do not retry with a guess.
+
+   **"`<user>` is a MEMBER of this ClickHouse, not an administrator"** — inviting needs
+   CREATE USER and CREATE DATABASE, which a member deliberately does not hold. Two cases,
+   and you must ask which one applies rather than assuming:
+
+   - **They run the ClickHouse.** They have the admin credential; memhouse never stores
+     it. Do NOT take that password in chat — memhouse archives this transcript. Hand them
+     the line to run THEMSELVES, and leave `--admin-password` OFF so it is prompted for,
+     keeping it out of both the process list and shell history:
+
+     ```
+     memhouse invite <name> --url <url> [--db <shared-house>] --admin-user <admin>
+     ```
+
+     **You cannot run that line yourself.** The prompt needs a TTY and your Bash tool has
+     none, so it refuses with "no TTY to prompt on" — and the fix is NOT to add
+     `--admin-password`, which would put the credential in this transcript. The user runs
+     it in their own terminal; you wait for them to say it is done.
+
+   - **Somebody else runs it.** They cannot invite, and no flag changes that. Print the
+     statements for whoever administers the server — this contacts nothing and needs no
+     credential:
+
+     ```
+     memhouse invite <name> --url <url> [--db <shared-house>] --print-sql
+     ```
+
+     The output ends with the four `MEMHOUSE_*` lines the invitee needs. Those lines are
+     a credential: tell the user to send them over a trusted channel, and **never print
+     them into the conversation yourself**.
 
    **If it refuses with "house `<db>` already exists and holds N messages", STOP.** That
    house is somebody's memory, and inviting into it would hand the invitee someone else's
