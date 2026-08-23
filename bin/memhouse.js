@@ -2974,13 +2974,38 @@ async function cmdInvite() {
     // this house", and then died at CREATE DATABASE with a raw ACCESS_DENIED. A probe
     // that says yes to everyone is worse than no probe: it turns "you are not an admin"
     // into a confusing failure three steps later.
+    //
+    // chRows appends FORMAT itself, so DO NOT pass one — a statement carrying FORMAT
+    // twice is a syntax error, which the catch below turned into "no grants" and refused
+    // EVERY credential, a real superuser included. Only a clean machine could show that:
+    // this machine's credential is a member either way, so the bug was invisible here.
+    // Reachability FIRST, and reported as itself. Folding it into the grants read makes an
+    // unreachable host — a typo, a loopback-bound house, a tunnel that is down — come back
+    // as "you are only a member", which sends the reader after a privilege they already
+    // have. Caught on the testbed, where a wrong --url produced exactly that.
+    try {
+      await ch({ ...c, url }, 'SELECT 1', { database: '' });
+    } catch (e) {
+      console.log(bad(`cannot reach ${url} as '${c.user}': ${netReason(e)}`));
+      console.log('  --url is the address the INVITEE will use, and invite checks it from here first.');
+      console.log('  A `deploy --local` house is bound to loopback on purpose, so no LAN address');
+      console.log('  reaches it and no invitee could either — publish it (tunnel, reverse proxy)');
+      console.log('  before inviting, or use --print-sql and let the invitee be told the address.');
+      return 1;
+    }
     let grants = '';
     try {
-      const g = await chRows({ ...c, url }, `SHOW GRANTS FOR ${c.user} FORMAT JSONEachRow`, { database: '' });
-      grants = JSON.stringify(g);
-    } catch { /* cannot read own grants — fall through to the capability test below */ }
-    const canProvision = /ACCESS MANAGEMENT|CREATE USER/.test(grants)
-      && /CREATE DATABASE|\bCREATE\b[^"]*ON \*\.\*/.test(grants);
+      const g = await chRows({ ...c, url }, `SHOW GRANTS FOR ${c.user}`, { database: '' });
+      grants = g.map((r) => Object.values(r).join(' ')).join('\n');
+    } catch { /* reachable but grants unreadable — treated as "not an admin" below */ }
+    // Two capabilities, and a superuser states them in more than one shape: CREATE USER
+    // may arrive as itself or under ACCESS MANAGEMENT, and the database half may be an
+    // explicit CREATE DATABASE or the umbrella CREATE on *.* — which is what
+    // `deploy --local` grants. Match the meaning, not one spelling.
+    const canMintUsers = /\bACCESS MANAGEMENT\b|\bCREATE USER\b/.test(grants);
+    const canMintHouses = /\bCREATE DATABASE\b/.test(grants)
+      || grants.split('\n').some((l) => /\bCREATE\b/.test(l) && /\bON \*\.\*/.test(l));
+    const canProvision = canMintUsers && canMintHouses;
     if (canProvision) {
       adminUser = c.user; adminPass = c.password;
       console.log(ok(`inviting as your own credential '${c.user}' (it can create users and houses here)`));
