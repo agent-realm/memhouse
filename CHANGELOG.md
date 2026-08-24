@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.17.0 — 2026-08-25
 
 - **`memhouse share` — partial sharing, by row policy.** A share used to be all or
   nothing: `GRANT SELECT` on the whole house, every project and machine and anything ever
