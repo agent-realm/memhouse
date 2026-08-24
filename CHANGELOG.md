@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.16.0 — 2026-08-24
 
 - **An unknown option now stops the run instead of being ignored.** Anything `--like-this`
   was accepted and silently discarded, which is quiet in the good case and dangerous in the
