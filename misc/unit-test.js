@@ -17,6 +17,7 @@ const assert = require('assert');
 const rooms = require('../memhouse/house/house');
 const envfile = require('../memhouse/envfile');
 const { consumeSecretChunk } = require('../memhouse/secret-input');
+const { capabilitiesFrom, parseGrantLine } = require('../memhouse/capabilities');
 
 let passed = 0;
 function test(name, fn) {
@@ -839,6 +840,71 @@ test('ctrl-C is reported, never swallowed into the secret', () => {
 test('an empty chunk changes nothing', () => {
   const r = consumeSecretChunk('abc', '');
   assert.deepStrictEqual([r.buf, r.done, r.interrupted], ['abc', false, false]);
+});
+
+// ── who may provision: scope is the whole point ─────────────────────────────────
+// The probe this replaces asked `SELECT 1 FROM system.users`, which every member passes
+// because every member holds SHOW USERS — so every member was told it could manage
+// users, then died at CREATE DATABASE. The replacement must read grants, and it must
+// respect SCOPE: a member holds CREATE DATABASE inside `ON <their-db>.*`, which mints
+// nothing.
+const MEMBER = [
+  'GRANT SHOW USERS ON *.* TO m',
+  'GRANT REMOTE ON *.* TO m',
+  'GRANT ALTER USER ON m TO m',
+  'GRANT CHECK, SHOW, SELECT, INSERT, ALTER, CREATE DATABASE, CREATE TABLE, DROP DATABASE ON m.* TO m WITH GRANT OPTION',
+  'GRANT SELECT ON friend.* TO m',
+];
+const SUPERUSER = [
+  'GRANT SOURCES ON *.* TO s WITH GRANT OPTION',
+  'GRANT CHECK, SHOW, SELECT, INSERT, ALTER, CREATE, DROP, ROLE ADMIN, SYSTEM ON *.* TO s WITH GRANT OPTION',
+  'GRANT CREATE USER, ALTER USER, DROP USER, IMPERSONATE ON * TO s WITH GRANT OPTION',
+];
+
+test('a member cannot provision, however many privileges it holds on its own house', () => {
+  const c = capabilitiesFrom(MEMBER);
+  assert.strictEqual(c.canProvision, false);
+  assert.strictEqual(c.canMintHouses, false, 'CREATE DATABASE ON m.* is not server-wide');
+  assert.strictEqual(c.canMintUsers, false);
+  assert.strictEqual(c.canReadEveryHouse, false, 'SELECT ON friend.* is one share, not the server');
+});
+
+test('SHOW USERS alone never reads as administrator — the original bug', () => {
+  const c = capabilitiesFrom(['GRANT SHOW USERS ON *.* TO m']);
+  assert.strictEqual(c.canSeeUsers, true);
+  assert.strictEqual(c.canProvision, false);
+});
+
+test('a superuser is recognised through the umbrella spellings', () => {
+  const c = capabilitiesFrom(SUPERUSER);
+  assert.strictEqual(c.canProvision, true, 'bare CREATE on *.* plus CREATE USER on *');
+  assert.strictEqual(c.isSuperuser, true);
+});
+
+test('ACCESS MANAGEMENT stands in for CREATE USER', () => {
+  const c = capabilitiesFrom([
+    'GRANT ACCESS MANAGEMENT ON *.* TO a',
+    'GRANT CREATE DATABASE ON *.* TO a',
+  ]);
+  assert.strictEqual(c.canProvision, true);
+});
+
+test('GRANT ALL on *.* provisions; GRANT ALL on one house does not', () => {
+  assert.strictEqual(capabilitiesFrom(['GRANT ALL ON *.* TO a', 'GRANT CREATE USER ON * TO a']).canProvision, true);
+  assert.strictEqual(capabilitiesFrom(['GRANT ALL ON just_mine.* TO a']).canProvision, false);
+});
+
+test('unreadable grants are not an administrator', () => {
+  const c = capabilitiesFrom([]);
+  assert.strictEqual(c.canProvision, false);
+  assert.strictEqual(c.isSuperuser, false);
+});
+
+test('grant lines parse into privileges and scope', () => {
+  const g = parseGrantLine('GRANT CREATE USER, DROP USER ON * TO bob WITH GRANT OPTION');
+  assert.deepStrictEqual(g.privs, ['CREATE USER', 'DROP USER']);
+  assert.strictEqual(g.scope, '*');
+  assert.strictEqual(parseGrantLine('not a grant'), null);
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);

@@ -1,6 +1,6 @@
 ---
 name: admin
-description: Operate the memhouse ClickHouse as its administrator — list and inspect every user and house, provision or remove members, grant and revoke access, and read server-wide health (disk, parts, mutations, running queries). Use when the user asks to "do X as admin", "manage users", "drop a house", "see disk usage", "who is on this server", or when a member-scoped skill refused for want of privileges. Requires an admin credential; says so plainly when there is not one.
+description: Operate the memhouse ClickHouse as its administrator — list and inspect every user and house, provision or remove members, grant and revoke access, and read server-wide health (disk, parts, mutations, running queries). Use when the user asks to "do X as admin", "manage users", "drop a house", "see disk usage", "who is on this server", or when a member-scoped skill refused for want of privileges. Requires an administrator credential in the environment; says so plainly, and how to supply one, when there is not.
 user-invocable: true
 argument-hint: "<what you want done>"
 allowed-tools: Bash
@@ -12,61 +12,61 @@ A member owns one database. An **administrator** owns the ClickHouse: every hous
 account, every grant. This skill is the second one, and it is the only skill allowed to
 act outside the caller's own house.
 
-Everything here runs through the same rule as `/mem:invite`: **an admin password must
-never enter this conversation.** memhouse ships this transcript into the house you are
-administering, so a password pasted in chat is a password published to the archive.
-Resolve it from the environment or a file, never from a prompt, and never echo it.
+**An admin password must never enter this conversation.** memhouse ships this transcript
+into the house you are administering, so a password pasted here is a password published
+to the archive — and unlike a file you can delete, the archive is insert-only. Resolve
+the credential from the environment or refuse. Never ask for one in chat, never echo one,
+never write one to a file.
 
-## 1. Find an admin credential — never ask for one in chat
-
-Try these in order and stop at the first that works. **Never print any of these files or
-the variables in them** — no `cat`, no `env | grep`, no `set -x`.
+## 1. Ask the CLI what you are holding — do not work it out yourself
 
 ```bash
-MH_HOME="${MEMHOUSE_HOME:-$HOME/.memhouse}"
-# a) an explicit admin credential in the environment
-ADM_U=${MEMHOUSE_ADMIN_USER-}; ADM_P=${MEMHOUSE_ADMIN_PASSWORD-}
-# b) an admin env file kept beside the member config
-if [ -z "$ADM_U" ] && [ -f "$MH_HOME/admin.env" ]; then
-  set -a; . "$MH_HOME/admin.env"; set +a
-  ADM_U=${MEMHOUSE_ADMIN_USER:-${MEMHOUSE_USER-}}; ADM_P=${MEMHOUSE_ADMIN_PASSWORD:-${MEMHOUSE_PASSWORD-}}
-fi
-# c) the ordinary member credential — on a house the pilot stood up themselves
-#    (memhouse deploy --local) the member IS the superuser
-set -a; [ -f "$MH_HOME/env" ] && . "$MH_HOME/env"; set +a
-: "${ADM_U:=${MEMHOUSE_USER-}}"; : "${ADM_P:=${MEMHOUSE_PASSWORD-}}"
+memhouse whoami --admin --json
 ```
 
-Then **prove** it is actually an admin rather than assuming — a member can often read
-`system.users` while holding nothing else:
+That resolves `MEMHOUSE_ADMIN_USER` / `MEMHOUSE_ADMIN_PASSWORD` when they are set and
+falls back to the configured credential, then reports what it may actually do. Read
+`role` and the capability flags; never infer privileges from a grant string yourself.
+The command prints no password.
+
+- **`"canProvision": true`** (or `"role": "administrator"`) — you have an administrator.
+  Go to §2.
+- **`"canProvision": false`** — the credential is a member. **Stop.** Do not retry, do
+  not look for a stored password, and do not ask for one. Tell the user:
+
+  > `/mem:admin` needs an administrator credential for `<url>`, and what is configured
+  > here is the member account `<user>` — it owns its own house and nothing else. If you
+  > administer that ClickHouse, put the credential in this shell's environment and ask
+  > again:
+  >
+  > ```
+  > export MEMHOUSE_ADMIN_USER=default
+  > read -rs MEMHOUSE_ADMIN_PASSWORD && export MEMHOUSE_ADMIN_PASSWORD
+  > ```
+  >
+  > `read -rs` keeps it off the screen and out of your shell history. It lives only in
+  > that shell — nothing is written to disk, and memhouse never stores it.
+  >
+  > If somebody else administers the server, this is theirs to run, not yours.
+
+- **`"ok": false`** — a connection problem, not a privilege one. Report `reason` as
+  given; do not translate it into "you are not an admin".
+
+**Never suggest storing the credential** — not in `~/.memhouse/env`, not in an
+`admin.env`, not anywhere on disk. An admin credential owns the whole server, and every
+process running as this user can read a file. The environment of one shell is the whole
+supported surface. (A house from `memhouse deploy --local` is the exception that needs
+nothing: its member *is* the superuser, and `whoami` will already say so.)
+
+## 2. Do the work
+
+Use the same environment for every query. `--fail-with-body` so ClickHouse's own error is
+visible; `&readonly=1` on anything that only reads.
 
 ```bash
-curl -sS --fail-with-body --user "$ADM_U:$ADM_P" \
-  --data-binary "SHOW GRANTS FOR $ADM_U FORMAT TSV" "$MEMHOUSE_URL/"
-```
-
-Admin means the grants carry `ACCESS MANAGEMENT`, or `CREATE USER`/`CREATE DATABASE` at
-`*.*` — not merely `SHOW USERS`, which every member has. If none of a/b/c qualifies,
-**stop and say so**:
-
-> This needs administrator access to the ClickHouse at `<url>`, and the credential
-> configured here is the member account `<user>` — it owns its own house and nothing
-> else. To use `/mem:admin`, put an admin credential in `~/.memhouse/admin.env`
-> (`MEMHOUSE_ADMIN_USER=` / `MEMHOUSE_ADMIN_PASSWORD=`, mode 600) or export
-> `MEMHOUSE_ADMIN_USER` / `MEMHOUSE_ADMIN_PASSWORD`, then ask again. Whoever operates
-> the server has it; on a house from `memhouse deploy --local` it is the account already
-> in `~/.memhouse/env`.
-
-Do not offer to carry on with reduced powers, do not suggest the user paste a password
-into the chat, and do not improvise around the refusal. Say which of a/b/c you tried.
-
-## 2. Run the request
-
-Use the resolved credential for every query. `--fail-with-body` so ClickHouse's own error
-is visible; add `&readonly=1` on anything that only reads.
-
-```bash
-adm() { curl -sS --fail-with-body --user "$ADM_U:$ADM_P" --data-binary "$1" "$MEMHOUSE_URL/${2-}"; }
+adm() { curl -sS --fail-with-body \
+  --user "$MEMHOUSE_ADMIN_USER:$MEMHOUSE_ADMIN_PASSWORD" \
+  --data-binary "$1" "$MEMHOUSE_URL/${2-}"; }
 adm "SELECT …  FORMAT PrettyCompact" "?readonly=1"
 ```
 
@@ -74,21 +74,19 @@ Reads worth knowing — reach for these before inventing SQL:
 
 | Question | Query |
 |---|---|
-| who exists | `SELECT name FROM system.users ORDER BY name` |
-| what can someone do | `SHOW GRANTS FOR <user>` |
+| who exists | `SELECT name, storage FROM system.users ORDER BY name` |
+| what someone may do | `SHOW GRANTS FOR <user>` |
 | every house and its size | `SELECT database, formatReadableSize(sum(bytes_on_disk)) AS disk, sum(rows) AS rows FROM system.parts WHERE active GROUP BY database ORDER BY sum(bytes_on_disk) DESC` |
 | a house's rooms | `SELECT table, formatReadableSize(sum(bytes_on_disk)) AS disk, sum(rows) AS rows FROM system.parts WHERE active AND database = '<db>' GROUP BY table` |
 | who writes where | `SELECT user_id, host, count() FROM <db>.messages GROUP BY user_id, host` |
 | running queries | `SELECT query_id, user, elapsed, formatReadableSize(memory_usage) AS mem, substring(query,1,120) AS q FROM system.processes` |
 | unfinished mutations | `SELECT database, table, mutation_id, command, parts_to_do, latest_fail_reason FROM system.mutations WHERE NOT is_done` |
-| merge backlog | `SELECT database, table, elapsed, progress FROM system.merges` |
 
-Writes follow the shapes memhouse itself uses, so an admin-made member is identical to an
-invited one — a member gets `GRANT ALL ON <db>.* … WITH GRANT OPTION`, plus `SHOW USERS`,
-self-scoped `ALTER USER`, `REMOTE`, and the async-insert pin. **Prefer the CLI over raw
-SQL when one exists**: `memhouse invite <name> --url …` provisions a member correctly
-(and refuses a house that already holds someone's messages); this skill is for the things
-it does not cover.
+**Prefer a CLI verb over raw SQL wherever one exists.** `memhouse invite <name> --url …`
+provisions a member correctly — right grants, right pin, refuses a house that already
+holds someone's messages — and it takes `--admin-user`/`--admin-password`, so it works
+from this environment. Hand-written `CREATE USER` skips every one of those guards. This
+skill is for what no verb covers.
 
 ## 3. Destructive work — look first, then confirm
 
@@ -99,30 +97,33 @@ editors that produced them.
 
 Before any of them:
 
-1. **Look at the target and report what is actually there** — row counts per room, who
+1. **Look at the target and report what is really there** — row counts per room, who
    wrote them, the date span, which machines. A house you expected to be empty may not
-   be.
+   be: one `ege` house looked disposable and held 3,733 messages belonging to somebody
+   else entirely.
 2. **Name the collateral.** Dropping a user stops that account's shipper on every machine
-   it runs on. Revoking a grant closes a share the other person may be mid-query on.
-   Rotating a password breaks every machine shipping under it.
-3. **Get an explicit yes for that specific object**, quoting the counts you just read.
-   A general "yes do admin things" is not consent to drop a populated house.
-4. **Verify afterwards** and say what is now true.
+   it runs on. Revoking a grant closes a share someone may be mid-query on. Rotating a
+   password breaks every machine shipping under it — and grants are per-user while the
+   fleet is per-`user@host`, so there is no way to revoke one machine.
+3. **Get an explicit yes for that specific object**, quoting the counts you just read. A
+   general "yes, do admin things" is not consent to drop a populated house.
+4. **Verify afterwards** and say what is now true, including what was destroyed.
 
 If the user has already told you exactly what to destroy and why, and the counts match
-their description, proceed — do not re-litigate a decision they have made. Report the
-outcome plainly, including the row counts destroyed.
+their description, proceed — do not re-litigate a decision they have made.
 
 ## Never
 
 Never accept an admin password typed into the conversation, and never print one — not in
-a command, not in an echo, not in an error. If a command needs it, expand a shell
-variable (`--admin-password "$ADM_P"`), so the value never appears in the transcript.
+a command, not in an echo, not in an error. Commands expand `"$MEMHOUSE_ADMIN_PASSWORD"`;
+the value never appears as literal text.
 
-Never widen a member's grants beyond what `memhouse invite` issues without the user
-asking for that specific privilege and being told what it allows. Never grant
-`ACCESS MANAGEMENT`, `CREATE USER`, or anything at `*.*` casually — those make a second
+Never recommend writing an admin credential to disk.
+
+Never widen a member's grants beyond what `memhouse invite` issues unless the user asks
+for that specific privilege and has been told what it allows. Never grant `ACCESS
+MANAGEMENT`, `CREATE USER`, or anything at `*.*` casually — those mint a second
 administrator.
 
-Never touch a house that is not the subject of the request. Never run a destructive
+Never touch a house that is not the subject of the request, and never run a destructive
 statement whose predicate you have not first run as a `SELECT`.

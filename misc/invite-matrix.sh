@@ -66,6 +66,17 @@ else
   bad "the refused invite left a user behind"
 fi
 
+# ── whoami agrees with invite about who this is ────────────────────────────────────
+# These two must never disagree: invite refusing while whoami says "administrator" (or
+# the reverse) is how a user ends up chasing a privilege they already hold.
+w=$($CLI whoami --json 2>&1 || true)
+printf '%s' "$w" | grep -q '"canProvision": false' \
+  && ok "whoami calls the member a member" || bad "whoami misjudged the member" "$w"
+printf '%s' "$w" | grep -q '"role": "member"' \
+  && ok "whoami names the role" || bad "whoami role wrong" "$w"
+printf '%s' "$w" | grep -qi "$(printf 'mpw')" \
+  && bad "whoami leaked the password" || ok "whoami prints no password"
+
 # ── --print-sql is the member's way out: offline, no credential ─────────────────────
 sql=$($CLI invite im_target --url "$URL" --allow-local --print-sql 2>&1 || true)
 n=$(printf '%s' "$sql" | grep -cE '^(CREATE|GRANT|ALTER)' || true)
@@ -88,6 +99,16 @@ case "$out" in
 esac
 q "SELECT count() FROM system.users WHERE name='im_made'" | grep -qx 1 \
   && ok "the invited user exists" || bad "the invited user was not created"
+
+# whoami must agree from the other side too
+w=$(cd "$WORK" && $CLI whoami --json 2>&1 || true)
+printf '%s' "$w" | grep -q '"canProvision": true' \
+  && ok "whoami calls the admin an admin" || bad "whoami misjudged the admin" "$w"
+
+# and --admin must pick up an environment credential
+w=$(cd "$WORK" && MEMHOUSE_ADMIN_USER="$ADM" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI whoami --admin --json 2>&1 || true)
+printf '%s' "$w" | grep -q 'MEMHOUSE_ADMIN_\* environment' \
+  && ok "whoami --admin reads MEMHOUSE_ADMIN_*" || bad "whoami --admin ignored the env" "$w"
 
 # ── an unreachable --url is reported as unreachable, not as a privilege problem ─────
 out=$($CLI invite im_x --url http://127.0.0.1:59999 --allow-local 2>&1 || true)

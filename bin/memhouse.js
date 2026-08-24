@@ -29,6 +29,7 @@ const {
 } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 const { consumeSecretChunk } = require(path.join(REPO_ROOT, 'memhouse', 'secret-input'));
+const { capabilitiesFrom } = require(path.join(REPO_ROOT, 'memhouse', 'capabilities'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
 const ENV_FILE = path.join(HOME_DIR, 'env');
@@ -162,6 +163,24 @@ async function ch(cfg, sql, { database = cfg.db, settings = null, timeout = 3000
   if (!res.ok) throw new Error(text.trim().split('\n')[0]);
   return text.trim();
 }
+/**
+ * The grant lines ClickHouse reports for a user, as strings.
+ *
+ * Never pass a FORMAT here — chRows appends its own, and a statement carrying two is a
+ * syntax error. That mistake once read as "no grants at all", which refused every
+ * credential including a genuine superuser, and it was invisible on any machine whose
+ * own credential is an ordinary member.
+ *
+ * Unreadable grants come back as [] rather than throwing: a credential that cannot read
+ * its own grants is, for every decision made from this, simply not an administrator.
+ */
+async function readGrants(cfg, user) {
+  try {
+    const rows = await chRows(cfg, `SHOW GRANTS FOR ${user}`, { database: '' });
+    return rows.map((r) => Object.values(r).join(' '));
+  } catch { return []; }
+}
+
 async function chRows(cfg, sql, opts) {
   const text = await ch(cfg, sql + ' FORMAT JSONEachRow', opts);
   return text ? text.split('\n').map((l) => JSON.parse(l)) : [];
@@ -363,6 +382,8 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              resume <session-id>  print the command that reopens that session in its editor
              sessions-query       print the session rollup SQL for this credential
              start | stop |       shipper loop + dashboard as background daemons
+             whoami               which credential is in play, and what it may do
+                                  (--json; --admin reads MEMHOUSE_ADMIN_*)
              status               daemons, connection, counts, freshness (--json)
              doctor               diagnose the whole pipeline
 
@@ -2918,6 +2939,74 @@ async function cmdNightly() {
  * transfer, and rotation (memhouse passwd) is printed because the inviter knows this
  * password until the invitee changes it.
  */
+/**
+ * `memhouse whoami [--json] [--admin]`
+ *
+ * Which credential is in play here, and what may it actually do. Exists so nothing has
+ * to hand-roll `SHOW GRANTS` and grep the result — a skill that reasons about privileges
+ * in prose gets it subtly wrong, and the wrong answer is either "you cannot" to an
+ * administrator or "go ahead" to a member who is about to hit ACCESS_DENIED.
+ *
+ * `--admin` resolves MEMHOUSE_ADMIN_USER / MEMHOUSE_ADMIN_PASSWORD first, so an agent
+ * can ask "is there an admin credential in this environment?" without inventing a place
+ * to store one. Nothing here prints or persists a password.
+ */
+async function cmdWhoami() {
+  const cfg = resolveConfig();
+  const wantAdmin = flags.admin === true;
+  const au = process.env.MEMHOUSE_ADMIN_USER;
+  const ap = process.env.MEMHOUSE_ADMIN_PASSWORD;
+  const usingAdminEnv = wantAdmin && au;
+  const who = usingAdminEnv ? { ...cfg, user: au, password: ap || '' } : cfg;
+
+  if (!who.url || !who.user) {
+    const msg = 'no credential configured';
+    if (JSON_OUT) console.log(JSON.stringify({ ok: false, reason: msg }, null, 2));
+    else {
+      console.log(bad(`${msg} — nothing in ${short(ENV_FILE)} and no MEMHOUSE_URL/MEMHOUSE_USER set.`));
+      if (wantAdmin) console.log('  For --admin, export MEMHOUSE_ADMIN_USER and MEMHOUSE_ADMIN_PASSWORD.');
+    }
+    return 1;
+  }
+
+  let server = null;
+  try { server = (await chRows(who, 'SELECT currentUser() AS u', { database: '' }))[0]?.u; }
+  catch (e) {
+    const reason = netReason(e);
+    if (JSON_OUT) console.log(JSON.stringify({ ok: false, url: who.url, user: who.user, reason }, null, 2));
+    else console.log(bad(`cannot reach ${who.url} as '${who.user}': ${reason}`));
+    return 1;
+  }
+
+  const grants = await readGrants(who, server);
+  const caps = capabilitiesFrom(grants);
+  const source = usingAdminEnv ? 'MEMHOUSE_ADMIN_* environment'
+    : (process.env.MEMHOUSE_USER ? 'MEMHOUSE_* environment' : short(ENV_FILE));
+  const role = caps.isSuperuser ? 'administrator'
+    : caps.canProvision ? 'can provision (users and houses)'
+      : 'member';
+
+  if (JSON_OUT) {
+    console.log(JSON.stringify({
+      ok: true, url: who.url, user: server, db: who.db, source, role, ...caps,
+      grants_readable: grants.length > 0,
+    }, null, 2));
+    return 0;
+  }
+  console.log(ok(`${server} at ${who.url} — ${role}`));
+  console.log(`  credential from: ${source}`);
+  console.log(`  house:           ${who.db || '(none set)'}`);
+  console.log(`  may create users:    ${caps.canMintUsers ? 'yes' : 'no'}`);
+  console.log(`  may create houses:   ${caps.canMintHouses ? 'yes' : 'no'}`);
+  console.log(`  may read any house:  ${caps.canReadEveryHouse ? 'yes' : 'no'}`);
+  if (!grants.length) console.log(warn('could not read its own grants — treating it as a member'));
+  if (!caps.canProvision) {
+    console.log('  Inviting and server-wide administration need an administrator; this is not one.');
+    console.log('  Supply one for this shell:  export MEMHOUSE_ADMIN_USER=… MEMHOUSE_ADMIN_PASSWORD=…');
+  }
+  return 0;
+}
+
 async function cmdInvite() {
   const name = positional[0];
   if (!name) { console.log('usage: memhouse invite <name> --url <house-url> [--admin-user … [--admin-password …]] [--db <house>] [--out <file>] [--adopt] [--print-sql]'); return 2; }
@@ -2998,20 +3087,11 @@ async function cmdInvite() {
       console.log('  before inviting, or use --print-sql and let the invitee be told the address.');
       return 1;
     }
-    let grants = '';
-    try {
-      const g = await chRows({ ...c, url }, `SHOW GRANTS FOR ${c.user}`, { database: '' });
-      grants = g.map((r) => Object.values(r).join(' ')).join('\n');
-    } catch { /* reachable but grants unreadable — treated as "not an admin" below */ }
-    // Two capabilities, and a superuser states them in more than one shape: CREATE USER
-    // may arrive as itself or under ACCESS MANAGEMENT, and the database half may be an
-    // explicit CREATE DATABASE or the umbrella CREATE on *.* — which is what
-    // `deploy --local` grants. Match the meaning, not one spelling.
-    const canMintUsers = /\bACCESS MANAGEMENT\b|\bCREATE USER\b/.test(grants);
-    const canMintHouses = /\bCREATE DATABASE\b/.test(grants)
-      || grants.split('\n').some((l) => /\bCREATE\b/.test(l) && /\bON \*\.\*/.test(l));
-    const canProvision = canMintUsers && canMintHouses;
-    if (canProvision) {
+    // What this credential may do, judged from its own grants and SCOPE-AWARE — a member
+    // holds CREATE DATABASE inside `ON <their-db>.*`, which mints no new house at all.
+    // Shared with `whoami` so the two can never disagree about who is an administrator.
+    const caps = capabilitiesFrom(await readGrants({ ...c, url }, c.user));
+    if (caps.canProvision) {
       adminUser = c.user; adminPass = c.password;
       console.log(ok(`inviting as your own credential '${c.user}' (it can create users and houses here)`));
     } else {
@@ -3444,6 +3524,7 @@ async function cmdUninstall() {
       }
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
+    case 'whoami': process.exitCode = await cmdWhoami(); break;
     case 'invite': process.exitCode = await cmdInvite(); break;
     case 'passwd': process.exitCode = await cmdPasswd(); break;
     case 'nightly': process.exitCode = await cmdNightly(); break;
