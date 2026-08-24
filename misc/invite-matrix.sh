@@ -20,6 +20,14 @@ URL=${1:?usage: invite-matrix.sh <url> <admin-user> <admin-password>}
 ADM=${2:?}
 ADMPW=${3:?}
 CLI="node $(cd "$(dirname "$0")/.." && pwd)/bin/memhouse.js"
+
+# Credentials resolve flags > MEMHOUSE_* env > env file. This script switches identity by
+# writing an env FILE and pointing MEMHOUSE_HOME at it, so ANY inherited MEMHOUSE_USER or
+# MEMHOUSE_PASSWORD silently outranks that and every case runs as the wrong user — the
+# member cases then "pass" as an admin and the suite reports success while testing
+# nothing. Seen for real: sourcing an admin env before invoking made 2 of 9 fail and the
+# rest meaningless.
+unset MEMHOUSE_URL MEMHOUSE_USER MEMHOUSE_PASSWORD MEMHOUSE_DB MEMHOUSE_PORT
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
