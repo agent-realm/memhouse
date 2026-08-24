@@ -306,6 +306,48 @@ function sessionsRollup({ sessions, messages }) {
   )`;
 }
 
+// The precomputed rollup's table name. One place, because the migration, the runtime
+// probe and the read layer must all agree on it.
+const SESSION_STATS = 'session_stats';
+
+/**
+ * The DDL that materializes the rollup, as [target, view].
+ *
+ * A REFRESHABLE materialized view, not an ordinary one, and the distinction is not a
+ * preference — an ordinary MV is an insert trigger, and all three of this schema's
+ * defining properties break it:
+ *
+ *   DUPLICATES. The rooms are ReplacingMergeTree; the engine collapses re-inserted rows
+ *   at MERGE time, long after a trigger has already added them to a sum(). On a real
+ *   house that is 1,226,770 stored rows for 685,649 real ones — token totals ~1.8x high,
+ *   with nothing to indicate it.
+ *
+ *   EPOCHS. A trigger firing at insert cannot know a later parse will supersede the rows
+ *   it is aggregating, so superseded parses would stay in the totals forever.
+ *
+ *   THE JOIN. A trigger fires on one source table; the rollup joins sessions to messages.
+ *
+ * A refreshable view has none of those problems because it is not a trigger: it runs
+ * THIS ALREADY-CORRECT QUERY on a schedule and atomically swaps the target. FINAL, the
+ * epoch filter and the join all work exactly as they do in the subquery, because it IS
+ * the subquery. The price is staleness bounded by the interval — and the shipper's own
+ * default cadence is 300s, so a 5-minute refresh adds no lag to data arriving every 5.
+ *
+ * The target's columns are inferred with EMPTY AS, so the table and the rollup cannot
+ * drift: change sessionsRollup and the next migration rebuilds the table to match.
+ */
+function sessionStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
+  const rollup = sessionsRollup(rooms);
+  // sessionsRollup wraps itself in parentheses for the FROM position; strip them.
+  const body = rollup.replace(/^\s*\(/, '').replace(/\)\s*$/, '');
+  return [
+    `CREATE TABLE IF NOT EXISTS ${SESSION_STATS} ENGINE = MergeTree `
+      + `ORDER BY (session_id, user_id) EMPTY AS ${body}`,
+    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${SESSION_STATS}_mv `
+      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${SESSION_STATS} AS ${body}`,
+  ];
+}
+
 /**
  * The settings every read needs. `final` collapses ReplacingMergeTree versions;
  * `join_use_nulls` is what the rollup's coalesce depends on.
@@ -381,8 +423,41 @@ async function currentUser(client) {
 }
 
 /** Resolve the rooms for whoever this client is connected as. */
+/**
+ * The precomputed rollup, when the house has one.
+ *
+ * `sessions_v` is a SAVED QUERY that rebuilds the whole rollup — sessions FINAL joined
+ * to the current parse of messages, grouped over the entire house — on every call. A
+ * house that has run the session_stats migration carries the same rows as a flat table,
+ * refreshed on a timer, and the read layer can name that instead. Measured on a 714k
+ * message house: 1,413,624 rows read per query becomes 1,230, and p50 query time 68ms
+ * becomes 4ms.
+ *
+ * Resolved at RUNTIME rather than by version, and that is the point: one binary has to
+ * serve a migrated house, a house whose migration has not run, and a friend's house
+ * shared read-only that was never migrated at all. Asking the server what exists is the
+ * only answer that is correct in all three.
+ */
+async function hasSessionStats(client) {
+  try {
+    const rs = await client.query({
+      query: `SELECT count() AS n FROM system.tables
+              WHERE database = currentDatabase() AND name = 'session_stats'`,
+      format: 'JSONEachRow',
+    });
+    const rows = await rs.json();
+    return Number(rows[0] && rows[0].n) > 0;
+  } catch {
+    // No grant on system.tables is not an error — it means "assume not", and the
+    // subquery path is always correct.
+    return false;
+  }
+}
+
 async function resolveRooms(client) {
-  return roomNames(await currentUser(client));
+  const rooms = roomNames(await currentUser(client));
+  if (await hasSessionStats(client)) rooms.sessions_v = SESSION_STATS;
+  return rooms;
 }
 
 /**
@@ -426,4 +501,5 @@ module.exports = {
   READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
   sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,
+  SESSION_STATS, hasSessionStats, sessionStatsStatements,
 };
