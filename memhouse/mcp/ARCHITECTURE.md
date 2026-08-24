@@ -25,8 +25,8 @@ are copied from the spec pages, not from memory.
       maps errors: -32022 version, -32602 not-found, -32601 unknown method
                                      │              knows MCP exists
                                      ▼
-                        memhouse/mcp/tools.js         ← 6 async functions.
-      search · timeline · get_session · stats · resume_command · sql
+                        memhouse/mcp/tools.js         ← 7 async functions.
+   search · sessions · get_session · status · users · resume_command · sql
       Plain args in, plain JSON out. Zero protocol knowledge. Unit-testable
       with no transport, no client, no spec.
                                      │
@@ -115,8 +115,8 @@ Deterministic order (prompt-cache hits), and `CacheableResult` is required:
 ```json
 {"jsonrpc":"2.0","id":2,"result":{
   "resultType":"complete",
-  "tools":[{"name":"search","…":"…"},{"name":"timeline"},{"name":"get_session"},
-           {"name":"stats"},{"name":"resume_command"},{"name":"sql"}],
+  "tools":[{"name":"search","…":"…"},{"name":"sessions"},{"name":"get_session"},
+           {"name":"status"},{"name":"users"},{"name":"resume_command"},{"name":"sql"}],
   "ttlMs":86400000,"cacheScope":"private",
   "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"memhouse","version":"0.9.0"}}}}
 ```
@@ -210,6 +210,6 @@ revision — nothing to mount for server-initiated traffic, and we have none.
 
 `tools.js` never learns what MCP is. So: the beta-SDK risk is contained to
 `rpc.js`; a fallback to 2025-11-25 stdio is a rewrite of one file; the CLI could
-grow `memhouse timeline` over the same function tomorrow; and the tests that
+grow `memhouse sessions` over the same function tomorrow; and the tests that
 matter (does `search` find it, does `sql` refuse `url()`, do credentials ever
 appear in a result) run with no client, no transport, and no spec in scope.

@@ -26,15 +26,26 @@ const SERVER_INFO = { name: 'memhouse', version: PKG.version };
 
 // The paragraph every client puts in front of its model — written like a tool
 // description, not a README.
+// What a client shows the model before it has called anything. It carries the METHOD,
+// not just the inventory: the same retrieve → read → answer → cite loop the `/mem:ask`
+// skill spells out for Claude Code, which has no skill file to read on any other client.
+// The last sentence is the one that matters most — this server runs no LLM anywhere in
+// its read path, so a model that pads a thin retrieval with recall is inventing, and a
+// user cannot tell the difference without the citation.
 const INSTRUCTIONS =
   'This server is a read-only archive of agent conversation memory across 17 editors ' +
   '(Claude Code, Codex, Cursor, and the rest), for every member of this house. ' +
   'Call search first: it returns an ID index where each hit carries est_expand_tokens, ' +
   'the cost of fetching that whole session. Fetch full text with get_session only for ' +
-  'the ids you chose, slicing large sessions with seq_from/seq_to. timeline gives ' +
-  'chronological context around a hit; resume_command turns a hit into the shell ' +
-  'command that reopens it in its own editor; sql is for aggregations the other tools ' +
-  'cannot express.';
+  'the ids you chose, slicing large sessions with seq_from/seq_to. sessions gives ' +
+  'chronological context around a hit; status reports what the house holds and how fresh ' +
+  'it is; users answers who writes into this house and whose houses you can read; ' +
+  'resume_command turns a hit into the shell command that reopens it in its own editor; ' +
+  'sql is for aggregations the other tools cannot express. ' +
+  'Answer from what you retrieved, then cite it: list the session_id, date and project ' +
+  'each claim came from, and quote the decisive line verbatim where exact wording matters. ' +
+  'If the house holds nothing on the question, say so and say what you searched — never ' +
+  'present a guess as a retrieval.';
 
 function newState() {
   return { era: null, cancelled: new Set() };

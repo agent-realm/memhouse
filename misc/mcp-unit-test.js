@@ -39,11 +39,11 @@ test('server/discover: the mandatory RPC, with identity, instructions, and cache
   assert.deepStrictEqual(r.result._meta[`${META}serverInfo`], SERVER_INFO);
 });
 
-test('tools/list (modern): six tools, CacheableResult, and an order that never moves', async () => {
+test('tools/list (modern): seven tools, CacheableResult, and an order that never moves', async () => {
   const a = await handle(req('tools/list', { _meta: modernMeta }), newState());
   const b = await handle(req('tools/list', { _meta: modernMeta }), newState());
   const names = a.result.tools.map((t) => t.name);
-  assert.deepStrictEqual(names, ['search', 'timeline', 'get_session', 'stats', 'resume_command', 'sql']);
+  assert.deepStrictEqual(names, ['search', 'sessions', 'get_session', 'status', 'users', 'resume_command', 'sql']);
   // Determinism is a spec SHOULD and a prompt-cache guarantee: byte-identical.
   assert.strictEqual(JSON.stringify(a.result.tools), JSON.stringify(b.result.tools));
   assert.strictEqual(a.result.resultType, 'complete');
@@ -72,7 +72,7 @@ test('initialize answers with the legacy shape and scopes the era to the process
   assert.strictEqual(init.result.resultType, undefined, 'legacy result carries no modern fields');
   // The follow-up list, version-less as legacy clients send it, gets legacy shape.
   const list = await handle(req('tools/list', {}), state);
-  assert.strictEqual(list.result.tools.length, 6);
+  assert.strictEqual(list.result.tools.length, 7);
   assert.strictEqual(list.result.resultType, undefined);
   assert.strictEqual(list.result.ttlMs, undefined);
   // notifications/initialized is accepted silently.
@@ -108,7 +108,7 @@ test('notifications get no reply, and a cancelled id is remembered', async () =>
 test('tools/call with no arguments object at all still reaches the tool', async () => {
   // A sloppy client may omit `arguments` entirely; the handler gets {} and the
   // tool's own validation (requireHouse first) answers — not a TypeError.
-  const r = await handle(req('tools/call', { name: 'stats', _meta: modernMeta }), newState());
+  const r = await handle(req('tools/call', { name: 'status', _meta: modernMeta }), newState());
   assert.ok(r.result, 'a result, not a crash');
   assert.strictEqual(r.result.isError, true); // no house in this runner
 });
@@ -131,7 +131,7 @@ test('id 0 is a real id, not a notification', async () => {
   // round-trip. A client using 0-based ids would otherwise never get answer #0.
   const r = await handle(req('tools/list', { _meta: modernMeta }, 0), newState());
   assert.strictEqual(r.id, 0);
-  assert.strictEqual(r.result.tools.length, 6);
+  assert.strictEqual(r.result.tools.length, 7);
 });
 
 test('string ids round-trip untouched', async () => {
@@ -141,7 +141,7 @@ test('string ids round-trip untouched', async () => {
 
 test('a request with params missing entirely is still answered', async () => {
   const r = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/list' }, newState());
-  assert.strictEqual(r.result.tools.length, 6);
+  assert.strictEqual(r.result.tools.length, 7);
 });
 
 test('jsonrpc 1.0 / missing jsonrpc field is refused as Invalid Request', async () => {
@@ -176,7 +176,7 @@ test('no house: every tool refuses as an isError RESULT that names the fix — n
   }
   // And discovery still worked the whole time — the client can SHOW the tools.
   const list = await handle(req('tools/list', { _meta: modernMeta }), s);
-  assert.strictEqual(list.result.tools.length, 6);
+  assert.strictEqual(list.result.tools.length, 7);
 });
 
 // ── the dial-out guard (memhouse/server/sql-guard.js) ───────────────────────────

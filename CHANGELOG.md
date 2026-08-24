@@ -10,12 +10,29 @@ migration path is planned work, not a promise the old versions can cash.
 Code; MCP reaches every client memhouse already parses — Claude Desktop, Cursor,
 Windsurf, Copilot, Goose, and the rest read the same memory back.
 
-- Six read-only tools: `search` (a compact index — every hit priced with
-  `est_expand_tokens`, the cost of expanding that session, so the model chooses
-  before it spends), `timeline`, `get_session` (the only tool returning transcript
+- Seven read-only tools, **named after the `/mem:*` skills** where they do the same
+  job, so nobody relearns the vocabulary moving between Claude Code and any other
+  client: `search` (a compact index — every hit priced with `est_expand_tokens`, the
+  cost of expanding that session, so the model chooses before it spends),
+  `sessions` (`/mem:sessions`), `get_session` (the only tool returning transcript
   text; slices by `seq`; with two members holding the same session id it answers
-  with the holder list instead of guessing), `stats`, `resume_command` (the same
-  print-never-run contract as `memhouse resume`), and `sql` (free-form read-only).
+  with the holder list instead of guessing), `status` (`/mem:status`), `users`
+  (`/mem:users` — who writes into this house, whose houses you can read, who can
+  read yours), `resume_command` (the same print-never-run contract as
+  `memhouse resume`), and `sql` (free-form read-only).
+- **`users` is best-effort, and says which parts it could not read.** ClickHouse
+  shows a credential only what it may see, so `system.grants` and `system.users` can
+  be refused; those sections come back `null` with the reason in `unavailable`, and
+  `shares_source` states whether the answer is authoritative or the share ledger
+  (which cannot see a grant an admin issued by hand). A surface that reported
+  "nobody can read your memory" from a section it never read would be lying.
+- **The write-side skills have no MCP counterpart on purpose.** `/mem:share` and
+  `/mem:invite` issue GRANTs and mint users; this endpoint does neither. Read-only is
+  a property of the surface — the one most exposed to prompt injection — not a default.
+- The server's `instructions` carry the METHOD, not just the inventory: search →
+  get_session for the chosen ids → answer → **cite the session_id, date and project**,
+  and say so plainly when the house holds nothing. That is the `/mem:ask` procedure,
+  for clients that have no skill file to read.
 - **`sql` refuses to leave the server, and refuses nothing else.** What the credential
   may READ stays the operator's GRANT choice, enforced by ClickHouse and passed through
   verbatim — including a housemate's shared house, read by name. One rule is memhouse's

@@ -123,18 +123,26 @@ Register it as a stdio server (every client supports that form):
 { "mcpServers": { "memhouse": { "command": "memhouse", "args": ["mcp"] } } }
 ```
 
-Six read-only tools: `search` returns a compact index where every hit carries
+Seven read-only tools, named to match the `/mem:*` skills so the vocabulary carries
+across surfaces: `search` returns a compact index where every hit carries
 `est_expand_tokens` — the price of fetching that whole session — so the model spends
 its context on the sessions worth it; `get_session` fetches the transcript (or a
-`seq` slice) for the ids it chose; `timeline` gives chronological context around a
-hit; `stats` shows whose memory is in the house and how fresh; `resume_command`
-turns a hit into the paste-ready command that reopens it in its own editor;
-`sql` is free-form read-only SQL for everything else.
+`seq` slice) for the ids it chose; `sessions` gives chronological context around a
+hit; `status` shows what the house holds and how fresh it is; `users` answers who
+writes into this house and whose houses you can read; `resume_command` turns a hit
+into the paste-ready command that reopens it in its own editor; `sql` is free-form
+read-only SQL for everything else.
 
-`sql` runs under the credential the server was configured with, and its limits are
-that credential's **grants** — ClickHouse enforces them, and a server refusal comes
+The write-side skills — `/mem:share`, `/mem:invite` — have no MCP counterpart on
+purpose. This endpoint issues no GRANT and mints no user; read-only is a property of
+the surface, not a default.
+
+`sql` runs under the credential the server was configured with, and what it may READ
+is that credential's **grants** — ClickHouse enforces them, and a server refusal comes
 back verbatim as the answer. Point the server at a `GRANT SELECT`-only user for a
-read-only surface no application code has to get right.
+read-only surface no application code has to get right. One rule is memhouse's own:
+table functions that reach off this ClickHouse (`remote`, `url`, `s3`, …) are refused
+before the query is sent.
 
 The server also mounts on the dashboard at `POST /mcp` (loopback, same process, no
 extra daemon) for clients that prefer Streamable HTTP. Both transports speak the

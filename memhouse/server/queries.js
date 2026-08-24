@@ -1111,6 +1111,73 @@ async function statsHouse() {
   };
 }
 
+// Who is around this house: the members and machines writing INTO it, the other houses
+// this credential can read OUT of, and who has been given a window into this one.
+//
+// Best-effort by construction, section by section. ClickHouse shows a credential only
+// what it may see — `system.users` and `system.grants` are admin-shaped and a member is
+// refused both — so a section that cannot be read comes back null with its reason in
+// `unavailable`, rather than being silently dropped or guessed at. A caller that reports
+// "nobody can read your memory" from a section it never actually read would be lying.
+async function usersHouse() {
+  const unavailable = [];
+  const attempt = async (label, fn) => {
+    try { return await fn(); } catch (e) {
+      // ClickHouse's own refusal, first line only — enough to tell "not allowed" from
+      // "table missing" without pasting a stack into a tool result.
+      unavailable.push(`${label}: ${String(e.message || e).split('\n')[0].slice(0, 200)}`);
+      return null;
+    }
+  };
+
+  // 1. Who writes in — from the DATA, so a machine that never announced itself still
+  //    shows up. (user_id is server-stamped; host is the install fingerprint.)
+  const writers = await attempt('writers', async () => (await q(`
+    SELECT user_id, host, count() AS rows,
+           formatDateTime(max(ingested_at), '%Y-%m-%d %H:%i') AS last_write
+    FROM {{messages}} GROUP BY user_id, host ORDER BY last_write DESC`))
+    .map((r) => ({ user_id: r.user_id, host: r.host, rows: Number(r.rows), last_write: r.last_write })));
+
+  // 2. Whose memory this credential can read. Every database it reaches that is not a
+  //    server-owned one is a house someone shared — or its own.
+  const SERVER_DBS = new Set(['system', 'information_schema', 'INFORMATION_SCHEMA', 'default']);
+  const own = config.database;
+  const readable = await attempt('readable_houses', async () => (await q('SHOW DATABASES'))
+    .map((r) => r.name)
+    .filter((n) => !SERVER_DBS.has(n) && n !== own));
+
+  // 3. Who can read THIS house. `system.grants` is authoritative and usually refused; the
+  //    ledger `/mem:share` keeps is the readable fallback — and it cannot see a grant an
+  //    admin issued by hand, which is why the source is reported alongside the answer.
+  let sharedWith = await attempt('shares_from_grants', async () => (await q(`
+    SELECT user_name AS user, groupUniqArray(access_type) AS access
+    FROM system.grants WHERE database = {db:String} AND user_name != {me:String}
+    GROUP BY user_name ORDER BY user_name`, { db: own, me: config.username }))
+    .map((r) => ({ user: r.user, state: Array.isArray(r.access) ? r.access.join(', ') : String(r.access) })));
+  let sharesSource = 'system.grants (authoritative)';
+  if (!sharedWith) {
+    sharesSource = 'house share ledger (an admin-issued grant would not appear here)';
+    sharedWith = await attempt('shares_from_ledger', async () => (await q(`
+      SELECT substring(key, 7) AS user, value AS state
+      FROM house_meta FINAL WHERE key LIKE 'share:%' ORDER BY key`))
+      .map((r) => ({ user: r.user, state: r.state })));
+  }
+
+  // 4. Everyone on the server. Members hold SHOW USERS since 0.12.6 — names only, no
+  //    passwords and no data — so this usually answers; on someone else's server it may not.
+  const serverUsers = await attempt('server_users', async () => (await q('SELECT name FROM system.users ORDER BY name')).map((r) => r.name));
+
+  return {
+    own_house: own,
+    writers,
+    readable_houses: readable,
+    shared_with: sharedWith,
+    shares_source: sharesSource,
+    server_users: serverUsers,
+    unavailable,
+  };
+}
+
 // The stored row resumeFor() needs: source, folder, origin. Read, not guessed.
 async function sessionRowFor(sessionId, userId) {
   const params = { sid: String(sessionId) };
@@ -1158,7 +1225,7 @@ module.exports = {
   getProjects, getDeepAnalytics, getToolCalls,
   estimateCosts, getCostAnalytics,
   rawQuery, schema,
-  searchSessions, timelineSessions, getSessionSlice, statsHouse, sessionRowFor, readonlySql,
+  searchSessions, timelineSessions, getSessionSlice, statsHouse, usersHouse, sessionRowFor, readonlySql,
   // Used only by the server's own guard to learn which database names are real. Not
   // reachable from any route.
   rawQueryUnguarded: (sql) => q(sql),

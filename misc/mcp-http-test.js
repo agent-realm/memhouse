@@ -122,7 +122,7 @@ async function test(name, fn) {
     await test('a full modern tool flow over HTTP: list → search → get_session', async () => {
       const list = await post({ method: 'tools/list', params: {} });
       assert.deepStrictEqual(list.body.result.tools.map((t) => t.name),
-        ['search', 'timeline', 'get_session', 'stats', 'resume_command', 'sql']);
+        ['search', 'sessions', 'get_session', 'status', 'users', 'resume_command', 'sql']);
       const hits = JSON.parse((await post({ method: 'tools/call', params: { name: 'search', arguments: { q: 'pelican-nesting' } } })).body.result.content[0].text);
       assert.strictEqual(hits.matches, 1);
       assert.strictEqual(hits.results[0].session_id, SID);
@@ -203,7 +203,7 @@ async function test(name, fn) {
       });
       assert.strictEqual(r.status, 200);
       assert.strictEqual(r.headers.get('mcp-session-id'), null);
-      assert.strictEqual(r.body.result.tools.length, 6);
+      assert.strictEqual(r.body.result.tools.length, 7);
     });
 
     await test('a notification is 202 with an empty body', async () => {
@@ -216,7 +216,7 @@ async function test(name, fn) {
       const init = await post({ method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } }, { auto: false });
       assert.strictEqual(init.status, 200);
       assert.strictEqual(init.body.result.protocolVersion, '2025-06-18');
-      const call = await post({ method: 'tools/call', params: { name: 'stats', arguments: {} } }, { auto: false });
+      const call = await post({ method: 'tools/call', params: { name: 'status', arguments: {} } }, { auto: false });
       assert.strictEqual(call.status, 200);
       assert.strictEqual(call.body.result.resultType, undefined, 'legacy shape — no modern fields');
       const stats = JSON.parse(call.body.result.content[0].text);

@@ -145,10 +145,10 @@ async function test(name, fn) {
       s.notify('notifications/initialized');
     });
 
-    await test('tools/list serves six tools in fixed order', async () => {
+    await test('tools/list serves seven tools in fixed order', async () => {
       const r = await s.rpc('tools/list', { _meta: MODERN_META });
       assert.deepStrictEqual(r.result.tools.map((t) => t.name),
-        ['search', 'timeline', 'get_session', 'stats', 'resume_command', 'sql']);
+        ['search', 'sessions', 'get_session', 'status', 'users', 'resume_command', 'sql']);
     });
 
     let est;
@@ -177,18 +177,49 @@ async function test(name, fn) {
       assert.ok(Math.abs(est - Math.floor(chars / 4)) <= 1, `est ${est} ~ chars/4 ${Math.floor(chars / 4)}`);
     });
 
-    await test('timeline anchors on a session', async () => {
-      const out = parseTool(await s.rpc('tools/call', { name: 'timeline', arguments: { session_id: SID }, _meta: MODERN_META }));
+    await test('sessions anchors on a session', async () => {
+      const out = parseTool(await s.rpc('tools/call', { name: 'sessions', arguments: { session_id: SID }, _meta: MODERN_META }));
       assert.ok(out.sessions.length >= 2, 'both seeded sessions are near each other');
     });
 
-    await test('stats breaks the house down by source/user/host with freshness', async () => {
-      const out = parseTool(await s.rpc('tools/call', { name: 'stats', arguments: {}, _meta: MODERN_META }));
+    await test('status breaks the house down by source/user/host with freshness', async () => {
+      const out = parseTool(await s.rpc('tools/call', { name: 'status', arguments: {}, _meta: MODERN_META }));
       assert.strictEqual(out.total_sessions, 2);
       assert.strictEqual(out.total_messages, 6);
       const cc = out.breakdown.find((b) => b.source === 'claude-code');
       assert.strictEqual(cc.user_id, 'default');
       assert.strictEqual(cc.host, 'mac1');
+    });
+
+    await test('users answers the people questions, and names what it could not read', async () => {
+      const out = parseTool(await s.rpc('tools/call', { name: 'users', arguments: {}, _meta: MODERN_META }));
+      assert.strictEqual(out.own_house, 'mem');
+
+      // 1. Writers come from the DATA, so the seeded rows are the fleet.
+      const w = out.writers.find((x) => x.host === 'mac1');
+      assert.ok(w, `mac1 in the fleet: ${JSON.stringify(out.writers)}`);
+      assert.strictEqual(w.user_id, 'default');
+      // 5, not 6: the imported claude-ai row carries host 'web', so grouping by machine
+      // splits them — which is the whole point of the host fingerprint.
+      assert.strictEqual(w.rows, 5);
+      assert.ok(out.writers.some((x) => x.host === 'web'), 'the imported row is its own machine');
+
+      // 2. Nothing was shared WITH this throwaway credential, and its own house is never
+      //    listed as one shared with it.
+      assert.deepStrictEqual(out.readable_houses, []);
+
+      // 3. This credential is the server's `default` with access management, so the
+      //    authoritative source answers and the ledger fallback is not used.
+      assert.ok(/system\.grants/.test(out.shares_source), out.shares_source);
+      assert.ok(Array.isArray(out.shared_with));
+
+      // 4. Every section that could not be read must SAY so — a null section with an
+      //    empty `unavailable` would read as "nobody", which is the one wrong answer.
+      assert.ok(Array.isArray(out.unavailable));
+      for (const [k, v] of Object.entries(out)) {
+        if (v === null) assert.ok(out.unavailable.some((u) => u.startsWith(k.replace(/s$/, ''))
+          || u.includes(k)), `null ${k} is explained in unavailable: ${JSON.stringify(out.unavailable)}`);
+      }
     });
 
     await test('resume_command: a real command for a shipped session, cd included', async () => {
@@ -329,7 +360,7 @@ async function test(name, fn) {
       const r = await s.rpc('tools/call', { name: 'sql', arguments: { query: 'SELEKT 1' }, _meta: MODERN_META });
       assert.strictEqual(r.result.isError, true);
       assert.ok(/syntax/i.test(r.result.content[0].text));
-      const alive = parseTool(await s.rpc('tools/call', { name: 'stats', arguments: {}, _meta: MODERN_META }));
+      const alive = parseTool(await s.rpc('tools/call', { name: 'status', arguments: {}, _meta: MODERN_META }));
       assert.ok(alive.total_sessions >= 2);
     });
 
@@ -341,13 +372,13 @@ async function test(name, fn) {
       assert.ok(r.result, 'and the call still answered');
     });
 
-    await test('timeline: a date anchor works; a garbage date is a passed-through refusal, not a crash', async () => {
-      const ok = parseTool(await s.rpc('tools/call', { name: 'timeline', arguments: { date: '2026-08-12' }, _meta: MODERN_META }));
+    await test('sessions: a date anchor works; a garbage date is a passed-through refusal, not a crash', async () => {
+      const ok = parseTool(await s.rpc('tools/call', { name: 'sessions', arguments: { date: '2026-08-12' }, _meta: MODERN_META }));
       assert.ok(ok.sessions.length >= 2);
-      const bad = await s.rpc('tools/call', { name: 'timeline', arguments: { date: 'not-a-date' }, _meta: MODERN_META });
+      const bad = await s.rpc('tools/call', { name: 'sessions', arguments: { date: 'not-a-date' }, _meta: MODERN_META });
       assert.strictEqual(bad.result.isError, true);
       const alive = await s.rpc('tools/list', { _meta: MODERN_META });
-      assert.strictEqual(alive.result.tools.length, 6);
+      assert.strictEqual(alive.result.tools.length, 7);
     });
 
     await test('resume_command: unverified editor and unknown session both refuse with a reason', async () => {
@@ -363,7 +394,7 @@ async function test(name, fn) {
 
     await test('ten concurrent calls all come home to their own ids', async () => {
       const answers = await Promise.all(Array.from({ length: 10 }, (_, i) =>
-        s.rpc('tools/call', { name: i % 2 ? 'stats' : 'search', arguments: i % 2 ? {} : { q: 'readonly' }, _meta: MODERN_META })));
+        s.rpc('tools/call', { name: i % 2 ? 'status' : 'search', arguments: i % 2 ? {} : { q: 'readonly' }, _meta: MODERN_META })));
       for (const a of answers) assert.ok(a.result && !a.error, 'every call resolved with a result');
     });
 
@@ -371,7 +402,7 @@ async function test(name, fn) {
       // initialize ran near the top of this file, so this long-lived process is
       // era=legacy for any request that does not carry modern _meta.
       const r = await s.rpc('tools/list', {});
-      assert.strictEqual(r.result.tools.length, 6);
+      assert.strictEqual(r.result.tools.length, 7);
       assert.strictEqual(r.result.resultType, undefined);
       assert.strictEqual(r.result.ttlMs, undefined);
     });
@@ -522,7 +553,7 @@ async function test(name, fn) {
       const msgs = lines.map((l) => JSON.parse(l));
       const list = msgs.find((m) => m.id === 1);
       const call = msgs.find((m) => m.id === 2);
-      assert.strictEqual(list.result.tools.length, 6, 'discovery survives no-house');
+      assert.strictEqual(list.result.tools.length, 7, 'discovery survives no-house');
       assert.strictEqual(call.result.isError, true);
       assert.ok(call.result.content[0].text.includes('no house configured'));
     });

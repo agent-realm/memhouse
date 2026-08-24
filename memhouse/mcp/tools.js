@@ -67,7 +67,9 @@ const TOOLS = [
     },
   },
   {
-    name: 'timeline',
+    // Named for the `/mem:sessions` skill, not for the query it runs: a person who learns
+    // this house through one surface should not have to relearn the vocabulary on another.
+    name: 'sessions',
     description:
       'Sessions nearest a moment in time — an ISO date/datetime, or another session\'s last activity ' +
       '(pass session_id). With neither, the most recent sessions. Chronological context for a search hit: ' +
@@ -109,7 +111,8 @@ const TOOLS = [
     },
   },
   {
-    name: 'stats',
+    // `/mem:status` on the plugin surface. Same answer, same name.
+    name: 'status',
     description:
       'The house at a glance: session and message counts per editor, per member, per machine, ' +
       'with the freshest activity of each. Use it to see whose memory is here and how current it is.',
@@ -117,6 +120,24 @@ const TOOLS = [
     async handler() {
       requireHouse();
       return qy().statsHouse();
+    },
+  },
+  {
+    // `/mem:users`. The people questions a client would otherwise have to write SQL for —
+    // and get wrong, because the honest answer depends on which sections the credential
+    // was actually allowed to read.
+    name: 'users',
+    description:
+      'The people around this house: which members and machines write INTO it, which other houses this ' +
+      'credential can read (each one shared with you — query it as <house>.messages), and who has been ' +
+      'given a read window into this one. Best-effort by design: a section this credential may not read ' +
+      'comes back null with its reason in `unavailable`. Never read an absent section as an absence — ' +
+      'shared_with drawn from the share ledger cannot see a grant an admin issued by hand, and says so ' +
+      'in shares_source.',
+    inputSchema: { type: 'object', properties: {} },
+    async handler() {
+      requireHouse();
+      return qy().usersHouse();
     },
   },
   {
