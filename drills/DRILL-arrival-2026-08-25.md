@@ -133,14 +133,35 @@ consistent with the invite-path work that landed in 0.14.0.
 
 ## What changed as a result
 
-Nothing yet. Recorded here first, per the protocol: fixing mid-drill would have meant this
-record described a build that never existed.
+Nothing during the drill, per the protocol. Afterwards, D1 and D2 were fixed and the
+scenario re-run as a simulation on the same venue — installed as one member with a live
+shipper, then a second invite forced over it.
 
-Suggested order, worst first:
+**D1 — fixed.** `--force` now names the credential it is replacing, keeps the old file,
+and says the house survives:
 
-1. **D1** — `install` should back up the file it replaces, the way `relocate` does, and
-   name the house being displaced before `--force` proceeds.
-2. **D2** — repointing must restart the shipper, or `status` must notice that the running
-   daemon's house differs from the configured one and say so.
-3. **D3/D4** — the install summary should point at `/mem:house` rather than listing skill
-   names, and should not imply a dashboard that was never started.
+```
+• replacing the credential for simA@http://localhost:8123 (house 'simA')
+  previous config kept at /tmp/simhome/env.pre-install — it holds that password
+  that house still exists; nothing was deleted from the server.
+```
+
+The backup is mode `600` and `MEMHOUSE_USER='simA'` is recoverable from it. The refusal
+without `--force` is unchanged.
+
+**D2 — fixed.** Repointing now stops a shipper that was pointed at the old house:
+
+```
+✓ stopped the shipper (pid 58724) — it was pointed at the old house
+  start it against the new one:  memhouse start
+```
+
+`status` afterwards reads `• shipper: not running` — honest — rather than the green
+`✓ shipper: running` beside `✓ house: empty` that made the drill's arriver believe it was
+working. Restarted, the first pass shipped **146 sessions, 0 skipped**, where the drill saw
+*0 shipped, 145 skipped*. The displaced house was untouched throughout.
+
+**D3, D4, D5 — open.** The install summary still lists skill names rather than pointing at
+`/mem:house`, still implies a dashboard it did not start, and still presents rotation as
+advice. All three are wording on a surface a newcomer reads first, and none was fixed here
+because none of them was measured by this simulation.

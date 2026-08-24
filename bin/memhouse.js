@@ -1147,13 +1147,28 @@ async function cmdInstall({ interactive }) {
   // shipper or an installed service is still pointed at the old house, and rewriting the
   // file orphans it with no error anywhere.
   const prior = readEnvFile();
-  if (prior.MEMHOUSE_URL && flags.force !== true
-      && (!sameEndpoint(prior.MEMHOUSE_URL, cfg.url) || (prior.MEMHOUSE_DB && prior.MEMHOUSE_DB !== cfg.db))) {
+  const displaces = Boolean(prior.MEMHOUSE_URL)
+    && (!sameEndpoint(prior.MEMHOUSE_URL, cfg.url) || (prior.MEMHOUSE_DB && prior.MEMHOUSE_DB !== cfg.db));
+  if (displaces && flags.force !== true) {
     console.log(bad(`${ENV_FILE} already points at ${prior.MEMHOUSE_URL} / ${prior.MEMHOUSE_DB || '?'}`));
     console.log(`  installing over it would leave any running shipper or service on the old house.`);
     console.log('     memhouse setup --url … --db …     (move deliberately)');
     console.log('     memhouse install --force …        (overwrite anyway)');
     return 1;
+  }
+  if (displaces) {
+    // --force used to overwrite the file and say nothing. The password inside is often
+    // the ONLY copy — an invited member cannot mint another — so replacing it silently
+    // orphans a house that still exists and still costs disk. A drill found this by
+    // taking the hatch the refusal above offers: the arriver read "already exists",
+    // reached for --force, and destroyed a working credential without being told.
+    // `relocate` already keeps the old file for the same operation; so does this now.
+    console.log(warn(`replacing the credential for ${prior.MEMHOUSE_USER || '?'}@${prior.MEMHOUSE_URL} (house '${prior.MEMHOUSE_DB || '?'}')`));
+    try {
+      fs.copyFileSync(ENV_FILE, `${ENV_FILE}.pre-install`);
+      console.log(`  previous config kept at ${`${ENV_FILE}.pre-install`.replace(os.homedir(), '~')} — it holds that password`);
+    } catch { console.log(warn('  could not keep a copy of the previous config')); }
+    console.log('  that house still exists; nothing was deleted from the server.');
   }
   // Preflight WITHOUT selecting the house — on a fresh standalone ClickHouse the
   // database doesn't exist yet, and selecting it would fail before we can create it.
@@ -1228,6 +1243,28 @@ async function cmdInstall({ interactive }) {
   // config file behind every failed attempt, and the next command reads it as truth.
   writeEnvFile(cfg);
   console.log(ok(`config written: ${ENV_FILE}`));
+  // A running shipper holds the OLD house until it restarts. It does not fail — it keeps
+  // shipping, to the house that is no longer configured, while `status` shows a green
+  // "shipper: running" beside a green "house: empty" and the new house stays at zero.
+  // Measured in a drill: 145 sessions "skipped" into a house holding no rows, because the
+  // skip predicate was still being evaluated against the old one. `relocate` restarts
+  // deliberately for exactly this reason; install used to do nothing at all.
+  if (displaces && shipperHealth().running) {
+    const st = (() => { try { return require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { return null; } })();
+    const viaService = String(shipperHealth().via || '').startsWith('service');
+    if (viaService && st) {
+      const cmd = st.kind === 'systemd'
+        ? ['systemctl', ['--user', 'restart', 'memhouse-shipper']]
+        : ['launchctl', ['kickstart', '-k', `gui/${process.getuid()}/com.memhouse.shipper`]];
+      const r = spawnSync(cmd[0], cmd[1], { stdio: 'pipe', encoding: 'utf-8' });
+      console.log(r.status === 0 ? ok('shipper restarted against the new house')
+        : warn('restart the shipper yourself, or it keeps writing to the old house:  memhouse service restart'));
+    } else {
+      const pid = pidOf('shipper');
+      if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`stopped the shipper (pid ${pid}) — it was pointed at the old house`)); } catch { /* raced */ } }
+      console.log('  start it against the new one:  memhouse start');
+    }
+  }
   // Mint this machine's identity here rather than leaving it to whatever runs first.
   // Installing is the moment a machine joins the member's rooms, and the id is what every
   // later `WHERE host = …` depends on — so it is worth naming once, out loud, at the point
