@@ -18,6 +18,9 @@ const rooms = require('../memhouse/house/house');
 const envfile = require('../memhouse/envfile');
 const { consumeSecretChunk } = require('../memhouse/secret-input');
 const { capabilitiesFrom, parseGrantLine } = require('../memhouse/capabilities');
+const flagspec = require('../memhouse/flags');
+const fs = require('fs');
+const path = require('path');
 
 let passed = 0;
 function test(name, fn) {
@@ -905,6 +908,56 @@ test('grant lines parse into privileges and scope', () => {
   assert.deepStrictEqual(g.privs, ['CREATE USER', 'DROP USER']);
   assert.strictEqual(g.scope, '*');
   assert.strictEqual(parseGrantLine('not a grant'), null);
+});
+
+// ── option validation ───────────────────────────────────────────────────────────
+// Unknown flags used to be accepted and ignored, which is quiet in the good case and
+// dangerous in the bad one: `--dryrun` for `--dry-run` ran the migration for real.
+test('a typo is refused, and names the flag it probably meant', () => {
+  assert.deepStrictEqual(flagspec.unknownFlags('whoami', { admina: true }), ['admina']);
+  assert.strictEqual(flagspec.suggestFlag('admina', flagspec.allowedFlags('whoami')), 'admin');
+  assert.strictEqual(flagspec.suggestFlag('dryrun', flagspec.allowedFlags('migrate')), 'dry-run');
+  assert.strictEqual(flagspec.suggestFlag('adop', flagspec.allowedFlags('invite')), 'adopt');
+});
+
+test('a flag that resembles nothing gets no invented suggestion', () => {
+  assert.strictEqual(flagspec.suggestFlag('completelyunrelated', flagspec.allowedFlags('whoami')), null);
+});
+
+test('global flags are accepted everywhere', () => {
+  for (const cmd of Object.keys(flagspec.COMMAND_FLAGS)) {
+    assert.deepStrictEqual(
+      flagspec.unknownFlags(cmd === 'null' ? null : cmd, { json: true, yes: true }), [],
+      `${cmd} rejected a global flag`);
+  }
+});
+
+test('an unknown COMMAND is left to dispatch, not reported as a flag problem', () => {
+  assert.deepStrictEqual(flagspec.unknownFlags('nosuchcommand', { whatever: true }), []);
+});
+
+test('every declared flag is accepted by its own command', () => {
+  for (const [cmd, list] of Object.entries(flagspec.COMMAND_FLAGS)) {
+    const f = {};
+    for (const x of list) f[x] = true;
+    assert.deepStrictEqual(flagspec.unknownFlags(cmd === 'null' ? null : cmd, f), [],
+      `${cmd} rejected one of its own flags`);
+  }
+});
+
+// The table is a promise about the CLI, so hold it against the CLI. A flag added to the
+// code and not to the table would otherwise be refused the first time a user typed it.
+test('every flag the CLI reads is declared for some command', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'memhouse.js'), 'utf-8');
+  const used = new Set();
+  for (const m of src.matchAll(/flags\['([a-z-]+)'\]/g)) used.add(m[1]);
+  // (?<!\/) so `memhouse/flags.js` in a comment is not mistaken for a flag named `js`.
+  for (const m of src.matchAll(/(?<!\/)\bflags\.([a-zA-Z][a-zA-Z0-9]*)/g)) used.add(m[1]);
+  const declared = new Set(flagspec.GLOBAL_FLAGS);
+  for (const list of Object.values(flagspec.COMMAND_FLAGS)) for (const f of list) declared.add(f);
+  const missing = [...used].filter((f) => !declared.has(f));
+  assert.deepStrictEqual(missing, [],
+    `these flags are read by bin/memhouse.js but declared for no command: ${missing.join(', ')}`);
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);

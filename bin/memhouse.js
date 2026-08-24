@@ -30,6 +30,7 @@ const {
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
 const { consumeSecretChunk } = require(path.join(REPO_ROOT, 'memhouse', 'secret-input'));
 const { capabilitiesFrom } = require(path.join(REPO_ROOT, 'memhouse', 'capabilities'));
+const { unknownFlags, allowedFlags, suggestFlag } = require(path.join(REPO_ROOT, 'memhouse', 'flags'));
 
 const HOME_DIR = process.env.MEMHOUSE_HOME || path.join(os.homedir(), '.memhouse');
 const ENV_FILE = path.join(HOME_DIR, 'env');
@@ -52,6 +53,22 @@ for (let i = 0; i < rest.length; i++) {
   } else positional.push(a);
 }
 const JSON_OUT = flags.json === true;
+
+// Unknown flags stop the run — see memhouse/flags.js for why a shrug is not enough.
+(() => {
+  const bad = unknownFlags(cmd, flags);
+  if (!bad.length) return;
+  const allowed = allowedFlags(cmd);
+  for (const f of bad) {
+    const hint = suggestFlag(f, allowed);
+    console.error(`memhouse: unknown option --${f}${hint ? `  (did you mean --${hint}?)` : ''}`);
+  }
+  const list = [...allowed].sort().map((f) => `--${f}`).join(' ');
+  console.error(`  ${cmd || 'memhouse'} takes: ${list || '(no options)'}`);
+  console.error('  Nothing ran. A flag that is ignored rather than refused is how a --dry-run typo');
+  console.error('  becomes a real migration.');
+  process.exit(2);
+})();
 
 let ONBOARDING = false;
 let _inviteFileToShred = null;
@@ -2957,6 +2974,9 @@ async function cmdWhoami() {
   const au = process.env.MEMHOUSE_ADMIN_USER;
   const ap = process.env.MEMHOUSE_ADMIN_PASSWORD;
   const usingAdminEnv = wantAdmin && au;
+  // `--admin` with nothing to resolve is worth saying out loud. Silently falling back to
+  // the member credential makes `whoami --admin` and `whoami` print the same thing, and
+  // the reader is left thinking they asked a question the program never heard.
   const who = usingAdminEnv ? { ...cfg, user: au, password: ap || '' } : cfg;
 
   if (!who.url || !who.user) {
@@ -2990,10 +3010,16 @@ async function cmdWhoami() {
     console.log(JSON.stringify({
       ok: true, url: who.url, user: server, db: who.db, source, role, ...caps,
       grants_readable: grants.length > 0,
+      admin_env_present: Boolean(au),
+      admin_requested: wantAdmin,
     }, null, 2));
     return 0;
   }
   console.log(ok(`${server} at ${who.url} — ${role}`));
+  if (wantAdmin && !usingAdminEnv) {
+    console.log(warn('--admin asked for MEMHOUSE_ADMIN_USER / MEMHOUSE_ADMIN_PASSWORD; neither is set,'));
+    console.log('  so this is the ordinary configured credential.');
+  }
   console.log(`  credential from: ${source}`);
   console.log(`  house:           ${who.db || '(none set)'}`);
   console.log(`  may create users:    ${caps.canMintUsers ? 'yes' : 'no'}`);
