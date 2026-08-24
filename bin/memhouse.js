@@ -399,6 +399,10 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              resume <session-id>  print the command that reopens that session in its editor
              sessions-query       print the session rollup SQL for this credential
              start | stop |       shipper loop + dashboard as background daemons
+             share <user>         let someone read this house (--only project=… |
+                                  session=… | host=… | source=… | folder=… | since=… |
+                                  until=… scopes it with row policies; --revoke
+                                  withdraws and drops them; --list shows who)
              whoami               which credential is in play, and what it may do
                                   (--json; --admin reads MEMHOUSE_ADMIN_*)
              status               daemons, connection, counts, freshness (--json)
@@ -2980,6 +2984,200 @@ async function cmdNightly() {
  * can ask "is there an admin credential in this environment?" without inventing a place
  * to store one. Nothing here prints or persists a password.
  */
+/**
+ * `memhouse share <user> [--only <scope>] [--revoke]`, `memhouse share --list`
+ *
+ * Full share is a GRANT and nothing else. Partial share adds one ROW POLICY per room, so
+ * the grantee reads only what the scope allows. See memhouse/share.js for why there is
+ * deliberately no permissive catch-all policy, and what was measured to rule it out.
+ */
+async function cmdShare() {
+  const share = require(path.join(REPO_ROOT, 'memhouse', 'share'));
+  const cfg = requireConfig(resolveConfig(), 'share');
+  if (!cfg.user) return 1;
+  const db = cfg.db;
+
+  // Statements, not reads: this is the one command in the read family that writes, so it
+  // does NOT go through the readonly connection the skills use.
+  const run = (sql) => ch(cfg, sql, { database: db });
+  const rows = (sql) => chRows(cfg, sql, { database: db });
+
+  // List only when asked for it, or when given nothing at all. `--only` or `--revoke`
+  // without a user is a mistake worth naming, not a reason to print the list.
+  const bare = !positional[0] && flags.only === undefined && flags.revoke === undefined;
+  if (flags.list === true || bare) return shareList(cfg, share);
+
+  const user = positional[0];
+  if (!user) { console.log(bad('usage: memhouse share <user> [--only <scope>] [--revoke]  |  memhouse share --list')); return 2; }
+  // The name is spliced into GRANT/REVOKE/CREATE POLICY unquoted, so it must be a name
+  // ClickHouse accepts bare. Refuse rather than quote: a handle you cannot type plainly
+  // is one that will be gotten wrong somewhere else.
+  try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(user, 'user'); }
+  catch (e) { console.log(bad(e.message)); return 1; }
+  if (user === cfg.user) { console.log(bad(`'${user}' is you — you already read your own house`)); return 1; }
+
+  // ── revoke ────────────────────────────────────────────────────────────────────
+  // Dropping the grant alone leaves the policies behind, and they are NOT inert: a later
+  // re-share silently inherits the old scope. Measured — a re-granted user saw 2,121 rows
+  // instead of the whole house, with nothing on any surface explaining the filter.
+  if (flags.revoke === true) {
+    let dropped = 0;
+    for (const room of ROOM_TYPES) {
+      try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${room}`); dropped++; }
+      catch (e) { console.log(warn(`could not drop the policy on ${room}: ${e.message.split('\n')[0]}`)); }
+    }
+    try { await run(`REVOKE SELECT ON ${db}.* FROM ${user}`); }
+    catch (e) { console.log(bad(`could not revoke: ${netReason(e)}`)); return 1; }
+    await houseMeta(cfg, `share:${user}`, `revoked ${new Date().toISOString().slice(0, 10)}`);
+    console.log(ok(`revoked '${user}' — SELECT withdrawn and ${dropped} row polic${dropped === 1 ? 'y' : 'ies'} dropped`));
+    console.log('  Dropping the grant alone would have left the policies, and a later re-share');
+    console.log('  would have quietly reinherited this scope.');
+    return 0;
+  }
+
+  // ── grant ─────────────────────────────────────────────────────────────────────
+  const scopeRaw = flags.only !== undefined && flags.only !== true ? String(flags.only) : null;
+  let scope = null;
+  if (flags.only === true) { console.log(bad('--only needs a scope, e.g. --only project=memhouse or --only session=<id>')); return 1; }
+  if (scopeRaw) {
+    try { scope = share.parseScope(scopeRaw); } catch (e) { console.log(bad(e.message)); return 1; }
+  }
+
+  // A partial share only behaves if readers WITHOUT a policy still see every row. That is
+  // `users_without_row_policies_can_read_rows`, which is server config rather than a query
+  // setting and whose default has moved between versions — so measure it, do not assume.
+  if (scope) {
+    const verdict = await probePermissive(cfg, db);
+    if (verdict === false) {
+      console.log(bad('this ClickHouse hides every row from readers that have no row policy.'));
+      console.log('  Scoping one person would blindfold everyone else you have already shared with,');
+      console.log('  and yourself. Nothing was changed. Ask whoever runs the server to set:');
+      console.log('     <access_control_improvements>');
+      console.log('       <users_without_row_policies_can_read_rows>true</users_without_row_policies_can_read_rows>');
+      console.log('     </access_control_improvements>');
+      console.log('  A full share (no --only) is unaffected and works today.');
+      return 1;
+    }
+    if (verdict === null) console.log(warn('could not verify how this server treats readers without a policy — continuing'));
+  }
+
+  try { await run(`GRANT SELECT ON ${db}.* TO ${user}`); }
+  catch (e) { console.log(bad(`could not grant: ${netReason(e)}`)); return 1; }
+
+  if (!scope) {
+    // A previous partial share leaves policies that would still be filtering. Widening to
+    // a full share has to clear them or "full" is a lie.
+    let cleared = 0;
+    for (const room of ROOM_TYPES) {
+      try {
+        const had = await rows(`SELECT count() AS n FROM system.row_policies WHERE database = ${sqlStr(db)} AND short_name = ${sqlStr(share.policyName(user, room))}`);
+        if (Number(had[0] && had[0].n) > 0) { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${room}`); cleared++; }
+      } catch { /* nothing to clear */ }
+    }
+    await houseMeta(cfg, `share:${user}`, `granted ${new Date().toISOString().slice(0, 10)}`);
+    console.log(ok(`'${user}' can now read every session in '${db}'`));
+    if (cleared) console.log(warn(`cleared ${cleared} row polic${cleared === 1 ? 'y' : 'ies'} from an earlier scoped share — this is now a FULL share`));
+    console.log(`  Everything: every project, machine and editor, including anything ever pasted`);
+    console.log(`  into a session. Narrow it with:  memhouse share ${user} --only project=<name>`);
+    console.log(`  Withdraw with:                   memhouse share ${user} --revoke`);
+    return 0;
+  }
+
+  for (const room of ROOM_TYPES) {
+    const pred = share.scopePredicate(scope, room, sqlStr);
+    try { await run(`CREATE ROW POLICY OR REPLACE ${share.policyName(user, room)} ON ${db}.${room} USING ${pred} TO ${user}`); }
+    catch (e) {
+      console.log(bad(`could not scope ${room}: ${e.message.split('\n')[0]}`));
+      console.log('  PARTIALLY APPLIED — a share filtered on some rooms and not others leaks.');
+      console.log(`  Put it right with:  memhouse share ${user} --revoke`);
+      return 1;
+    }
+  }
+  await houseMeta(cfg, `share:${user}`, `granted ${new Date().toISOString().slice(0, 10)} scope=${scopeRaw}`);
+
+  // Say what they can actually reach, counted through their own filter.
+  console.log(ok(`'${user}' can read '${db}' where ${scopeRaw}`));
+  for (const room of ROOM_TYPES) {
+    try {
+      const r = await rows(`SELECT count() AS n FROM ${room} WHERE ${share.scopePredicate(scope, room, sqlStr)}`);
+      const all = await rows(`SELECT count() AS n FROM ${room}`);
+      console.log(`  ${room.padEnd(11)} ${r[0].n} of ${all[0].n} rows`);
+    } catch { /* counting is a courtesy */ }
+  }
+  console.log(`  Widen to everything:  memhouse share ${user}`);
+  console.log(`  Withdraw:             memhouse share ${user} --revoke`);
+  return 0;
+}
+
+/**
+ * Does a reader with NO row policy still see rows once a policy exists on the table?
+ *
+ * Server config decides this and SQL cannot read it, so measure: put a deny-everything
+ * policy on a scratch table aimed at everyone EXCEPT us, then read it. Rows back means
+ * unpolicied readers are unaffected. Needs no second account and no admin.
+ *
+ * true = permissive, false = restrictive, null = could not tell.
+ */
+async function probePermissive(cfg, db) {
+  const t = `_mh_probe_${process.pid}`;
+  const run = (sql) => ch(cfg, sql, { database: db });
+  try {
+    await run(`CREATE TABLE IF NOT EXISTS ${t} (x UInt8) ENGINE = MergeTree ORDER BY x`);
+    await run(`INSERT INTO ${t} VALUES (1)`, { settings: { async_insert: 0 } });
+    await run(`CREATE ROW POLICY OR REPLACE ${t}_p ON ${db}.${t} USING 0 TO ALL EXCEPT ${cfg.user}`);
+    const r = await chRows(cfg, `SELECT count() AS n FROM ${t}`, { database: db });
+    return Number(r[0] && r[0].n) === 1;
+  } catch { return null; } finally {
+    try { await run(`DROP ROW POLICY IF EXISTS ${t}_p ON ${db}.${t}`); } catch { /* nothing staged */ }
+    try { await run(`DROP TABLE IF EXISTS ${t} SYNC`); } catch { /* nothing staged */ }
+  }
+}
+
+/** Who can read this house, what they are scoped to, and any policy left behind. */
+async function shareList(cfg, share) {
+  const db = cfg.db;
+  let recorded = [];
+  try {
+    recorded = await chRows(cfg, "SELECT substring(key, 7) AS user, value AS state FROM house_meta FINAL WHERE key LIKE 'share:%' ORDER BY key", { database: db });
+  } catch { /* unreadable record */ }
+  let policies = [];
+  try {
+    policies = await chRows(cfg, `SELECT short_name, table, select_filter FROM system.row_policies WHERE database = ${sqlStr(db)} ORDER BY short_name`, { database: db });
+  } catch { /* members may not read system.row_policies on every server */ }
+
+  if (!recorded.length && !policies.length) {
+    console.log(ok(`nobody has been granted a read of '${db}'`));
+    console.log(`  Share it with:  memhouse share <user> [--only project=<name>]`);
+    return 0;
+  }
+  console.log(`  who can read '${db}' — memhouse's own record, not ClickHouse's grant table:`);
+  for (const r of recorded) {
+    const scoped = policies.filter((p) => String(p.short_name).startsWith(`mh_share_${r.user}_`));
+    console.log(`    ${String(r.user).padEnd(16)} ${r.state}${scoped.length ? '' : (String(r.state).startsWith('granted') ? '  (full house)' : '')}`);
+    for (const p of scoped) console.log(`      ${String(p.table).padEnd(11)} ${p.select_filter}`);
+  }
+  console.log('  A grant made by hand does not appear here — this list is what memhouse recorded.');
+
+  // Policies whose room is gone: dropping a house does NOT drop its policies, and a house
+  // later recreated under the same name silently inherits them.
+  const orphans = [];
+  for (const p of policies) {
+    try {
+      const e = await chRows(cfg, `SELECT count() AS n FROM system.tables WHERE database = ${sqlStr(db)} AND name = ${sqlStr(p.table)}`, { database: db });
+      if (Number(e[0] && e[0].n) === 0) orphans.push(p);
+    } catch { /* cannot tell */ }
+  }
+  if (orphans.length) {
+    console.log('');
+    console.log(warn(`${orphans.length} row polic${orphans.length === 1 ? 'y points' : 'ies point'} at a table that no longer exists:`));
+    for (const p of orphans) console.log(`    ${p.short_name} ON ${db}.${p.table}`);
+    console.log('  Dropping a table or a house leaves its policies behind, and recreating one under');
+    console.log('  the same name silently reinherits them. Drop them:');
+    for (const p of orphans) console.log(`     DROP ROW POLICY ${p.short_name} ON ${db}.${p.table}`);
+  }
+  return 0;
+}
+
 async function cmdWhoami() {
   const cfg = resolveConfig();
   const wantAdmin = flags.admin === true;
@@ -3562,6 +3760,7 @@ async function cmdUninstall() {
       }
       break;
     case 'reset': process.exitCode = await cmdReset(); break;
+    case 'share': process.exitCode = await cmdShare(); break;
     case 'whoami': process.exitCode = await cmdWhoami(); break;
     case 'invite': process.exitCode = await cmdInvite(); break;
     case 'passwd': process.exitCode = await cmdPasswd(); break;

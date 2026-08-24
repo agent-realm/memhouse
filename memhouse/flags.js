@@ -15,6 +15,7 @@ const GLOBAL_FLAGS = ['json', 'yes', 'help', 'version'];
 const COMMAND_FLAGS = {
   null: [], help: [], version: [],
   whoami: ['admin'],
+  share: ['only', 'revoke', 'list'],
   discover: [], stats: [], stop: [], doctor: [], 'sessions-query': [],
   status: [], start: [],
   onboard: ['url', 'user', 'password', 'db', 'port', 'no-ship', 'target', 'house-port', 'tag', 'local'],
