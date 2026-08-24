@@ -16,6 +16,11 @@
 const assert = require('assert');
 const rooms = require('../memhouse/house/house');
 const envfile = require('../memhouse/envfile');
+const { consumeSecretChunk } = require('../memhouse/secret-input');
+const { capabilitiesFrom, parseGrantLine } = require('../memhouse/capabilities');
+const flagspec = require('../memhouse/flags');
+const fs = require('fs');
+const path = require('path');
 
 let passed = 0;
 function test(name, fn) {
@@ -794,6 +799,165 @@ test('isDurableMetaKey keeps facts, drops per-host heartbeats', () => {
   assert.ok(relocate.isDurableMetaKey('share:alice'));
   assert.ok(!relocate.isDurableMetaKey('last_ship:polat'), 'the new shipper rewrites its own heartbeat');
   assert.ok(!relocate.isDurableMetaKey('client_version'));
+});
+
+// ── hidden input: a chunk is not a keystroke ────────────────────────────────────
+// A raw-mode 'data' event carries however many characters arrived at once. The handler
+// used to compare the WHOLE chunk against a terminator, which is right while someone
+// types (one char per event) and hangs forever the moment they paste — the exact way a
+// password out of a manager arrives. Caught by driving the real prompt through a pty.
+test('a pasted line resolves, and the terminator is not part of the secret', () => {
+  const r = consumeSecretChunk('', 'hunter2\r');
+  assert.strictEqual(r.done, true);
+  assert.strictEqual(r.buf, 'hunter2');
+});
+
+test('typing one character at a time still accumulates', () => {
+  let buf = '';
+  for (const ch of 'pw') { const r = consumeSecretChunk(buf, ch); buf = r.buf; assert.strictEqual(r.done, false); }
+  assert.strictEqual(buf, 'pw');
+  assert.strictEqual(consumeSecretChunk(buf, '\r').done, true);
+});
+
+test('LF and EOT terminate as well as CR', () => {
+  assert.strictEqual(consumeSecretChunk('', 'a\n').done, true);
+  assert.strictEqual(consumeSecretChunk('', 'a\u0004').done, true);
+});
+
+test('anything after the terminator is discarded, not leaked into the secret', () => {
+  const r = consumeSecretChunk('', 'secret\rleftover');
+  assert.strictEqual(r.buf, 'secret');
+  assert.strictEqual(r.done, true);
+});
+
+test('backspace erases inside a chunk', () => {
+  assert.strictEqual(consumeSecretChunk('', 'abX\u007fc').buf, 'abc');
+});
+
+test('ctrl-C is reported, never swallowed into the secret', () => {
+  const r = consumeSecretChunk('ab', 'c\u0003d');
+  assert.strictEqual(r.interrupted, true);
+  assert.strictEqual(r.done, false);
+});
+
+test('an empty chunk changes nothing', () => {
+  const r = consumeSecretChunk('abc', '');
+  assert.deepStrictEqual([r.buf, r.done, r.interrupted], ['abc', false, false]);
+});
+
+// ── who may provision: scope is the whole point ─────────────────────────────────
+// The probe this replaces asked `SELECT 1 FROM system.users`, which every member passes
+// because every member holds SHOW USERS — so every member was told it could manage
+// users, then died at CREATE DATABASE. The replacement must read grants, and it must
+// respect SCOPE: a member holds CREATE DATABASE inside `ON <their-db>.*`, which mints
+// nothing.
+const MEMBER = [
+  'GRANT SHOW USERS ON *.* TO m',
+  'GRANT REMOTE ON *.* TO m',
+  'GRANT ALTER USER ON m TO m',
+  'GRANT CHECK, SHOW, SELECT, INSERT, ALTER, CREATE DATABASE, CREATE TABLE, DROP DATABASE ON m.* TO m WITH GRANT OPTION',
+  'GRANT SELECT ON friend.* TO m',
+];
+const SUPERUSER = [
+  'GRANT SOURCES ON *.* TO s WITH GRANT OPTION',
+  'GRANT CHECK, SHOW, SELECT, INSERT, ALTER, CREATE, DROP, ROLE ADMIN, SYSTEM ON *.* TO s WITH GRANT OPTION',
+  'GRANT CREATE USER, ALTER USER, DROP USER, IMPERSONATE ON * TO s WITH GRANT OPTION',
+];
+
+test('a member cannot provision, however many privileges it holds on its own house', () => {
+  const c = capabilitiesFrom(MEMBER);
+  assert.strictEqual(c.canProvision, false);
+  assert.strictEqual(c.canMintHouses, false, 'CREATE DATABASE ON m.* is not server-wide');
+  assert.strictEqual(c.canMintUsers, false);
+  assert.strictEqual(c.canReadEveryHouse, false, 'SELECT ON friend.* is one share, not the server');
+});
+
+test('SHOW USERS alone never reads as administrator — the original bug', () => {
+  const c = capabilitiesFrom(['GRANT SHOW USERS ON *.* TO m']);
+  assert.strictEqual(c.canSeeUsers, true);
+  assert.strictEqual(c.canProvision, false);
+});
+
+test('a superuser is recognised through the umbrella spellings', () => {
+  const c = capabilitiesFrom(SUPERUSER);
+  assert.strictEqual(c.canProvision, true, 'bare CREATE on *.* plus CREATE USER on *');
+  assert.strictEqual(c.isSuperuser, true);
+});
+
+test('ACCESS MANAGEMENT stands in for CREATE USER', () => {
+  const c = capabilitiesFrom([
+    'GRANT ACCESS MANAGEMENT ON *.* TO a',
+    'GRANT CREATE DATABASE ON *.* TO a',
+  ]);
+  assert.strictEqual(c.canProvision, true);
+});
+
+test('GRANT ALL on *.* provisions; GRANT ALL on one house does not', () => {
+  assert.strictEqual(capabilitiesFrom(['GRANT ALL ON *.* TO a', 'GRANT CREATE USER ON * TO a']).canProvision, true);
+  assert.strictEqual(capabilitiesFrom(['GRANT ALL ON just_mine.* TO a']).canProvision, false);
+});
+
+test('unreadable grants are not an administrator', () => {
+  const c = capabilitiesFrom([]);
+  assert.strictEqual(c.canProvision, false);
+  assert.strictEqual(c.isSuperuser, false);
+});
+
+test('grant lines parse into privileges and scope', () => {
+  const g = parseGrantLine('GRANT CREATE USER, DROP USER ON * TO bob WITH GRANT OPTION');
+  assert.deepStrictEqual(g.privs, ['CREATE USER', 'DROP USER']);
+  assert.strictEqual(g.scope, '*');
+  assert.strictEqual(parseGrantLine('not a grant'), null);
+});
+
+// ── option validation ───────────────────────────────────────────────────────────
+// Unknown flags used to be accepted and ignored, which is quiet in the good case and
+// dangerous in the bad one: `--dryrun` for `--dry-run` ran the migration for real.
+test('a typo is refused, and names the flag it probably meant', () => {
+  assert.deepStrictEqual(flagspec.unknownFlags('whoami', { admina: true }), ['admina']);
+  assert.strictEqual(flagspec.suggestFlag('admina', flagspec.allowedFlags('whoami')), 'admin');
+  assert.strictEqual(flagspec.suggestFlag('dryrun', flagspec.allowedFlags('migrate')), 'dry-run');
+  assert.strictEqual(flagspec.suggestFlag('adop', flagspec.allowedFlags('invite')), 'adopt');
+});
+
+test('a flag that resembles nothing gets no invented suggestion', () => {
+  assert.strictEqual(flagspec.suggestFlag('completelyunrelated', flagspec.allowedFlags('whoami')), null);
+});
+
+test('global flags are accepted everywhere', () => {
+  for (const cmd of Object.keys(flagspec.COMMAND_FLAGS)) {
+    assert.deepStrictEqual(
+      flagspec.unknownFlags(cmd === 'null' ? null : cmd, { json: true, yes: true }), [],
+      `${cmd} rejected a global flag`);
+  }
+});
+
+test('an unknown COMMAND is left to dispatch, not reported as a flag problem', () => {
+  assert.deepStrictEqual(flagspec.unknownFlags('nosuchcommand', { whatever: true }), []);
+});
+
+test('every declared flag is accepted by its own command', () => {
+  for (const [cmd, list] of Object.entries(flagspec.COMMAND_FLAGS)) {
+    const f = {};
+    for (const x of list) f[x] = true;
+    assert.deepStrictEqual(flagspec.unknownFlags(cmd === 'null' ? null : cmd, f), [],
+      `${cmd} rejected one of its own flags`);
+  }
+});
+
+// The table is a promise about the CLI, so hold it against the CLI. A flag added to the
+// code and not to the table would otherwise be refused the first time a user typed it.
+test('every flag the CLI reads is declared for some command', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'memhouse.js'), 'utf-8');
+  const used = new Set();
+  for (const m of src.matchAll(/flags\['([a-z-]+)'\]/g)) used.add(m[1]);
+  // (?<!\/) so `memhouse/flags.js` in a comment is not mistaken for a flag named `js`.
+  for (const m of src.matchAll(/(?<!\/)\bflags\.([a-zA-Z][a-zA-Z0-9]*)/g)) used.add(m[1]);
+  const declared = new Set(flagspec.GLOBAL_FLAGS);
+  for (const list of Object.values(flagspec.COMMAND_FLAGS)) for (const f of list) declared.add(f);
+  const missing = [...used].filter((f) => !declared.has(f));
+  assert.deepStrictEqual(missing, [],
+    `these flags are read by bin/memhouse.js but declared for no command: ${missing.join(', ')}`);
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);

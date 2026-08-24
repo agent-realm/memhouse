@@ -66,6 +66,129 @@ Windsurf, Copilot, Goose, and the rest read the same memory back.
   for HTTP) — 61 checks total, including a real-client pass driven by Claude
   Code itself via `--mcp-config`, and a three-round adversarial review
   (stderr scrub, HTTP route guard, stdio flow control) ending CLEAN.
+- **The `/mem:*` skillset is five skills and one shared reference, down from ten.** Four
+  of the ten had to explain in their own descriptions why they were not their siblings
+  (`/mem:ask`: *"this is the retrieve-and-answer skill; /mem:search is find-the-session"*),
+  which is what a wrong boundary looks like — an agent asked "what did I decide about X"
+  had to choose between `ask`, `search`, `sessions` and `sql`, all of which run SQL over
+  three tables and read rows. They are now `/mem:recall` (find and answer), `/mem:sql`
+  (numbers), `/mem:house` (what this is, whether it works, who can read it), `/mem:access`
+  (invite and share) and `/mem:admin`.
+- **The data model is written once, in `reference/HOUSE.md`.** The connection recipe was
+  copy-pasted into eight skills, and the epoch filter — omit it and a real house
+  over-counts by 34% — was explained in `ask/SKILL.md` and nowhere else, so `/mem:sql`,
+  the skill most likely to produce a number someone acts on, never mentioned it. Schema,
+  connection, the three traps and the known measurement gaps now live in one file every
+  skill points at. 11,388 words became 5,854.
+- **`/mem:recall` restores a name the canon already carried** (`TERMINOLOGY.md`: `memorecall`
+  retired in favour of `/mem:recall`, 2026-07-29). Its description carries every trigger
+  phrase the three skills it replaces had, so auto-triggering does not narrow.
+- **The CLI no longer advertises a directory as a skill.** `plugins` listed
+  `readdirSync(skills/)` verbatim; a `reference/` directory beside them would have been
+  announced as `/mem:reference`. It now lists only directories carrying a `SKILL.md`.
+
+## 0.16.0 — 2026-08-24
+
+- **An unknown option now stops the run instead of being ignored.** Anything `--like-this`
+  was accepted and silently discarded, which is quiet in the good case and dangerous in the
+  bad one: `--dryrun` for `--dry-run` did not warn, it ran the migration; `--adopt` on a
+  build predating that guard was swallowed and the invite proceeded into somebody else's
+  house. Each command now declares what it takes (`memhouse/flags.js`), anything else exits
+  2 naming the flag it probably meant, and a test holds the table against the flags
+  `bin/memhouse.js` actually reads so the two cannot drift apart.
+- **`whoami --admin` says when it fell back.** With no `MEMHOUSE_ADMIN_USER` set it
+  resolved the ordinary credential and printed exactly what bare `whoami` prints, so the
+  reader could not tell whether the flag had been heard. It now says so, and `--json`
+  carries `admin_requested` / `admin_env_present`.
+
+## 0.15.0 — 2026-08-24
+
+- **`memhouse whoami` — which credential is in play, and what it may actually do.**
+  `/mem:admin` was deciding that in prose: read some files, run `SHOW GRANTS`, grep the
+  result. Reasoning about privileges in a skill gets it subtly wrong, and wrong here is
+  either "you cannot" to an administrator or "go ahead" to a member about to hit
+  ACCESS_DENIED. One command now answers it, with `--json` for agents and `--admin` to
+  resolve `MEMHOUSE_ADMIN_USER`/`MEMHOUSE_ADMIN_PASSWORD`. It prints no password.
+- **Capability detection is scope-aware, and shared.** The check `invite` shipped in
+  0.14.0 matched privilege names anywhere in the grants — but a privilege only means what
+  its scope allows, and an ordinary member holds `CREATE DATABASE` inside `ON <their-db>.*`,
+  which mints no new house at all. It read as false only because the users half also
+  failed; a member with any user-management grant would have been misjudged. The parser
+  moves to `memhouse/capabilities.js`, keeps each grant's scope, and counts a privilege
+  only when it is granted server-wide. `invite` and `whoami` share it, so they cannot
+  disagree about who is an administrator.
+- **`/mem:admin` stops inventing places to keep an admin password.** It looked in
+  `~/.memhouse/admin.env` — a file memhouse never creates, and a bad idea besides: a
+  member credential owns one database, an admin credential owns the server, and any
+  process running as that user can read a file. The skill now calls `whoami --admin`,
+  and when there is no administrator it says so and shows how to supply one for the
+  current shell (`read -rs`, off the screen and out of history) rather than suggesting
+  anything be written to disk.
+
+## 0.14.0 — 2026-08-24
+
+- **`memhouse invite` tells you the truth about your own credential, and gives a
+  non-admin a way forward.** The capability probe was `SELECT 1 FROM system.users` — but
+  since 0.12.6 every member is granted `SHOW USERS`, so *every member passed it*, was told
+  "it can manage users on this house", and then failed three steps later at
+  `CREATE DATABASE` with a raw `ACCESS_DENIED`. The probe now reads the credential's actual
+  grants and requires real provisioning rights. When they are absent it says plainly that
+  this is a member account, why a member cannot mint accounts, and splits the two cases:
+  if you run the ClickHouse, pass the admin credential you created it with; if someone else
+  runs it, you cannot invite at all — so `memhouse invite <name> --print-sql` now prints the
+  exact statements to hand to whoever administers the server, contacting nothing.
+- **An unreachable `--url` says so, instead of blaming your privileges.** The capability
+  probe folded connection failure into the grants read, so a typo'd host, a down tunnel, or
+  a loopback-bound `deploy --local` house all came back as "you are only a member" — sending
+  the reader after a privilege they already held. Reachability is now checked first and
+  reported as itself, naming the loopback case explicitly.
+- **`--admin-password` is prompted for when omitted.** Passing it as a flag puts the
+  password in the process list for the life of the request and in shell history unless the
+  caller remembered a leading space. With a TTY it is now asked for instead; without one
+  (an agent, CI) the old refusal stands, since there is nobody to ask. memhouse still never
+  stores an admin credential — that stays deliberate.
+
+
+## 0.13.0 — 2026-08-23
+
+- **New skill: `/mem:admin`.** Every other skill is scoped to the caller's own house, so
+  anything server-wide — list the accounts, size the houses, provision or remove a member,
+  grant and revoke, read mutations and running queries — had no surface and became
+  hand-written SQL with an admin password pasted into a chat that memhouse then archives.
+  The skill resolves an admin credential from `MEMHOUSE_ADMIN_USER`/`MEMHOUSE_ADMIN_PASSWORD`,
+  then `~/.memhouse/admin.env`, then the ordinary member credential (which IS the superuser
+  on a `deploy --local` house), and *proves* it by checking `SHOW GRANTS` for
+  `ACCESS MANAGEMENT` / `CREATE USER` / `CREATE DATABASE ON *.*` rather than assuming —
+  `SHOW USERS` alone is a member privilege and does not qualify. Without one it refuses and
+  names the two ways to supply it; it never asks for a password in the conversation and
+  never echoes one. Destructive statements must be preceded by a SELECT of the same
+  predicate, a report of what is actually there, and an explicit yes for that object.
+
+- **`/mem:invite` now finishes the handoff.** The skill provisioned the member and
+  stopped, leaving the user to work out where the credential file went and to compose the
+  covering message themselves. It now runs the invite from the user's downloads directory
+  (the file has to be attached to something, and it must never be left in a git repo —
+  `invite-*.env` is gitignored here but not in whatever checkout they were standing in),
+  confirms the file is present at mode 600 without ever printing its contents, reports
+  whether the house was actually fresh, and drafts the message to send the invitee —
+  install steps, that the file is a password, rotation on install, and `ship --full` when
+  they are replacing an existing credential. It also handles the new occupied-house
+  refusal: report the row count and let the user choose, never reach for `--adopt` on its
+  own.
+
+- **`memhouse invite` refuses a house that already holds someone's messages.** The house
+  is created with `CREATE DATABASE IF NOT EXISTS`, so inviting a name whose database
+  already existed silently *adopted* it — identical output to a fresh house, and the
+  invitee landed on top of rows that were not theirs. Found the hard way: an invite meant
+  for one person was sent to another, who shipped 3,733 messages under it; re-inviting the
+  intended person reported success and would have handed over the first person's memory,
+  with nothing on any surface saying so. Invite now counts the target's `messages` first
+  and refuses with the row count, the writer count and three ways forward (different
+  handle, different `--db`, or `--adopt` when sharing the house is the actual intent).
+  Read-only and best-effort, so an admin that cannot count rows can still invite. The
+  *user* half already behaved: `adminBootstrap` refuses an existing ClickHouse user, so an
+  invite has never rotated a sitting member's password.
+
 - **`memhouse relocate` needs `GRANT REMOTE ON *.*`, and no bootstrap granted it.**
   relocate runs from the *destination*, pulling the source over `remoteSecure()` — a
   table function ClickHouse gates behind its own access type, separate from `GRANT ALL`

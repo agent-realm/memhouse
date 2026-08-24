@@ -115,8 +115,8 @@ memhouse plugins install claude
 ```
 
 Installs the memhouse plugin into `<claude-config>/skills/mem`, which loads next
-session as `mem@skills-dir` and exposes `/mem:ask`, `/mem:search`, `/mem:sessions`,
-`/mem:share`, `/mem:sql`, `/mem:status` and `/mem:users`. They read the connection from
+session as `mem@skills-dir` and exposes `/mem:recall`, `/mem:sql`, `/mem:house`,
+`/mem:access` and `/mem:admin`. They read the connection from
 `$MEMHOUSE_HOME/env` (default
 `~/.memhouse/env`), with exported `MEMHOUSE_*` vars taking precedence, and refuse to run
 rather than guessing a URL when neither is set. `memhouse plugins list` shows what is

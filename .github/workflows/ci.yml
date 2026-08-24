@@ -59,6 +59,11 @@ jobs:
           echo "ClickHouse never answered" >&2; exit 1
       - name: origin matrix (data guarantees)
         run: misc/origin-matrix.sh ci http://localhost:8123 memhouse_root cipw
+      # The invite capability gate. Every case is a defect that shipped or nearly did,
+      # and none is reachable from a unit test or a developer's own machine — where the
+      # local credential is a member either way, so "refused" always looks correct.
+      - name: invite matrix (who may provision)
+        run: misc/invite-matrix.sh http://localhost:8123 memhouse_root cipw
       - name: headless e2e — install, ship, status
         run: |
           set -euo pipefail

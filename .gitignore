@@ -70,6 +70,12 @@ web_modules/
 .env.*
 !.env.example
 
+# `memhouse invite <name>` writes invite-<name>.env into the CURRENT directory, and
+# that file IS a password. Run from a checkout it lands here — matching neither `.env`
+# (an exact name) nor `.env.*` (which needs a suffix AFTER the dot), so it was
+# committable. Caught by running invite from the repo root.
+invite-*.env
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
