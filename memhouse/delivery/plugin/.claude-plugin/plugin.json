@@ -1,6 +1,6 @@
 {
   "name": "mem",
-  "description": "Conversation memory for AI agents over the memhouse typed ClickHouse store: ask, search, browse, analyze, check, share, and invite across all 17 supported editors and machines, plus administration of the ClickHouse behind it. Skills install as /mem:hello, /mem:ask, /mem:search, /mem:sessions, /mem:share, /mem:invite, /mem:sql, /mem:status, /mem:users, and /mem:admin.",
+  "description": "Conversation memory for AI agents over the memhouse typed ClickHouse store: recall past sessions and answer from them, run analytics, check the house, bring people in, and administer the server. Skills install as /mem:recall, /mem:sql, /mem:house, /mem:access, and /mem:admin.",
   "version": "0.16.0",
   "author": {
     "name": "Ramazan Polat"

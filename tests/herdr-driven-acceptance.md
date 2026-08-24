@@ -266,7 +266,7 @@ herdr pane run <pane2> "cd <worktree> && claude"
 herdr pane wait-output <pane2> --match ">" --timeout 60000
 ```
 
-The skills are **`/mem:hello`, `/mem:ask`, `/mem:search`, `/mem:sessions`, `/mem:share`, `/mem:invite`, `/mem:sql`, `/mem:status`, `/mem:users`**. The colon
+The skills are **`/mem:recall`, `/mem:sql`, `/mem:house`, `/mem:access`, `/mem:admin`**. The colon
 namespace is earned by being installed as a plugin — `<config>/skills/mem/` holding
 `.claude-plugin/plugin.json` plus `skills/{ask,hello,invite,search,sessions,share,sql,status,users}/`. If autocomplete offers
 `/mem-search` with a hyphen instead, the installer regressed to copying loose skill
@@ -275,13 +275,13 @@ installed tree before reporting anything else about the skills.
 
 The `/mem:*` namespace once belonged to *memory-house* (removed 2026-08-09) and was
 reclaimed by memhouse in 0.10.0 when the plugin was renamed from `memhouse` to `mem` —
-so `/mem:ask` resolving is now CORRECT, and a leftover `/memhouse:*` resolving beside it
+so `/mem:recall` resolving is now CORRECT, and a leftover `/memhouse:*` resolving beside it
 means the installer failed to remove the pre-0.10 plugin directory.
 
 Drive them by sending text, as a human would:
 
 ```bash
-herdr pane send-text <pane2> "/mem:search clickhouse"
+herdr pane send-text <pane2> "/mem:recall clickhouse"
 herdr pane send-keys  <pane2> Enter
 herdr pane wait-output <pane2> --match "sessions|hits|no results" --regex --timeout 120000
 herdr pane read <pane2> --source visible --lines 60

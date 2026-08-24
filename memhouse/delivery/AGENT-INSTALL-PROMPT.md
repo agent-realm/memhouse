@@ -58,8 +58,8 @@ mark. Then tell them:
 
 - where the dashboard is (`http://localhost:{{PORT}}`) and that `memhouse start` runs it
 - that `memhouse search <terms>` searches every past session from every editor
-- that `memhouse plugins install claude` gives their agents /mem:ask, /mem:search,
-  /mem:sessions, /mem:share, /mem:sql, /mem:status, /mem:users — offer to run it
+- that `memhouse plugins install claude` gives their agents /mem:recall, /mem:sql,
+  /mem:house, /mem:access and /mem:admin — offer to run it
 - that you can now search their history yourself, and offer to try one query
 
 If `doctor` reports a failure, say which line failed and what memhouse suggested. Do not

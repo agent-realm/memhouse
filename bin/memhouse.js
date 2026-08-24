@@ -716,7 +716,7 @@ ${rooms.trim()}
 -- The whole database, WITH GRANT OPTION. ALL on your own house reaches nothing outside it
 -- — the database is the boundary — and it lets the shipper create and evolve its own
 -- tables. The grant option makes the member the real owner: they can hand on any of their
--- own data (\`/mem:share\` still opens only a read-only SELECT window, but the owner is not
+-- own data (\`/mem:access\` still opens only a read-only SELECT window, but the owner is not
 -- boxed into read-only sharing of their own house). Scoped to this db, and no CREATE USER
 -- rides with it — a member still cannot mint accounts or reach another house.
 GRANT ALL ON ${db}.* TO ${member} WITH GRANT OPTION;
@@ -731,9 +731,9 @@ GRANT ALL ON ${db}.* TO ${member} WITH GRANT OPTION;
 -- trust model, flagged by \`memhouse doctor\`, and re-asserted on every \`ship --ensure-schema\`.
 GRANT ALTER USER ON ${member} TO ${member};
 
--- See the OTHER members, read-only. SHOW USERS lets \`/mem:users\` list who is on this
+-- See the OTHER members, read-only. SHOW USERS lets \`/mem:house\` list who is on this
 -- ClickHouse (names only — no passwords, no data) so a member can find who to share with.
--- It grants no read of anyone's rows; reading a housemate's memory still needs /mem:share.
+-- It grants no read of anyone's rows; reading a housemate's memory still needs /mem:access.
 GRANT SHOW USERS ON *.* TO ${member};
 
 -- \`memhouse relocate\` runs FROM the destination, pulling the source over remoteSecure() —
@@ -808,7 +808,7 @@ async function adminBootstrap(cfg, admin) {
       password = generatePassword();
       // For a local install the password must be SHOWN — it is the user's only copy. For
       // an invite it must NOT: the caller writes it to the credential file, and printing
-      // it here would land it in the terminal and, via /mem:invite, in a transcript
+      // it here would land it in the terminal and, via /mem:access, in a transcript
       // memhouse itself ships. admin.quiet is the invite path.
       if (!admin.quiet) {
         console.log('');
@@ -839,7 +839,7 @@ async function adminBootstrap(cfg, admin) {
   // create and evolve the rooms (--ensure-schema below).
   try {
     // ALL, WITH GRANT OPTION: the database is theirs, so they may do anything with their
-    // own data AND hand any of it on. /mem:share still opens only a read-only window (it
+    // own data AND hand any of it on. /mem:access still opens only a read-only window (it
     // grants SELECT), but the owner is not boxed into read-only sharing of their own house.
     // Scoped to their db: the grant option reaches nothing outside it, and no CREATE USER
     // comes with it, so a member still cannot mint accounts or touch another house.
@@ -851,12 +851,12 @@ async function adminBootstrap(cfg, admin) {
     // self-rotation.
     try { await q(`GRANT ALTER USER ON ${admin.member} TO ${admin.member}`, { database: '' }); }
     catch { /* admin without access-management: passwd stays admin-assisted for this member */ }
-    // See the OTHER members, read-only: SHOW USERS lets `/mem:users` list who is on this
+    // See the OTHER members, read-only: SHOW USERS lets `/mem:house` list who is on this
     // ClickHouse (names only — no passwords, no data) so a member can find who to share
-    // with. It grants no read of anyone's rows; that still needs an explicit /mem:share.
+    // with. It grants no read of anyone's rows; that still needs an explicit /mem:access.
     // Best-effort like ALTER USER above — an admin without access-management just skips it.
     try { await q(`GRANT SHOW USERS ON *.* TO ${admin.member}`, { database: '' }); }
-    catch { /* no access-management: /mem:users section 4 stays admin-only for this member */ }
+    catch { /* no access-management: /mem:house section 4 stays admin-only for this member */ }
     // REMOTE: `memhouse relocate` runs FROM the destination, pulling the source over
     // remoteSecure() — a table function ClickHouse gates behind its own access type,
     // separate from any GRANT ALL on a database. Without it every relocate a member runs
@@ -1286,9 +1286,9 @@ function printGettingStarted(cfg) {
   console.log('     memhouse start                  dashboard + shipper loop (background daemons)');
   console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
   console.log('     memhouse service install        or: ship at login, no terminal needed');
-  console.log('     memhouse plugins install claude give your agents /mem:hello, /mem:ask, /mem:search,');
-  console.log('                                     /mem:sessions, /mem:share, /mem:invite, /mem:sql,');
-  console.log('                                     /mem:status, /mem:users');
+  console.log('     memhouse plugins install claude give your agents /mem:house, /mem:recall,');
+  console.log('                                     /mem:recall, /mem:access, /mem:sql,');
+  console.log('                                     /mem:house');
   console.log('     memhouse search <terms>         find a past conversation right now');
   console.log('     memhouse doctor                 every line a check mark = healthy');
   console.log('  The house keeps shipping as you work; nothing else to do.');
@@ -1348,7 +1348,7 @@ async function cmdOnboard() {
   const targets = claudeTargets();
   if (targets.length) {
     console.log('');
-    console.log(`Claude Code skills: ${fs.readdirSync(path.join(DELIVERY, 'plugin', 'skills')).map((n) => `/mem:${n}`).join(', ')}`);
+    console.log(`Claude Code skills: ${skillNames().map((n) => `/mem:${n}`).join(', ')}`);
     const chosen = await chooseTargets(targets, 'Install into');
     for (const t of chosen) console.log(ok(`installed skills into ${short(installPluginInto(t.dir))}`));
     if (chosen.length) console.log('  they load next time that Claude Code starts');
@@ -2245,7 +2245,7 @@ async function cmdUpdate() {
 // A pilot rarely has one. `~/.claude` is the stock install, `CLAUDE_CONFIG_DIR` points at
 // whichever they are running right now, and Kommander-style playbooks live under
 // `~/.claude-playbooks/<name>[/playbook]`, each a complete config directory with its own
-// skills/. Installing into one and calling it done leaves /mem:search missing from
+// skills/. Installing into one and calling it done leaves /mem:recall missing from
 // every other instance the pilot uses — silently, because a missing skill does not announce
 // itself, it just never appears.
 //
@@ -2281,7 +2281,7 @@ const isPluginInstalled = (dir) => fs.existsSync(path.join(dir, PLUGIN_MARK));
 
 function installPluginInto(dir) {
   // The plugin was named `memhouse` until 0.10.0. A leftover copy under the old name
-  // would load BESIDE the new one — /memhouse:search and /mem:search both resolving, one
+  // would load BESIDE the new one — /memhouse:search and /mem:recall both resolving, one
   // of them stale forever. Remove it only when it is provably OURS (it carries our
   // plugin.json); a directory someone else named `memhouse` is not ours to delete.
   const legacy = path.join(dir, 'skills', 'memhouse');
@@ -2297,7 +2297,7 @@ function installPluginInto(dir) {
   const dst = path.join(dir, 'skills', 'mem');
   // REPLACE, not overlay. cpSync over an existing install refreshes the skills and
   // leaves anything else standing — a machine that once had a build with extra skills
-  // kept offering /mem:replay and /mem:status forever, stale, beside the real ones.
+  // kept offering /mem:replay and /mem:house forever, stale, beside the real ones.
   // Ownership means OUR MANIFEST, checked by name — "any plugin.json" would have deleted
   // an unrelated plugin that happened to pick the same directory name.
   const dstManifest = path.join(dst, '.claude-plugin', 'plugin.json');
@@ -2351,15 +2351,27 @@ async function chooseTargets(targets, verb) {
 //
 // Claude Code gives a skill a namespace only when it arrives inside a plugin: a directory
 // under <config>/skills/ containing .claude-plugin/plugin.json loads as
-// `mem@skills-dir` and its skills become /mem:search, /mem:sessions,
+// `mem@skills-dir` and its skills become /mem:recall,
 // /mem:sql. Copied in flat, the same three files register as unrelated top-level
 // skills named after their folders — which is what this used to do, while plugin.json sat
 // unread one directory away claiming the colon form. Driving a real Claude Code is what
-// caught it: `/mem:search` answered `Unknown command. Did you mean /memhouse-search?`
+// caught it: `/mem:recall` answered `Unknown command. Did you mean /memhouse-search?`
+/**
+ * The plugin's skills, by name. A directory is a skill only when it carries a SKILL.md —
+ * `plugin/` also holds `reference/`, shared prose the skills point at, and listing that
+ * as `/mem:reference` would advertise a command nobody can run.
+ */
+function skillNames() {
+  const dir = path.join(DELIVERY, 'plugin', 'skills');
+  try {
+    return fs.readdirSync(dir).filter((n) => fs.existsSync(path.join(dir, n, 'SKILL.md'))).sort();
+  } catch { return []; }
+}
+
 async function cmdPlugins() {
   const sub = positional[0] || 'list';
   const pluginSrc = path.join(DELIVERY, 'plugin');
-  const names = fs.readdirSync(path.join(pluginSrc, 'skills'));
+  const names = skillNames();   // SKILL.md-bearing dirs only — `reference/` is not a skill
   const invocations = names.map((n) => `/mem:${n}`).join(', ');
   // --target overrides the discovery rather than joining it: given one, that is the only
   // directory touched.
@@ -2949,7 +2961,7 @@ async function cmdNightly() {
  * machine's config is never touched and nothing local ships. The server half is exactly
  * adminBootstrap (create user if absent, create house, GRANT ALL + SELECT WITH GRANT
  * OPTION, async pin, then verify AS THE MEMBER), so an invited member is
- * indistinguishable from one minted by a local admin install — /mem:share works for
+ * indistinguishable from one minted by a local admin install — /mem:access works for
  * them on day one.
  *
  * The output file IS a credential. The header says so, the handoff advice names safe
@@ -3238,7 +3250,7 @@ async function cmdInvite() {
   console.log(`  hand it to ${name} over a channel you trust (croc, a password manager — not chat).`);
   console.log(`  they run:   memhouse install --env ${path.basename(out)}`);
   console.log(`  then they should rotate the password you now both know:  memhouse passwd`);
-  console.log(`  once installed, they are a member — sharing works both ways: /mem:share ${name}`);
+  console.log(`  once installed, they are a member — sharing works both ways: /mem:access ${name}`);
   return 0;
 }
 

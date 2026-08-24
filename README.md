@@ -99,7 +99,7 @@ an agent — so an agent can install its own memory unattended.
 config directory on the machine** — `~/.claude`, whatever `CLAUDE_CONFIG_DIR` points
 at, and each Kommander-style playbook under `~/.claude-playbooks/`. All are selected by
 default; answer with numbers to narrow it, or pass `--target DIR` for exactly one.
-Installing into just the default config is how `/mem:search` ends up missing from
+Installing into just the default config is how `/mem:recall` ends up missing from
 the instance you actually work in, silently, since a missing skill never announces
 itself.
 

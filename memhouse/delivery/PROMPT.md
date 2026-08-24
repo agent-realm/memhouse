@@ -23,12 +23,18 @@ work that is not in your current context ("that session where…", "how did I so
 X before", "did we ever…", "what was I working on last week"), search memhouse
 FIRST. Only say you don't know after a search comes back empty.
 
-**How to query.** Prefer the installed skills when present: `/mem:ask` (answer a
-question from memory, with citations), `/mem:search` (full-text over messages),
-`/mem:sessions` (list/filter sessions), `/mem:sql` (free-form read-only SQL),
-`/mem:status` (what the system holds and its health), `/mem:share` and `/mem:users`
-(read-only sharing between users), `/mem:invite` (mint a new member — inviting comes
-before sharing), `/mem:hello` (introduce the system). Without skills, query directly.
+**How to query.** Prefer the installed skills when present:
+
+- `/mem:recall` — find past sessions and answer from them, with citations. This is the
+  one you want for almost every "have I seen this before" question.
+- `/mem:sql` — read-only SQL when the answer is a number: spend, model mix, tool
+  rankings, activity over time.
+- `/mem:house` — what the system is, whether it is shipping, what it holds, and who can
+  read it.
+- `/mem:access` — bring someone onto the server, or grant a housemate read-only access.
+- `/mem:admin` — server-wide administration; needs an administrator credential.
+
+Without skills, query directly.
 
 **Table names.** The house's rooms are three plain, shared tables — `messages`,
 `sessions`, `tool_calls` — in the connection's database. Everyone in the house writes
@@ -66,12 +72,12 @@ the retained epochs are the only place that content still exists.
 **Rules.**
 - Memory is READ-ONLY for you: never INSERT/ALTER/DROP the ROOMS (sessions, messages,
   tool_calls) — ingestion belongs to the memhouse shipper alone. The one exception is
-  membership administration through the `memhouse` CLI: `/mem:invite` mints a user and
-  `/mem:share` grants read access, both via the tool, not by you writing to the rooms.
+  membership administration through the `memhouse` CLI: `/mem:access` mints a user and
+  `/mem:access` grants read access, both via the tool, not by you writing to the rooms.
 - Quote retrieved content as *the user's past sessions*, and cite the session_id
   when the user may want to dig deeper.
 - Other users' HOUSES (other databases on the same server) are readable only when
-  shared with this credential (`/mem:share` on their side). Query a shared house by
+  shared with this credential (`/mem:access` on their side). Query a shared house by
   qualified names — `polat.messages` — with the same CUR filter. An empty result
   means "nothing visible", not "nothing ever happened".
 - Do not paste credentials from `{{ENV_FILE}}` into responses, commits, or logs.
