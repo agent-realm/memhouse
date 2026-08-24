@@ -6,6 +6,29 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **`memhouse share` — partial sharing, by row policy.** A share used to be all or
+  nothing: `GRANT SELECT` on the whole house, every project and machine and anything ever
+  pasted into a session. Now `memhouse share <user> --only project=memhouse` (or
+  `session=`, `folder=`, `host=`, `source=`, `since=`, `until=`, combined with commas)
+  scopes it with a row policy per room. `--list` shows who reads what, `--revoke`
+  withdraws.
+
+  It is a command rather than SQL in a skill because partial sharing has four quiet
+  failure modes. A permissive catch-all policy for everyone else is the obvious design and
+  **fails open** — measured, a second scoped user saw all 22,500 rows instead of their
+  1,860, because policies are OR'd. ClickHouse answers this properly through
+  `users_without_row_policies_can_read_rows`, but that is server config with a default
+  that has moved between versions, so the command *measures* the behaviour on a scratch
+  table before creating the first policy and refuses on a server that would blindfold the
+  readers you already have. Revoking now drops the policies — leaving them made a later
+  re-share silently reinherit the old scope. Widening a scoped share to a full one clears
+  them and says so. All three rooms move together or the share leaks, and `sessions` is
+  scoped on `created_at` because it has no `ts`.
+
+  `memhouse share --list` also reports policies pointing at a table that no longer exists:
+  dropping a table or a house leaves its policies behind, and one recreated under the same
+  name silently inherits them.
+
 - **The `/mem:*` skillset is five skills and one shared reference, down from ten.** Four
   of the ten had to explain in their own descriptions why they were not their siblings
   (`/mem:ask`: *"this is the retrieve-and-answer skill; /mem:search is find-the-session"*),

@@ -19,6 +19,7 @@ const envfile = require('../memhouse/envfile');
 const { consumeSecretChunk } = require('../memhouse/secret-input');
 const { capabilitiesFrom, parseGrantLine } = require('../memhouse/capabilities');
 const flagspec = require('../memhouse/flags');
+const share = require('../memhouse/share');
 const fs = require('fs');
 const path = require('path');
 
@@ -958,6 +959,54 @@ test('every flag the CLI reads is declared for some command', () => {
   const missing = [...used].filter((f) => !declared.has(f));
   assert.deepStrictEqual(missing, [],
     `these flags are read by bin/memhouse.js but declared for no command: ${missing.join(', ')}`);
+});
+
+// ── partial sharing: scopes and policy names ────────────────────────────────────
+// A scoped share is three row policies that must agree. The rooms do not all spell time
+// the same way — `sessions` has no `ts`, its clock is `created_at` — so one literal
+// predicate cannot span them, and a mismatch means a share that filters messages while
+// leaking tool_calls.
+const q = (x) => "'" + String(x).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+
+test('time scopes use each room\'s own clock column', () => {
+  const sc = share.parseScope('since=2026-08-01');
+  assert.match(share.scopePredicate(sc, 'messages', q), /^ts >=/);
+  assert.match(share.scopePredicate(sc, 'tool_calls', q), /^ts >=/);
+  assert.match(share.scopePredicate(sc, 'sessions', q), /^created_at >=/,
+    'sessions has no ts column — a shared predicate would fail or filter nothing');
+});
+
+test('identity scopes are identical across all three rooms', () => {
+  for (const key of ['session', 'project', 'folder', 'host', 'source']) {
+    const sc = share.parseScope(`${key}=x`);
+    const preds = ['sessions', 'messages', 'tool_calls'].map((r) => share.scopePredicate(sc, r, q));
+    assert.strictEqual(new Set(preds).size, 1, `${key} rendered differently per room`);
+  }
+});
+
+test('scopes combine with AND', () => {
+  const sc = share.parseScope('project=memhouse,since=2026-08-01');
+  assert.strictEqual(share.scopePredicate(sc, 'messages', q),
+    "project = 'memhouse' AND ts >= parseDateTimeBestEffort('2026-08-01')");
+});
+
+test('values are escaped, never spliced raw', () => {
+  const sc = share.parseScope("project=O'Reilly");
+  assert.ok(share.scopePredicate(sc, 'messages', q).includes("O\\'Reilly"),
+    'a quote in a project name must not break out of the literal');
+});
+
+test('an unknown or malformed scope is refused, and says what is valid', () => {
+  assert.throws(() => share.parseScope('nope=1'), /unknown scope key/);
+  assert.throws(() => share.parseScope('project'), /not <key>=<value>/);
+  assert.throws(() => share.parseScope(''), /nothing to scope on/);
+});
+
+test('policy names are predictable, so revoke finds every room', () => {
+  const names = ['sessions', 'messages', 'tool_calls'].map((r) => share.policyName('alice', r));
+  assert.deepStrictEqual(names,
+    ['mh_share_alice_sessions', 'mh_share_alice_messages', 'mh_share_alice_tool_calls']);
+  assert.strictEqual(new Set(names).size, 3);
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);

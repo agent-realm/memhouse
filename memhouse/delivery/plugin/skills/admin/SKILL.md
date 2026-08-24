@@ -85,6 +85,32 @@ Reads worth knowing — reach for these before inventing SQL:
 | running queries | `SELECT query_id, user, elapsed, formatReadableSize(memory_usage) AS mem, substring(query,1,120) AS q FROM system.processes` |
 | unfinished mutations | `SELECT database, table, mutation_id, command, parts_to_do, latest_fail_reason FROM system.mutations WHERE NOT is_done` |
 
+### Sharing on someone else's behalf
+
+A member runs `memhouse share` against their own house. An administrator can do it for
+any house — useful when someone asks you to open theirs, or to audit what is open:
+
+```bash
+# what every house has opened up, server-wide
+adm "SELECT database, short_name, table, select_filter FROM system.row_policies ORDER BY database, short_name FORMAT PrettyCompact" "?readonly=1"
+adm "SHOW GRANTS FOR <user>"
+```
+
+To change a share, prefer running the member's own command with their credential over
+hand-writing SQL — the CLI handles the four traps (a permissive catch-all failing open,
+the server setting that decides whether unpolicied readers see anything, revoke leaving
+policies behind, and the three rooms drifting out of step). When you must do it as
+admin, mirror exactly what the CLI does: a policy on **all three rooms** or none, and
+`DROP ROW POLICY` on every room when withdrawing.
+
+**Dropping a house does not drop its row policies.** They persist as orphans, and a house
+later recreated under the same name silently inherits them. After any `DROP DATABASE`:
+
+```bash
+adm "SELECT short_name, table FROM system.row_policies WHERE database = '<db>'"
+# then DROP ROW POLICY <name> ON <db>.<table> for each
+```
+
 **Prefer a CLI verb over raw SQL wherever one exists.** `memhouse invite <name> --url …`
 provisions a member correctly — right grants, right pin, refuses a house that already
 holds someone's messages — and it takes `--admin-user`/`--admin-password`, so it works
