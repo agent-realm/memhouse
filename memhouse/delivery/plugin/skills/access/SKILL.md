@@ -1,0 +1,158 @@
+---
+name: access
+description: Bring someone onto this memhouse ClickHouse, or let them read your house — mint a new member with their own house and the env file their install needs, grant a housemate read-only access to yours, list who can currently read it, or revoke. Use when the user says "invite X", "add X to memhouse", "get my friend set up", "share my memory with X", "let X see my sessions", "who can read my memory", "stop sharing with X". Inviting comes BEFORE sharing — you can only grant a user who already exists. Read-only by construction on the sharing side: a share can never let anyone write to or delete your memory.
+user-invocable: true
+argument-hint: "invite <name> | share <name> | list | revoke <name>"
+allowed-tools: Bash
+---
+
+# /mem:access — who exists, and who may read
+
+Two things that look alike and are not:
+
+- **Invite** mints a ClickHouse *user* and their own *house*. Needs an administrator.
+- **Share** grants an existing user `SELECT` on *your* house. You can do this yourself.
+
+**Read `../reference/HOUSE.md` first** for the connection block. One rule dominates
+everything here: **a password must never enter this conversation.** memhouse ships this
+transcript into the house, and the archive is insert-only — a credential pasted here
+cannot be withdrawn.
+
+---
+
+## Invite — mint a member
+
+This runs the `memhouse invite` CLI and nothing else. **Do not hand-run `CREATE USER` /
+`GRANT` with an admin password substituted into a command** — that burns the credential
+into a transcript on disk. The CLI passes it to one process and never echoes it.
+
+1. **Check the binary:** `command -v memhouse`. Absent → tell the user to
+   `npm install -g memhouse`. There is no in-skill fallback, on purpose.
+
+2. **Gather only two things:** the invitee's **name** (validate `[A-Za-z][A-Za-z0-9_]*`;
+   refuse otherwise) and the **URL the invitee will reach the house at** — not localhost,
+   which is *their* machine. Do not ask about an admin credential yet; the next step
+   usually needs none. Default is their own house — omit `--db`.
+
+3. **Run it from the directory the file should land in** (step 4), bare first:
+
+   ```
+   memhouse invite <name> --url <url> [--db <shared-house>]
+   ```
+
+   `invite written: …` → go to step 4, and no secret touched this conversation.
+
+   Otherwise read WHICH refusal came back; they need different answers.
+
+   **"cannot reach `<url>` …"** — the address, not your privileges. A `deploy --local`
+   house is loopback-bound on purpose, so no LAN address reaches it and no invitee could
+   either. Ask for the address the invitee will actually use; do not retry with a guess.
+
+   **"`<user>` is a MEMBER of this ClickHouse, not an administrator"** — inviting needs
+   `CREATE USER` and `CREATE DATABASE`, which a member deliberately lacks. Ask which case
+   applies rather than assuming:
+
+   - *They run the ClickHouse.* Hand them the line to run THEMSELVES, with
+     `--admin-password` left OFF so it is prompted for — out of the process list and out
+     of shell history:
+
+     ```
+     memhouse invite <name> --url <url> --admin-user <admin>
+     ```
+
+     **You cannot run that yourself:** the prompt needs a TTY your Bash tool lacks, so it
+     refuses with "no TTY to prompt on" — and the fix is NOT `--admin-password`, which
+     would put the credential in this transcript.
+
+   - *Someone else runs it.* They cannot invite, and no flag changes that. Print the
+     statements for whoever administers the server — this contacts nothing:
+
+     ```
+     memhouse invite <name> --url <url> --print-sql
+     ```
+
+   **"house `<db>` already exists and holds N messages"** — STOP. That house is somebody's
+   memory. Report the row and writer counts and let the user choose: a different handle,
+   a different `--db`, or `--adopt` if sharing that house is genuinely the intent. Never
+   pass `--adopt` on your own initiative.
+
+4. **Put the file where they can attach it.** The CLI writes `invite-<name>.env` into the
+   current directory and the user sends it by hand — so run from their downloads
+   directory, or move it there. **Never leave it in a git repo.** Confirm it is present
+   and mode `600`, state the full path, and **never print its contents**.
+
+5. **Say whether the house was fresh** — `SELECT count() FROM <db>.messages` reads 0 for a
+   new one. Second line of defence behind step 3's refusal.
+
+6. **Write the message the user will send.** They are handing over a file plus an
+   explanation; compose it rather than making them. Cover: what memhouse is in a sentence
+   or two; that the attached file IS a password (do not forward, do not paste in chat);
+   `npm install -g memhouse` (Node 24+) then `memhouse install --env invite-<name>.env`;
+   that install offers to change the password to one only they know and then deletes the
+   file, so they should say yes; `memhouse onboard` to start shipping and `memhouse status`
+   to check; and that their house is theirs alone unless they run `/mem:access share`.
+
+   If they are REPLACING an existing credential, add `memhouse ship --full` — a plain
+   incremental pass skips sessions the new house has no record of, so their history would
+   not follow them.
+
+---
+
+## Share — let someone read your house
+
+Sharing is a plain `GRANT SELECT`, and you hold the grant option on your own database, so
+no admin is involved. **The statement path is NOT `readonly=1`** — drop that parameter for
+these three statements only, and keep it everywhere else.
+
+**Validate `<user>` FIRST** against `[A-Za-z][A-Za-z0-9_]*` and use only the validated
+token — in the `GRANT`, the `REVOKE`, and the record alike. A name you cannot type bare is
+a name that will be gotten wrong everywhere else.
+
+**`<db>` is the LIVE `$MEMHOUSE_DB`.** Print it with the connection
+(`echo "house: $MEMHOUSE_DB"`) and use THAT everywhere. Driven live, a model once filled
+`<db>` with a literal fallback while the real house was named differently — advice the
+admin would have run against the wrong database.
+
+```sql
+GRANT SELECT ON <db>.* TO <user>
+```
+
+Then record it, because **a member cannot read `system.grants`** (measured:
+`Not enough privileges … SELECT ON system.grants`), so this record is what the list form
+reads back:
+
+```sql
+INSERT INTO house_meta (key, value) VALUES ('share:<user>', 'granted <YYYY-MM-DD>')
+```
+
+**List** — memhouse's own record, not ClickHouse's grant table. Present it as such, and
+say a grant made by hand would not appear:
+
+```sql
+SELECT substring(key, 7) AS user, value AS state
+FROM house_meta FINAL WHERE key LIKE 'share:%' ORDER BY key
+```
+
+**Revoke** — the mirror, and update the record so the list stays honest:
+
+```sql
+REVOKE SELECT ON <db>.* FROM <user>
+```
+```sql
+INSERT INTO house_meta (key, value) VALUES ('share:<user>', 'revoked <YYYY-MM-DD>')
+```
+
+**Tell the user what a share actually exposes:** every session in the house, from every
+machine and project, including anything ever pasted into one. It is whole-database and
+all-or-nothing — there is no per-project or per-session share, and no way to withhold a
+session before granting. If that is not what they want, the answer is a separate house,
+not a narrower grant.
+
+---
+
+## Never
+
+Never accept a password typed into the conversation, and never print one. Never invent an
+admin credential. Never suggest storing one on disk. Never grant beyond `SELECT` — write
+access to your rooms is not a thing to hand out, and `ALL` would let the other side delete
+your memory. If the binary is absent, stop and say so rather than improvising the SQL.

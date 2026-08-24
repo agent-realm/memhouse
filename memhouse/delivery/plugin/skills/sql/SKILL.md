@@ -1,226 +1,105 @@
 ---
 name: sql
-description: Run free-form read-only SQL against memhouse conversation memory (typed sessions/messages/tool_calls tables on ClickHouse, shared by the house). Use for ad-hoc analytics the other memhouse skills don't cover — token spend, model/editor usage, tool rankings, activity heatmaps, busiest days/projects, cache-hit ratios, or any custom question over conversation data — over your own house, or a friend's house shared with you when they name it.
+description: Run read-only SQL over memhouse conversation memory for numbers rather than transcripts — token spend, cost by model or editor or project, tool-call rankings, activity over time, busiest days, cache-hit ratios, session length distributions, or any custom aggregate across the typed sessions/messages/tool_calls tables. Use when the user wants a figure, a ranking, a trend or a breakdown - "what did I spend on Opus", "which tools do I use most", "how many sessions per project", "my busiest week", "compare editors". For finding or answering FROM past conversations, use /mem:recall instead. Works over your own house, or a housemate's when they name it.
 user-invocable: true
-argument-hint: "<question or SQL>"
+argument-hint: "<the question, or the SQL>"
 allowed-tools: Bash
 ---
 
-# /mem:sql — ad-hoc analytics
+# /mem:sql — analytics over the rooms
 
-If the user gives SQL, run it (append `FORMAT PrettyCompact` if no FORMAT
-given). If they give a question, write the SQL yourself from the schema below.
+For **numbers**. When the answer is a passage from a past conversation, that is
+`/mem:recall` — this skill counts, groups and ranks.
 
-**Read-only rule:** the shipper (`ship.js`) is the only writer, and it is INSERT-ONLY: it
-never deletes and never mutates, because a re-parse that shrank or was rewritten is
-written under a new `epoch` instead of over the stored one. Never INSERT/ALTER/DROP from
-here. The shipping path needs `SELECT, INSERT, ALTER ADD COLUMN, OPTIMIZE` and nothing
-more — the `ALTER DELETE` this line used to list was there for the per-session clear that
-no longer exists, so no unattended process can lose you a row. `ALTER DELETE` is still
-needed by the one command that is *meant* to remove rows, `memhouse reset`, which asks
-first. Most houses grant `ALL` on the database anyway. Reads need no scoping clause: the
-house you can name is already yours, and there is no policy to work around.
+**Read `../reference/HOUSE.md` first.** Schema, connection, and the three traps. The epoch
+filter in particular is not optional here: this is the skill most likely to produce a
+figure someone acts on, and omitting it over-counted a real house by **34%**.
 
-**One session can be in `messages` twice.** A session that Claude Code compacted, or that
-shrank for any other reason, keeps its earlier parse — that is the whole point of `epoch`,
-and it is why nothing is ever deleted. Ad-hoc SQL must filter to the current parse or it
-counts such a session twice:
+## Read-only, and that is enforced
+
+Every query goes through `readonly=1`. The shipper is the only writer; a skill that
+mutates the archive is a skill that can destroy it. Never `INSERT`, `ALTER`, `DROP`,
+`TRUNCATE` or `OPTIMIZE` from here — not even "just to tidy up". If the user genuinely
+wants a write, that is `/mem:admin` with its confirmations, not this.
+
+## Method
+
+1. **Say what you are counting** before running it — "messages, current parse only, by
+   model, this year". Half of wrong analytics is a right query answering a different
+   question.
+2. **Apply the epoch filter to anything aggregating.** Copy it from the reference.
+3. **Group by `(session_id, user_id)`** wherever a session is the unit.
+4. **Show the SQL** beside the result. The user can re-run and adjust it; an unexplained
+   number is not an answer.
+5. **`FORMAT PrettyCompact`** for humans, `JSONEachRow` when you need to post-process.
+
+## Shapes worth knowing
+
+Cost is **derived**, not stored — `pricing.json` × tokens, per model.
 
 ```sql
+-- spend by model, current parse only
+SELECT model,
+       count() AS messages,
+       sum(input_tokens)  AS in_tok,
+       sum(output_tokens) AS out_tok,
+       sum(cache_read_tokens)  AS cache_read,
+       sum(cache_write_tokens) AS cache_write
+FROM messages
+WHERE model != ''
+  AND (origin != 'ship'
+       OR (session_id, user_id, epoch) IN (
+            SELECT session_id, user_id, max(epoch) FROM messages
+            WHERE origin = 'ship' GROUP BY session_id, user_id))
+GROUP BY model ORDER BY out_tok DESC
+```
+
+```sql
+-- which tools, how often
+SELECT tool_name, count() AS calls, uniqExact(session_id) AS sessions
+FROM tool_calls
 WHERE origin != 'ship'
    OR (session_id, user_id, epoch) IN (
         SELECT session_id, user_id, max(epoch) FROM messages
         WHERE origin = 'ship' GROUP BY session_id, user_id)
+GROUP BY tool_name ORDER BY calls DESC LIMIT 25
 ```
 
-Drop the filter deliberately when you want the history — "what did this session say before
-it was compacted" is a question only the house can answer, because the transcript on disk
-is gone.
-
-The recipe below pins `readonly=1` on every request, so a write that slips past the rule
-is refused by the server (`Code: 164 … Cannot execute query in readonly mode`) rather
-than by good intentions. Two honest limits: it is a **setting, not a grant** — a caller
-who writes their own URL can leave it off — and the HTTP interface refuses
-multi-statement bodies, so `SET readonly=0;` cannot be smuggled into a query. For
-enforcement that does not depend on this file, the house owner can mint a second
-`SELECT`-only credential and point the skills at that instead.
-
-## Connection
-
-**Never print this file or the variables in it.** No `cat "$MH_ENV"`, no `env | grep
-MEMHOUSE`, no `set -x` around these commands. Anything you print becomes part of a
-transcript that memhouse itself ships into the house.
-
-Credentials resolve as **flags > exported `MEMHOUSE_*` > `$MEMHOUSE_HOME/env`**
-(default `~/.memhouse/env`) — the same order the `memhouse` CLI uses. Every query
-runs over ClickHouse HTTP with `final=1` and `join_use_nulls=1` (ReplacingMergeTree
-keeps stale row versions until merges; `final=1` collapses to latest-wins — always
-include it on reads):
-
-```bash
-# Config lives at $MEMHOUSE_HOME/env (default ~/.memhouse/env). Exported MEMHOUSE_*
-# vars WIN over the file — snapshot them, source, then put them back. Sourcing alone
-# lets a stale file silently override the house you were pointed at.
-MH_ENV="${MEMHOUSE_HOME:-$HOME/.memhouse}/env"
-_u=${MEMHOUSE_URL-}; _s=${MEMHOUSE_USER-}; _p=${MEMHOUSE_PASSWORD-}; _d=${MEMHOUSE_DB-}
-set -a; [ -f "$MH_ENV" ] && . "$MH_ENV"; set +a
-[ -n "$_u" ] && MEMHOUSE_URL=$_u; [ -n "$_s" ] && MEMHOUSE_USER=$_s
-[ -n "$_p" ] && MEMHOUSE_PASSWORD=$_p; [ -n "$_d" ] && MEMHOUSE_DB=$_d
-# No default URL. localhost:8123 as memhouse_root is a REAL house on many machines,
-# usually the pilot's own — guessing it reads someone else's memory and looks like it
-# worked. If there is no config, say so and stop.
-if [ -z "${MEMHOUSE_URL:-}" ] || [ -z "${MEMHOUSE_USER:-}" ]; then
-  # An explicit test, not ${VAR:?msg}: zsh does not expand the message, so under the
-  # shell Claude Code actually uses the refusal read "nothing in $MH_ENV" literally.
-  echo "no memhouse house configured — nothing in $MH_ENV and no MEMHOUSE_URL/MEMHOUSE_USER set." >&2
-  echo "Run: memhouse install" >&2
-  exit 1
-fi
-
-# --user, not a -K config file. The config-file parser treats `"` and `\` specially, so a
-# password containing either authenticates fine from the CLI and fails from every skill
-# with "password is incorrect" — measured. The argv exposure -K was meant to avoid is not
-# observable here either: curl blanks the --user argument before `ps` can read it (0 hits
-# in 50 samples). What actually leaks a credential is PRINTING it, which the rule above
-# covers.
-curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
-  --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&final=1&join_use_nulls=1&readonly=1" <<'SQL'
-<the query>
-FORMAT PrettyCompact
-SQL
-```
-
-`FORMAT PrettyCompact` for display, `FORMAT JSONEachRow` to parse.
-
-## Room names — plain, shared tables
-
-The house's rooms are three plain tables: `messages`, `sessions`, `tool_calls` — resolved
-by the connection's database (`MEMHOUSE_DB`), not by who is asking. Everyone in the house
-writes into the same tables; `user_id` (stamped by the server) says whose row it is and
-`host` says which machine shipped it. Filter with `WHERE user_id = '<name>'` when you want
-one person, or leave it off for the whole house.
-
-**Another person's house (shared with you).** A house is a database; a share is a
-read-only GRANT on it. Because the rooms resolve by the connection's database, you read a
-friend's memory by pointing the connection at THEIR house — same credentials, different
-`database`. `SHOW DATABASES` lists what you may read; a name that is not `system` /
-`information_schema` / `default` and not your own `$MEMHOUSE_DB` is a house shared with
-you. When the user names one ("query yigit's house", "on yigit", "from yigit"), replace
-`database=${MEMHOUSE_DB:-$MEMHOUSE_USER}` with `database=<house>` in the connection recipe and leave
-the table names bare — or, to join across houses in one query, qualify tables explicitly
-(`yigit.messages`). Read-only: a refused SELECT means that house was not shared with you.
-
-**Keep the SQL heredoc quoted (`<<'SQL'`).** This skill once told the agent to substitute
-a shell variable into the table names, which cannot expand inside a quoted heredoc — so
-the agent unquotes it, and then the SEARCH TERMS expand too. Both instances driving this
-skill did exactly that, unprompted, on the first attempt. Measured consequences, from
-`system.query_log`:
-
-- a term containing `$home` became the empty string, so `LIKE '%%'` matched **every row**
-  and reported hits with exit 0 — silently wrong, not an error;
-- a term containing a backtick **executed the command inside it**.
-
-A user's search term is arbitrary text. With the heredoc quoted, neither can happen.
-
-**There is no `sessions_v` object.** The session rollup is a saved query over those same
-rooms — `memhouse sessions-query` prints it for whoever you are connected as, ready to
-paste into a `FROM (...) AS c` position.
-
-**The rollup is self-contained.** As of 0.4.5 the printed text carries its own `FINAL` on
-both rooms and a trailing `SETTINGS join_use_nulls = 1`, so it is correct wherever you
-paste it. Both matter: without `FINAL` every message is counted once per undeleted
-ReplacingMergeTree version (2x right after a ship, 3x a few ships later — measured, and it
-grows); without `join_use_nulls` a session with no messages reports `total_msgs = 1`
-rather than 0.
-
-**If the `memhouse` binary is not on PATH**, you cannot print the rollup — the skills are
-installable on their own. Query the rooms directly instead: `sessions` for metadata and
-`messages` for counts, each read `FINAL`, joined on `session_id` **and `user_id`** — the
-tables are shared, and joining on `session_id` alone can merge two housemates' rows.
-Prefer the binary when it is there; a rollup you assemble by hand and one printed by a
-DIFFERENT memhouse version are the two ways this goes quietly wrong.
-
-## Schema (the house)
-
-| Object | Kind | Columns |
-|---|---|---|
-| `sessions` | table, 1 row/session | `session_id, source, host, name, mode, folder, project, git_branch, created_at, last_updated_at, message_count, path, extra JSON, origin, epoch, user_id, ingested_at` |
-| `messages` | table, 1 row/message **per parse** | `session_id, seq, source, host, ts, role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, text, project, folder, is_subagent, extra JSON, line_hash, origin, epoch, user_id, ingested_at` + FTS columns `text_ngram`/`text_word` (lowercased; see /mem:search) |
-| `tool_calls` | table, 1 row/tool call **per parse** | `session_id, seq, idx, source, host, tool_name, args, ts, project, folder, origin, epoch, user_id, ingested_at` |
-| `house_meta` | table, house's own record | `key, value, updated_at, updated_by, host` — `schema_version`, per-member `client_version:<user>` |
-| `house_events` | append-only log | `event_at, kind, id, status, from_version, to_version, actor, host, rows_before, rows_after, detail` — migrations, version changes |
-| the rollup | **saved query**, not an object — `memhouse sessions-query` prints it | `session_id, source, host, name, mode, folder, project, git_branch, user_id, created_at, last_updated_at, started, ended, duration_sec, total_msgs, user_msgs, assistant_msgs, subagent_msgs, models, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, user_chars, assistant_chars, first_prompt` |
-
-Notes: `source` = editor id (`claude-code`, `codex`, `cursor`, `cursor-agent`,
-`vscode`, `zed`, `opencode`, `gemini-cli`, `windsurf`, `antigravity`, …);
-`seq` = message index within its session (0-based); `tool_calls.idx` = call
-index within the session; `user_id` is server-stamped (`currentUser()`); `origin` is
-`ship` for rows the shipper wrote and anything else for imports; `epoch` is which parse
-of the session a row belongs to — see the filter above;
-`models` in the rollup is an `Array(String)`. Exclude `''` and
-`'<synthetic>'` from model aggregates.
-
-## Examples
-
-Token spend by model:
+Note `tool_calls` takes its epoch from **`messages`** — both rooms are written by the same
+pass at the same epoch, and a parse that produced messages but no tool calls would
+otherwise resolve to a superseded epoch and serve the wrong parse's calls.
 
 ```sql
-SELECT model, sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,
-       sum(cache_read_tokens) AS cache_read
+-- activity by day, one machine
+SELECT toDate(ts) AS day, uniqExact(session_id) AS sessions, count() AS messages
 FROM messages
-WHERE model NOT IN ('', '<synthetic>')
-GROUP BY model
-ORDER BY out_tok DESC
-FORMAT PrettyCompact
+WHERE host = '<host>'
+  AND (origin != 'ship'
+       OR (session_id, user_id, epoch) IN (
+            SELECT session_id, user_id, max(epoch) FROM messages
+            WHERE origin = 'ship' GROUP BY session_id, user_id))
+GROUP BY day ORDER BY day DESC LIMIT 30
 ```
 
-Which tools do I use most (memhouse exclusive — memory-house has no tool table):
+For per-session totals, `memhouse sessions-query` prints a self-contained rollup that
+already carries `FINAL` — prefer it to hand-joining `sessions` and `messages`.
 
-```sql
-SELECT tool_name, count() AS calls, uniqExact(session_id) AS sessions
-FROM tool_calls
-GROUP BY tool_name
-ORDER BY calls DESC
-LIMIT 20
-FORMAT PrettyCompact
-```
+## Caveat the answer, every time it needs it
 
-Busiest days, last two weeks:
+These are properties of the data, not of your query, and a number presented without them
+misleads:
 
-```sql
-SELECT toDate(ts) AS day, uniqExact(session_id) AS sessions, count() AS msgs
-FROM messages
-WHERE ts > now() - INTERVAL 14 DAY
-GROUP BY day
-ORDER BY day DESC
-FORMAT PrettyCompact
-```
+- **Several adapters ship no tokens at all** — `kiro`, `vscode`, `zed`, and `cursor` on
+  one storage path. Their cost reads `$0`, which means *unknown*. Exclude them or label
+  them; never let them dilute an average silently.
+- **Per-message timestamps are interpolated** for most adapters — only session bounds are
+  real. Any hour-of-day or "peak time" result inherits that and should say so.
+- **`text` truncates at 50,000 chars**, `args` at 20,000, so length statistics have a
+  ceiling.
+- **Tool results are not stored**, so nothing here can measure what a command returned.
 
-Activity by editor this week / subagent share:
+## Someone else's house
 
-```sql
-SELECT source, count() AS msgs, countIf(is_subagent) AS subagent_msgs
-FROM messages
-WHERE ts > now() - INTERVAL 7 DAY
-GROUP BY source
-ORDER BY msgs DESC
-FORMAT PrettyCompact
-```
-
-Longest sessions by wall-clock:
-
-```sql
-SELECT name, project, source, duration_sec, total_msgs, output_tokens
-FROM (the rollup from `memhouse sessions-query`)
-ORDER BY duration_sec DESC
-LIMIT 10
-FORMAT PrettyCompact
-```
-
-## Output
-
-Run the query, present the result as a compact table, and add one or two lines
-of interpretation. Offer a natural follow-up cut (by source, by project, by
-host, by token volume) when relevant. Dollar costs are computed by the
-dashboard server from pricing.js — token sums here are the raw material, not
-dollars.
+`SHOW DATABASES` lists what your credential may read; anything that is not `system`,
+`information_schema`, `default` or your own is a share. Point `database=` at it, leave
+table names bare, and say whose house the number came from.

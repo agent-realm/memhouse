@@ -12,6 +12,9 @@ A member owns one database. An **administrator** owns the ClickHouse: every hous
 account, every grant. This skill is the second one, and it is the only skill allowed to
 act outside the caller's own house.
 
+**Read `../reference/HOUSE.md` first** — connection, schema, and the traps every query
+here inherits.
+
 **An admin password must never enter this conversation.** memhouse ships this transcript
 into the house you are administering, so a password pasted here is a password published
 to the archive — and unlike a file you can delete, the archive is insert-only. Resolve

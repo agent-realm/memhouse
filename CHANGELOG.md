@@ -4,6 +4,29 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **The `/mem:*` skillset is five skills and one shared reference, down from ten.** Four
+  of the ten had to explain in their own descriptions why they were not their siblings
+  (`/mem:ask`: *"this is the retrieve-and-answer skill; /mem:search is find-the-session"*),
+  which is what a wrong boundary looks like — an agent asked "what did I decide about X"
+  had to choose between `ask`, `search`, `sessions` and `sql`, all of which run SQL over
+  three tables and read rows. They are now `/mem:recall` (find and answer), `/mem:sql`
+  (numbers), `/mem:house` (what this is, whether it works, who can read it), `/mem:access`
+  (invite and share) and `/mem:admin`.
+- **The data model is written once, in `reference/HOUSE.md`.** The connection recipe was
+  copy-pasted into eight skills, and the epoch filter — omit it and a real house
+  over-counts by 34% — was explained in `ask/SKILL.md` and nowhere else, so `/mem:sql`,
+  the skill most likely to produce a number someone acts on, never mentioned it. Schema,
+  connection, the three traps and the known measurement gaps now live in one file every
+  skill points at. 11,388 words became 5,854.
+- **`/mem:recall` restores a name the canon already carried** (`TERMINOLOGY.md`: `memorecall`
+  retired in favour of `/mem:recall`, 2026-07-29). Its description carries every trigger
+  phrase the three skills it replaces had, so auto-triggering does not narrow.
+- **The CLI no longer advertises a directory as a skill.** `plugins` listed
+  `readdirSync(skills/)` verbatim; a `reference/` directory beside them would have been
+  announced as `/mem:reference`. It now lists only directories carrying a `SKILL.md`.
+
 ## 0.15.0 — 2026-08-24
 
 - **`memhouse whoami` — which credential is in play, and what it may actually do.**
