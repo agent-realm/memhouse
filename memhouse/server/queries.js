@@ -157,31 +157,43 @@ const topN = (freq, n) => Object.entries(freq).sort((a, b) => b[1] - a[1]).slice
 // ── overview ────────────────────────────────────────────────────────────────────
 async function getOverview(opts = {}) {
   const f = filters(opts);
-  // Same definition as getChats(). The nav bar read this and the Sessions page read
-  // getChats, so a house with one placeholder session showed "9 sessions" beside
-  // "8 sessions" in the same header, and the depth histogram summed to 7. A session row
-  // with no name and no messages is a placeholder the shipper keeps to absorb the
-  // incremental skip; it is not a conversation, and only one of the two counters knew.
-  const totalChats = Number((await q1(
-    `SELECT count() AS cnt FROM {{sessions_v}} AS c WHERE 1=1${f.and} AND (c.name != '' OR c.total_msgs > 0)`,
-    f.params)).cnt);
+  // Six independent reads, issued together. They share nothing but the filter, and every
+  // one of them is a full round trip: awaited in sequence they cost 6 x RTT before any
+  // result exists. Measured against a ClickHouse 6,000 km away, that sequencing — not the
+  // database — was roughly two thirds of what the browser waited for.
+  //
+  // The comments on each query below are the reasons its SHAPE is what it is; none of
+  // them is a reason for it to wait on the one above.
+  const [totalRow, editors, modes, rows, projects, range] = await Promise.all([
+    // Same definition as getChats(). The nav bar read this and the Sessions page read
+    // getChats, so a house with one placeholder session showed "9 sessions" beside
+    // "8 sessions" in the same header, and the depth histogram summed to 7. A session row
+    // with no name and no messages is a placeholder the shipper keeps to absorb the
+    // incremental skip; it is not a conversation, and only one of the two counters knew.
+    q1(`SELECT count() AS cnt FROM {{sessions_v}} AS c WHERE 1=1${f.and} AND (c.name != '' OR c.total_msgs > 0)`,
+      f.params),
+    // Root parity WAS: without a folder filter the editor breakdown is global — which put
+    // "34 + 3" chips under a header reading "3 sessions" when an editor filter was applied,
+    // and 12 under a header of 11 with no filter at all. Parity with a wrong number is not a
+    // feature.
+    q(`SELECT source, count() AS count FROM {{sessions_v}} AS c
+       WHERE (c.name != '' OR c.total_msgs > 0)${f.and} GROUP BY source ORDER BY count DESC`, f.params),
+    q(`SELECT mode, count() AS count FROM {{sessions_v}} AS c WHERE mode != ''${f.and} GROUP BY mode`, f.params),
+    q(`
+      SELECT formatDateTime(${TS}, '%Y-%m', 'UTC') AS month, source, count() AS count
+      FROM {{sessions_v}} AS c WHERE 1=1${f.and}
+      GROUP BY month, source ORDER BY month`, f.params),
+    q(`
+      SELECT folder, count() AS count FROM {{sessions_v}} AS c
+      WHERE folder != ''${f.and} GROUP BY folder ORDER BY count DESC LIMIT 20`, f.params),
+    q1(`SELECT min(${MS}) AS oldest, max(${MS}) AS newest FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params),
+  ]);
 
-  // Root parity WAS: without a folder filter the editor breakdown is global — which put
-  // "34 + 3" chips under a header reading "3 sessions" when an editor filter was applied,
-  // and 12 under a header of 11 with no filter at all. Parity with a wrong number is not a
-  // feature.
-  const editors = await q(
-    `SELECT source, count() AS count FROM {{sessions_v}} AS c
-     WHERE (c.name != '' OR c.total_msgs > 0)${f.and} GROUP BY source ORDER BY count DESC`, f.params);
+  const totalChats = Number(totalRow.cnt);
 
-  const modes = await q(`SELECT mode, count() AS count FROM {{sessions_v}} AS c WHERE mode != ''${f.and} GROUP BY mode`, f.params);
   const byMode = {};
   for (const m of modes) byMode[m.mode] = Number(m.count);
 
-  const rows = await q(`
-    SELECT formatDateTime(${TS}, '%Y-%m', 'UTC') AS month, source, count() AS count
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and}
-    GROUP BY month, source ORDER BY month`, f.params);
   const monthMap = {};
   for (const r of rows) {
     if (!monthMap[r.month]) monthMap[r.month] = { count: 0, editors: {} };
@@ -190,16 +202,11 @@ async function getOverview(opts = {}) {
   }
   const byMonth = Object.keys(monthMap).sort().map(m => ({ month: m, ...monthMap[m] }));
 
-  const projects = await q(`
-    SELECT folder, count() AS count FROM {{sessions_v}} AS c
-    WHERE folder != ''${f.and} GROUP BY folder ORDER BY count DESC LIMIT 20`, f.params);
   const topProjects = projects.map(p => ({
     name: p.folder.split(/[/\\]/).slice(-2).join('/'),
     fullPath: p.folder,
     count: Number(p.count),
   }));
-
-  const range = await q1(`SELECT min(${MS}) AS oldest, max(${MS}) AS newest FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
 
   return {
     totalChats,
