@@ -100,55 +100,45 @@ into a transcript on disk. The CLI passes it to one process and never echoes it.
 
 ## Share — let someone read your house
 
-Sharing is a plain `GRANT SELECT`, and you hold the grant option on your own database, so
-no admin is involved. **The statement path is NOT `readonly=1`** — drop that parameter for
-these three statements only, and keep it everywhere else.
+Sharing runs the `memhouse share` CLI. **Do not hand-write `GRANT` or `CREATE ROW POLICY`
+for this** — partial sharing has four ways to go wrong quietly, and the command handles
+each one:
 
-**Validate `<user>` FIRST** against `[A-Za-z][A-Za-z0-9_]*` and use only the validated
-token — in the `GRANT`, the `REVOKE`, and the record alike. A name you cannot type bare is
-a name that will be gotten wrong everywhere else.
-
-**`<db>` is the LIVE `$MEMHOUSE_DB`.** Print it with the connection
-(`echo "house: $MEMHOUSE_DB"`) and use THAT everywhere. Driven live, a model once filled
-`<db>` with a literal fallback while the real house was named differently — advice the
-admin would have run against the wrong database.
-
-```sql
-GRANT SELECT ON <db>.* TO <user>
+```
+memhouse share <user>                          the whole house
+memhouse share <user> --only project=memhouse  just one project
+memhouse share <user> --only session=<id>      just one conversation
+memhouse share --list                          who can read it, and how much
+memhouse share <user> --revoke                 withdraw
 ```
 
-Then record it, because **a member cannot read `system.grants`** (measured:
-`Not enough privileges … SELECT ON system.grants`), so this record is what the list form
-reads back:
+Scopes: `session=`, `project=`, `folder=`, `host=`, `source=`, `since=`, `until=`, and
+they combine — `--only project=memhouse,since=2026-08-01`. Report back the counts it
+prints (`2121 of 22488 rows`), because that is what the person will actually see.
 
-```sql
-INSERT INTO house_meta (key, value) VALUES ('share:<user>', 'granted <YYYY-MM-DD>')
-```
+**Say what a full share exposes** before running one: every session in the house, from
+every machine, project and editor, including anything ever pasted into one. If that is
+more than the user meant, `--only` is the answer, not a warning.
 
-**List** — memhouse's own record, not ClickHouse's grant table. Present it as such, and
-say a grant made by hand would not appear:
+**Never widen without being asked.** Re-running `memhouse share <user>` with no `--only`
+on someone currently scoped turns their partial share into a full one — the command says
+so, and you should surface that line rather than let it pass.
 
-```sql
-SELECT substring(key, 7) AS user, value AS state
-FROM house_meta FINAL WHERE key LIKE 'share:%' ORDER BY key
-```
+### Why the CLI and not SQL
 
-**Revoke** — the mirror, and update the record so the list stays honest:
+- A permissive catch-all policy for everyone else is the obvious design and it **fails
+  open**: measured, a second scoped user saw all 22,500 rows instead of their 1,860.
+- Partial sharing depends on `users_without_row_policies_can_read_rows`, which is server
+  config, not a query setting, and whose default has moved between versions. The command
+  measures the behaviour before creating the first policy and refuses on a server that
+  would blindfold your existing readers.
+- Revoking the grant alone leaves the policies behind, and a later re-share silently
+  reinherits the old scope.
+- A policy on `messages` but not `tool_calls` leaks. All three rooms move together.
 
-```sql
-REVOKE SELECT ON <db>.* FROM <user>
-```
-```sql
-INSERT INTO house_meta (key, value) VALUES ('share:<user>', 'revoked <YYYY-MM-DD>')
-```
-
-**Tell the user what a share actually exposes:** every session in the house, from every
-machine and project, including anything ever pasted into one. It is whole-database and
-all-or-nothing — there is no per-project or per-session share, and no way to withhold a
-session before granting. If that is not what they want, the answer is a separate house,
-not a narrower grant.
-
----
+If the command refuses because the server hides rows from unpolicied readers, relay its
+message — a full share still works there; only `--only` is unavailable until an admin
+sets that config.
 
 ## Never
 
