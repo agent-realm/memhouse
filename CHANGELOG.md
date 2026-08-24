@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.15.0 — 2026-08-24
 
 - **`memhouse whoami` — which credential is in play, and what it may actually do.**
   `/mem:admin` was deciding that in prose: read some files, run `SHOW GRANTS`, grep the
