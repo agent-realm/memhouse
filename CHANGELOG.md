@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.14.0 — 2026-08-24
 
 - **`memhouse invite` tells you the truth about your own credential, and gives a
   non-admin a way forward.** The capability probe was `SELECT 1 FROM system.users` — but
