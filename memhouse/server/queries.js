@@ -373,7 +373,13 @@ async function getChats(opts = {}) {
     FROM {{sessions_v}} AS c WHERE 1=1${f.and}`;
   const params = { ...f.params };
   if (opts.named !== false) sql += " AND (c.name != '' OR c.total_msgs > 0)";
-  sql += ` ORDER BY ${MS} DESC`;
+  // Tiebreak on the session key. `ORDER BY <ts> DESC` alone is not a total order —
+  // sessions that stopped in the same millisecond tie, and ClickHouse is free to return
+  // ties in any order, INCLUDING A DIFFERENT ONE PER QUERY. With LIMIT/OFFSET on top,
+  // that means page 2 can repeat or skip a row that page 1 already showed. Found by
+  // diffing this endpoint's response between two equivalent sources: identical rows,
+  // different order, 129 distinct timestamps across 300 sessions.
+  sql += ` ORDER BY ${MS} DESC, c.session_id, c.user_id`;
   if (opts.limit) { sql += ' LIMIT {limit:UInt64}'; params.limit = opts.limit; }
   if (opts.offset) { sql += ' OFFSET {offset:UInt64}'; params.offset = opts.offset; }
   const rows = await q(sql, params);
@@ -582,7 +588,7 @@ async function getDeepAnalytics(opts = {}) {
   let sql = `
     SELECT c.session_id AS id, c.user_id AS user_id, c.total_msgs AS msgs, c.user_chars AS uc, c.assistant_chars AS ac,
            c.input_tokens AS ti, c.output_tokens AS to_, c.cache_read_tokens AS cr, c.cache_write_tokens AS cw
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and} ORDER BY ${MS} DESC`;
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} ORDER BY ${MS} DESC, c.session_id, c.user_id`;
   const params = { ...f.params };
   if (opts.limit) { sql += ' LIMIT {limit:UInt64}'; params.limit = opts.limit; }
   const rows = await q(sql, params);
@@ -893,7 +899,11 @@ async function getCostAnalytics(opts = {}) {
   const byEditor = Object.entries(editorAgg).map(([editor, d]) => ({ editor, cost: d.cost, models: d.models.size })).sort((a, b) => b.cost - a.cost);
   const byProject = Object.entries(projectAgg).map(([folder, cost]) => ({ folder, name: folder.split('/').pop(), cost })).sort((a, b) => b.cost - a.cost).slice(0, 20);
   const monthly = Object.entries(monthCosts).sort((a, b) => a[0].localeCompare(b[0])).map(([month, d]) => ({ month, cost: Math.round(d.cost * 100) / 100, sessions: d.sessions }));
-  sessionCosts.sort((a, b) => b.cost - a.cost);
+  // Same total-order rule as getChats: a top-50 cut over ties must not depend on the
+  // order the rows happened to arrive in. Every session in a synthetic house costs the
+  // same, and the list changed identity between two equivalent sources without a
+  // secondary key.
+  sessionCosts.sort((a, b) => (b.cost - a.cost) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const totalSessions = sessionCosts.length;
   const avgPerSession = totalSessions > 0 ? overall.totalCost / totalSessions : 0;
