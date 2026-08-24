@@ -4,6 +4,20 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **An unknown option now stops the run instead of being ignored.** Anything `--like-this`
+  was accepted and silently discarded, which is quiet in the good case and dangerous in the
+  bad one: `--dryrun` for `--dry-run` did not warn, it ran the migration; `--adopt` on a
+  build predating that guard was swallowed and the invite proceeded into somebody else's
+  house. Each command now declares what it takes (`memhouse/flags.js`), anything else exits
+  2 naming the flag it probably meant, and a test holds the table against the flags
+  `bin/memhouse.js` actually reads so the two cannot drift apart.
+- **`whoami --admin` says when it fell back.** With no `MEMHOUSE_ADMIN_USER` set it
+  resolved the ordinary credential and printed exactly what bare `whoami` prints, so the
+  reader could not tell whether the flag had been heard. It now says so, and `--json`
+  carries `admin_requested` / `admin_env_present`.
+
 ## 0.15.0 — 2026-08-24
 
 - **`memhouse whoami` — which credential is in play, and what it may actually do.**
