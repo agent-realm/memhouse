@@ -140,6 +140,28 @@ function inSessions(f, col) {
   return ` AND (${alias}.session_id, ${alias}.user_id) IN (SELECT session_id, user_id FROM {{sessions_v}} AS c WHERE 1=1${f.and})`;
 }
 
+/**
+ * Narrow a query to an explicit set of (session_id, user_id) pairs.
+ *
+ * Distinct from inSessions(), which restricts to whatever the USER filtered to. This
+ * restricts to the rows a caller is actually going to use — the fifty sessions on the
+ * page, not the twelve hundred in the house.
+ *
+ * arrayZip, not two INs: the rooms are keyed on the PAIR, and matching the columns
+ * independently would pull in another member's rows for a colliding adapter-local
+ * session_id. Same idiom getDeepAnalytics already uses.
+ */
+function scopeAnd(scope, alias) {
+  if (!scope || !scope.ids || !scope.ids.length) return '';
+  const a = alias ? `${alias}.` : '';
+  return ` AND (${a}session_id, ${a}user_id) IN arrayZip({scopeIds:Array(String)}, {scopeUsers:Array(String)})`;
+}
+
+function scopeParams(f, scope) {
+  if (!scope || !scope.ids || !scope.ids.length) return f.params;
+  return { ...f.params, scopeIds: scope.ids, scopeUsers: scope.users };
+}
+
 // Fold a [{name|model, cnt}] list through normalizeModelName into a freq map.
 function normalizedModelFreq(rows) {
   const freq = {};
@@ -401,7 +423,13 @@ async function getChats(opts = {}) {
   // and left the next one. computePerChatCosts already handles all of them — the orphan
   // bucket, the source-dominant and global-dominant fallbacks, the char estimate — so call
   // it instead of growing a second copy of the same logic.
-  const perChat = await computePerChatCosts(f);
+  // Price the fifty rows on the page, not the twelve hundred in the house. This query
+  // set was the most expensive thing the dashboard ran — 1,413,624 rows read and 272 MiB
+  // per call, three endpoints calling it — and getChats used ~4% of what it asked for.
+  const perChat = await computePerChatCosts(f, {
+    ids: rows.map((r) => String(r.id)),
+    users: rows.map((r) => String(r.user_id)),
+  });
   const costBySession = {};
   const topModelBySession = {};
   for (const r of perChat) {
@@ -687,13 +715,13 @@ async function getToolCalls(toolName, opts = {}) {
 const ORPHAN_TOKENS = '(m.input_tokens > 0 OR m.output_tokens > 0 OR m.cache_read_tokens > 0 OR m.cache_write_tokens > 0)';
 
 // session_id → dominant model (most frequent across the session's messages).
-async function sessionDominantMap(f) {
+async function sessionDominantMap(f, scope = null) {
   const rows = await q(`
     SELECT session_id, user_id, argMax(model, cnt) AS dominant
     FROM (SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, count() AS cnt
-          FROM {{messages}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+          FROM {{messages}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
           GROUP BY session_id, user_id, model)
-    GROUP BY session_id, user_id`, f.params);
+    GROUP BY session_id, user_id`, scopeParams(f, scope));
   const map = {};
   for (const r of rows) map[`${r.session_id}::${r.user_id}`] = r.dominant;
   return map;
@@ -805,13 +833,20 @@ async function estimateCosts(opts = {}) {
 
 // Per-session cost attribution in a FIXED number of bulk queries (no per-session
 // round-trips). Mirrors root computePerChatCosts.
-async function computePerChatCosts(f) {
+/**
+ * @param {object} f      the user's filter
+ * @param {object|null} scope  {ids, users} — the sessions the caller will actually use.
+ *   getChats passes the page it just fetched; the cost pages pass nothing, because they
+ *   are pricing the whole house on purpose.
+ */
+async function computePerChatCosts(f, scope = null) {
+  const p = scopeParams(f, scope);
   const aRows = await q(`
     SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM {{messages}} AS m
-    WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
-    GROUP BY session_id, user_id, model`, f.params);
+    WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
+    GROUP BY session_id, user_id, model`, p);
   const byChatModel = {};
   for (const r of aRows) { const k = `${r.session_id}::${r.user_id}`; (byChatModel[k] = byChatModel[k] || []).push(r); }
 
@@ -819,8 +854,8 @@ async function computePerChatCosts(f) {
     SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM {{messages}} AS m
-    WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
-    GROUP BY session_id, user_id`, f.params);
+    WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
+    GROUP BY session_id, user_id`, p);
   const orphanByChat = {};
   for (const r of bRows) orphanByChat[`${r.session_id}::${r.user_id}`] = r;
 
@@ -833,9 +868,14 @@ async function computePerChatCosts(f) {
            c.input_tokens AS ti, c.output_tokens AS to_,
            c.cache_read_tokens AS cr, c.cache_write_tokens AS cw,
            formatDateTime(${TS}, '%Y-%m', 'UTC') AS month
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}${scopeAnd(scope, 'c')}`, p);
 
-  const dominantMap = await sessionDominantMap(f);
+  const dominantMap = await sessionDominantMap(f, scope);
+  // NOT scoped, deliberately. This is the house-wide "which model does this editor
+  // usually run", used to price sessions that recorded no model at all. Computed from
+  // the fifty rows on the page it would answer differently on page 1 than on page 2,
+  // and the same session would report a different cost depending on where it was read.
+  // Its scope is the user's FILTER, which is what it has always been.
   const { sourceDominant, globalDominant } = await sourceDominantMap(f);
 
   const out = [];
