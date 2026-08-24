@@ -4,6 +4,30 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`memhouse whoami` — which credential is in play, and what it may actually do.**
+  `/mem:admin` was deciding that in prose: read some files, run `SHOW GRANTS`, grep the
+  result. Reasoning about privileges in a skill gets it subtly wrong, and wrong here is
+  either "you cannot" to an administrator or "go ahead" to a member about to hit
+  ACCESS_DENIED. One command now answers it, with `--json` for agents and `--admin` to
+  resolve `MEMHOUSE_ADMIN_USER`/`MEMHOUSE_ADMIN_PASSWORD`. It prints no password.
+- **Capability detection is scope-aware, and shared.** The check `invite` shipped in
+  0.14.0 matched privilege names anywhere in the grants — but a privilege only means what
+  its scope allows, and an ordinary member holds `CREATE DATABASE` inside `ON <their-db>.*`,
+  which mints no new house at all. It read as false only because the users half also
+  failed; a member with any user-management grant would have been misjudged. The parser
+  moves to `memhouse/capabilities.js`, keeps each grant's scope, and counts a privilege
+  only when it is granted server-wide. `invite` and `whoami` share it, so they cannot
+  disagree about who is an administrator.
+- **`/mem:admin` stops inventing places to keep an admin password.** It looked in
+  `~/.memhouse/admin.env` — a file memhouse never creates, and a bad idea besides: a
+  member credential owns one database, an admin credential owns the server, and any
+  process running as that user can read a file. The skill now calls `whoami --admin`,
+  and when there is no administrator it says so and shows how to supply one for the
+  current shell (`read -rs`, off the screen and out of history) rather than suggesting
+  anything be written to disk.
+
 ## 0.14.0 — 2026-08-24
 
 - **`memhouse invite` tells you the truth about your own credential, and gives a
