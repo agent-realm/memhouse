@@ -270,6 +270,7 @@ async function getDailyActivity(opts = {}) {
 async function getDashboardStats(opts = {}) {
   const f = filters(opts);
   const p = { ...f.params, tz: TZ };
+  const r = await rooms();
 
   // Nine independent reads, one round trip. Sequential, this endpoint paid 9 x RTT
   // before any result existed — the largest fan-out on the dashboard. Each query's
@@ -305,11 +306,16 @@ async function getDashboardStats(opts = {}) {
            avg(total_msgs) AS avgMsgs, avg(input_tokens + output_tokens) AS avgTokens
     FROM {{sessions_v}} AS c WHERE c.last_updated_at IS NOT NULL${f.and}
     GROUP BY month ORDER BY month`, f.params),
-    q(`
+    q(r.model_stats ? `
+    SELECT m.model AS model, sum(m.msgs) AS cnt FROM {{model_stats}} AS m
+    WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+    GROUP BY model` : `
     SELECT m.model AS model, count() AS cnt FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
     GROUP BY model`, f.params),
-    q(`
+    q(r.tool_stats ? `
+    SELECT tool_name, sum(tc.calls) AS cnt FROM {{tool_stats}} AS tc
+    WHERE 1=1${inSessions(f, 'tc.session_id')} GROUP BY tool_name` : `
     SELECT tool_name, count() AS cnt FROM {{tool_calls}} AS tc
     WHERE 1=1${inSessions(f, 'tc.session_id')} GROUP BY tool_name`, f.params),
   ]);
@@ -548,6 +554,7 @@ async function getChat(id) {
 
 // ── projects ────────────────────────────────────────────────────────────────────
 async function getProjects(opts = {}) {
+  const r = await rooms();
   const df = filters({
     hiddenFolders: opts.includeHidden ? [] : opts.hiddenFolders,
     dateFrom: opts.dateFrom, dateTo: opts.dateTo,
@@ -565,11 +572,16 @@ async function getProjects(opts = {}) {
            sum(user_chars) AS totalUserChars, sum(assistant_chars) AS totalAssistantChars,
            sum(cache_read_tokens) AS totalCacheRead, sum(cache_write_tokens) AS totalCacheWrite
     FROM {{sessions_v}} AS c WHERE folder != ''${df.and} GROUP BY folder`, df.params),
-    q(`
+    q(r.model_stats ? `
+    SELECT m.folder AS folder, m.model AS model, sum(m.msgs) AS cnt FROM {{model_stats}} AS m
+    WHERE m.folder != '' AND m.model NOT IN ${EXCLUDED_MODELS}${inSessions(df, 'm.session_id')}
+    GROUP BY folder, model` : `
     SELECT m.folder AS folder, m.model AS model, count() AS cnt FROM {{messages}} AS m
     WHERE m.folder != '' AND m.model NOT IN ${EXCLUDED_MODELS}${inSessions(df, 'm.session_id')}
     GROUP BY folder, model`, df.params),
-    q(`
+    q(r.tool_stats ? `
+    SELECT tc.folder AS folder, tc.tool_name AS tool_name, sum(tc.calls) AS cnt FROM {{tool_stats}} AS tc
+    WHERE tc.folder != ''${inSessions(df, 'tc.session_id')} GROUP BY folder, tool_name` : `
     SELECT tc.folder AS folder, tc.tool_name AS tool_name, count() AS cnt FROM {{tool_calls}} AS tc
     WHERE tc.folder != ''${inSessions(df, 'tc.session_id')} GROUP BY folder, tool_name`, df.params),
   ]);
@@ -659,12 +671,19 @@ async function getDeepAnalytics(opts = {}) {
   let topTools = [], topModels = [], totalToolCalls = 0;
   if (ids.length > 0) {
     const pairs = { ids, users };
+    const r = await rooms();
     const [toolRows, modelRows] = await Promise.all([
-      q(`
+      q(r.tool_stats ? `
+      SELECT tool_name, sum(calls) AS cnt FROM {{tool_stats}}
+      WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
+      GROUP BY tool_name` : `
       SELECT tool_name, count() AS cnt FROM {{tool_calls}}
       WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
       GROUP BY tool_name`, pairs),
-      q(`
+      q(r.model_stats ? `
+      SELECT model, sum(msgs) AS cnt FROM {{model_stats}}
+      WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
+        AND model NOT IN ${EXCLUDED_MODELS} GROUP BY model` : `
       SELECT model, count() AS cnt FROM {{messages}}
       WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
         AND model NOT IN ${EXCLUDED_MODELS} GROUP BY model`, pairs),
@@ -729,7 +748,13 @@ const ORPHAN_TOKENS = '(m.input_tokens > 0 OR m.output_tokens > 0 OR m.cache_rea
 
 // session_id → dominant model (most frequent across the session's messages).
 async function sessionDominantMap(f, scope = null) {
-  const rows = await q(`
+  // model_stats already holds one row per (session, model) with the message count —
+  // argMax over a few thousand pre-aggregated rows instead of a scan of the room.
+  const r = await rooms();
+  const rows = await q(r.model_stats ? `
+    SELECT session_id, user_id, argMax(model, msgs) AS dominant
+    FROM {{model_stats}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
+    GROUP BY session_id, user_id` : `
     SELECT session_id, user_id, argMax(model, cnt) AS dominant
     FROM (SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, count() AS cnt
           FROM {{messages}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
@@ -742,7 +767,11 @@ async function sessionDominantMap(f, scope = null) {
 
 // source → dominant model + global dominant (for sessions with tokens but no model).
 async function sourceDominantMap(f) {
-  const rows = await q(`
+  const r = await rooms();
+  const rows = await q(r.model_stats ? `
+    SELECT m.source AS source, m.model AS model, sum(m.msgs) AS cnt
+    FROM {{model_stats}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+    GROUP BY source, model` : `
     SELECT m.source AS source, m.model AS model, count() AS cnt
     FROM {{messages}} AS m WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
     GROUP BY source, model`, f.params);
@@ -765,14 +794,31 @@ async function estimateCosts(opts = {}) {
 
   // Five independent reads, one round trip. sourceDominantMap stays lazy below — it is
   // only needed when unmodeled sessions exist, which most passes have none of.
+  //
+  // The ORPHAN_TOKENS predicate is dropped on the model_stats path on purpose: it
+  // filtered individual message rows to any-token ones before summing, and a row with
+  // zero tokens contributes zero to every sum — the predicate saved work, never changed
+  // a number. The stat rows are already summed, so there is no work left to save.
+  const r = await rooms();
   const [modelTokens, orphanRows, dominantMap, charRows, unmodeledRows] = await Promise.all([
-    q(`
+    q(r.model_stats ? `
+    SELECT m.model AS model, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
+           sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
+    FROM {{model_stats}} AS m
+    WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+    GROUP BY model` : `
     SELECT m.model AS model, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
            sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
     FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
     GROUP BY model`, f.params),
-    q(`
+    q(r.model_stats ? `
+    SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
+           sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
+    FROM {{model_stats}} AS m
+    WHERE m.model IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+    GROUP BY session_id, user_id
+    HAVING sum(m.input_tokens) > 0 OR sum(m.output_tokens) > 0 OR sum(m.cache_read_tokens) > 0 OR sum(m.cache_write_tokens) > 0` : `
     SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
            sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
     FROM {{messages}} AS m
@@ -856,16 +902,29 @@ async function estimateCosts(opts = {}) {
  */
 async function computePerChatCosts(f, scope = null) {
   const p = scopeParams(f, scope);
+  const r = await rooms();
   // Five independent reads, one round trip. This function is called by three endpoints;
-  // sequential, it alone cost 5 x RTT per call.
+  // sequential, it alone cost 5 x RTT per call. On the model_stats path the ORPHAN
+  // predicate is dropped/HAVINGed for the reason written in estimateCosts.
   const [aRows, bRows, cRows, dominantMap, sourceDominants] = await Promise.all([
-    q(`
+    q(r.model_stats ? `
+    SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
+           sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
+    FROM {{model_stats}} AS m
+    WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
+    GROUP BY session_id, user_id, model` : `
     SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
     GROUP BY session_id, user_id, model`, p),
-    q(`
+    q(r.model_stats ? `
+    SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
+           sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
+    FROM {{model_stats}} AS m
+    WHERE m.model IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
+    GROUP BY session_id, user_id
+    HAVING sum(m.input_tokens) > 0 OR sum(m.output_tokens) > 0 OR sum(m.cache_read_tokens) > 0 OR sum(m.cache_write_tokens) > 0` : `
     SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM {{messages}} AS m
