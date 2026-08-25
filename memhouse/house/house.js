@@ -309,6 +309,11 @@ function sessionsRollup({ sessions, messages }) {
 // The precomputed rollup's table name. One place, because the migration, the runtime
 // probe and the read layer must all agree on it.
 const SESSION_STATS = 'session_stats';
+// The per-(session, model) and per-(session, tool) rollups — what lets the cost, model
+// and tool queries stop scanning the messages/tool_calls rooms entirely. Same refresh
+// mechanism as SESSION_STATS; same fallback rule: absent tables mean the legacy SQL.
+const MODEL_STATS = 'session_model_stats';
+const TOOL_STATS = 'session_tool_stats';
 
 /**
  * The DDL that materializes the rollup, as [target, view].
@@ -345,6 +350,50 @@ function sessionStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
       + `ORDER BY (session_id, user_id) EMPTY AS ${body}`,
     `CREATE MATERIALIZED VIEW IF NOT EXISTS ${SESSION_STATS}_mv `
       + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${SESSION_STATS} AS ${body}`,
+  ];
+}
+
+/**
+ * The two fine-grained rollups, same shape as sessionStatsStatements.
+ *
+ * MODEL_STATS one row per (session, user, source, folder, model), token sums included.
+ * Every model/cost aggregate the dashboard runs is a sum or argMax over these rows —
+ * a few thousand of them — instead of a scan of the full messages room. The ORPHAN
+ * (any-token) predicates in the read layer survive unchanged: a message row with zero
+ * tokens contributes zero to every sum, so filtering it out before summing and summing
+ * over everything produce the same number.
+ *
+ * TOOL_STATS one row per (session, user, source, folder, tool_name) with the call
+ * count. NOTE the epoch source: currentParse(tool_calls, 'messages') — the tool room
+ * takes its epoch from MESSAGES, because a parse that keeps its messages but emits no
+ * tool calls writes nothing here at the new epoch, and this room's own max(epoch)
+ * would resurrect the superseded parse's calls.
+ */
+function sessionModelStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
+  const body = `SELECT session_id, user_id, any(source) AS source, any(folder) AS folder, model,
+       count() AS msgs,
+       sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
+       sum(cache_read_tokens) AS cache_read_tokens, sum(cache_write_tokens) AS cache_write_tokens
+FROM ${rooms.messages} AS m
+GROUP BY session_id, user_id, model`;
+  return [
+    `CREATE TABLE IF NOT EXISTS ${MODEL_STATS} ENGINE = MergeTree `
+      + `ORDER BY (session_id, user_id, model) EMPTY AS ${body}`,
+    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${MODEL_STATS}_mv `
+      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${MODEL_STATS} AS ${body}`,
+  ];
+}
+
+function sessionToolStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
+  const body = `SELECT session_id, user_id, any(source) AS source, any(folder) AS folder, tool_name,
+       count() AS calls
+FROM ${rooms.tool_calls} AS tc
+GROUP BY session_id, user_id, tool_name`;
+  return [
+    `CREATE TABLE IF NOT EXISTS ${TOOL_STATS} ENGINE = MergeTree `
+      + `ORDER BY (session_id, user_id, tool_name) EMPTY AS ${body}`,
+    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${TOOL_STATS}_mv `
+      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${TOOL_STATS} AS ${body}`,
   ];
 }
 
@@ -438,25 +487,35 @@ async function currentUser(client) {
  * shared read-only that was never migrated at all. Asking the server what exists is the
  * only answer that is correct in all three.
  */
-async function hasSessionStats(client) {
+async function statTables(client) {
   try {
     const rs = await client.query({
-      query: `SELECT count() AS n FROM system.tables
-              WHERE database = currentDatabase() AND name = 'session_stats'`,
+      query: `SELECT name FROM system.tables
+              WHERE database = currentDatabase()
+                AND name IN ('${SESSION_STATS}', '${MODEL_STATS}', '${TOOL_STATS}')`,
       format: 'JSONEachRow',
     });
-    const rows = await rs.json();
-    return Number(rows[0] && rows[0].n) > 0;
+    return new Set((await rs.json()).map((r) => r.name));
   } catch {
-    // No grant on system.tables is not an error — it means "assume not", and the
+    // No grant on system.tables is not an error — it means "assume none", and the
     // subquery path is always correct.
-    return false;
+    return new Set();
   }
+}
+
+async function hasSessionStats(client) {
+  return (await statTables(client)).has(SESSION_STATS);
 }
 
 async function resolveRooms(client) {
   const rooms = roomNames(await currentUser(client));
-  if (await hasSessionStats(client)) rooms.sessions_v = SESSION_STATS;
+  const have = await statTables(client);
+  if (have.has(SESSION_STATS)) rooms.sessions_v = SESSION_STATS;
+  // Null when absent: the read layer branches to the legacy scan-the-room SQL. Never a
+  // token substitution, because the legacy SQL has a different shape, not just a
+  // different table name.
+  rooms.model_stats = have.has(MODEL_STATS) ? MODEL_STATS : null;
+  rooms.tool_stats = have.has(TOOL_STATS) ? TOOL_STATS : null;
   return rooms;
 }
 
@@ -501,5 +560,6 @@ module.exports = {
   READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
   sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,
-  SESSION_STATS, hasSessionStats, sessionStatsStatements,
+  SESSION_STATS, MODEL_STATS, TOOL_STATS, hasSessionStats, statTables,
+  sessionStatsStatements, sessionModelStatsStatements, sessionToolStatsStatements,
 };
