@@ -173,7 +173,10 @@ function normalizedModelFreq(rows) {
 }
 // The same exclusions as EXCLUDED_MODELS, usable in JS.
 const EXCLUDED_MODEL_SET = new Set(['', '<synthetic>']);
-const topN = (freq, n) => Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, n)
+// Tiebreak on the name. A top-N cut over counts alone is not a total order: two tools
+// tied at the cut line resolve by arrival order, so the same house can show a different
+// tenth tool on consecutive loads. Same rule as getChats' ORDER BY tiebreaker.
+const topN = (freq, n) => Object.entries(freq).sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0, n)
   .map(([name, count]) => ({ name, count }));
 
 // ── overview ────────────────────────────────────────────────────────────────────
@@ -268,20 +271,55 @@ async function getDashboardStats(opts = {}) {
   const f = filters(opts);
   const p = { ...f.params, tz: TZ };
 
-  const hourlyRows = await q(`
+  // Nine independent reads, one round trip. Sequential, this endpoint paid 9 x RTT
+  // before any result existed — the largest fan-out on the dashboard. Each query's
+  // shape is unchanged; only the waiting is gone.
+  const [hourlyRows, weekdayRows, depthRows, tokenRow, streakRows,
+         monthEditorRows, velocityRows, modelRows, toolRows] = await Promise.all([
+    q(`
     SELECT toHour(${TS}, {tz:String}) AS hour, count() AS count
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY hour ORDER BY hour`, p);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY hour ORDER BY hour`, p),
+    q(`
+    SELECT toDayOfWeek(${TS}, 0, {tz:String}) % 7 AS dow, count() AS count
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY dow ORDER BY dow`, p),
+    q(`
+    SELECT total_msgs AS msgs FROM {{sessions_v}} AS c WHERE total_msgs > 0${f.and}`, f.params),
+    q1(`
+    SELECT COALESCE(sum(input_tokens), 0) AS input, COALESCE(sum(output_tokens), 0) AS output,
+           COALESCE(sum(cache_read_tokens), 0) AS cacheRead, COALESCE(sum(cache_write_tokens), 0) AS cacheWrite,
+           COALESCE(sum(user_chars), 0) AS userChars, COALESCE(sum(assistant_chars), 0) AS assistantChars,
+           COALESCE(sum(total_msgs), 0) AS messages,
+           -- The SAME definition the KPI beside it uses. A plain count() here put a
+           -- fourth session number on a screen that already had three: nav 11, chips 12,
+           -- avg depth 40/12, histogram 10.
+           countIf(c.name != '' OR c.total_msgs > 0) AS sessions
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params),
+    q(`
+    SELECT DISTINCT formatDateTime(${TS}, '%Y-%m-%d', {tz:String}) AS day
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} ORDER BY day`, p),
+    q(`
+    SELECT formatDateTime(${TS}, '%Y-%m', 'UTC') AS month, source, count() AS count
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY month, source ORDER BY month`, f.params),
+    q(`
+    SELECT formatDateTime(c.last_updated_at, '%Y-%m', 'UTC') AS month,
+           avg(total_msgs) AS avgMsgs, avg(input_tokens + output_tokens) AS avgTokens
+    FROM {{sessions_v}} AS c WHERE c.last_updated_at IS NOT NULL${f.and}
+    GROUP BY month ORDER BY month`, f.params),
+    q(`
+    SELECT m.model AS model, count() AS cnt FROM {{messages}} AS m
+    WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
+    GROUP BY model`, f.params),
+    q(`
+    SELECT tool_name, count() AS cnt FROM {{tool_calls}} AS tc
+    WHERE 1=1${inSessions(f, 'tc.session_id')} GROUP BY tool_name`, f.params),
+  ]);
+
   const hourly = new Array(24).fill(0);
   for (const r of hourlyRows) hourly[Number(r.hour)] = Number(r.count);
 
-  const weekdayRows = await q(`
-    SELECT toDayOfWeek(${TS}, 0, {tz:String}) % 7 AS dow, count() AS count
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY dow ORDER BY dow`, p);
   const weekdays = new Array(7).fill(0);
   for (const r of weekdayRows) weekdays[Number(r.dow)] = Number(r.count);
 
-  const depthRows = await q(`
-    SELECT total_msgs AS msgs FROM {{sessions_v}} AS c WHERE total_msgs > 0${f.and}`, f.params);
   const depthBuckets = { '1': 0, '2-5': 0, '6-10': 0, '11-20': 0, '21-50': 0, '51-100': 0, '100+': 0 };
   for (const r of depthRows) {
     const m = Number(r.msgs);
@@ -294,20 +332,6 @@ async function getDashboardStats(opts = {}) {
     else depthBuckets['100+']++;
   }
 
-  const tokenRow = await q1(`
-    SELECT COALESCE(sum(input_tokens), 0) AS input, COALESCE(sum(output_tokens), 0) AS output,
-           COALESCE(sum(cache_read_tokens), 0) AS cacheRead, COALESCE(sum(cache_write_tokens), 0) AS cacheWrite,
-           COALESCE(sum(user_chars), 0) AS userChars, COALESCE(sum(assistant_chars), 0) AS assistantChars,
-           COALESCE(sum(total_msgs), 0) AS messages,
-           -- The SAME definition the KPI beside it uses. A plain count() here put a
-           -- fourth session number on a screen that already had three: nav 11, chips 12,
-           -- avg depth 40/12, histogram 10.
-           countIf(c.name != '' OR c.total_msgs > 0) AS sessions
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and}`, f.params);
-
-  const streakRows = await q(`
-    SELECT DISTINCT formatDateTime(${TS}, '%Y-%m-%d', {tz:String}) AS day
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and} ORDER BY day`, p);
   let currentStreak = 0, longestStreak = 0, tempStreak = 1;
   const today = new Date().toISOString().split('T')[0];
   for (let i = 1; i < streakRows.length; i++) {
@@ -328,9 +352,6 @@ async function getDashboardStats(opts = {}) {
   }
   if (streakRows.length === 0) longestStreak = 0;
 
-  const monthEditorRows = await q(`
-    SELECT formatDateTime(${TS}, '%Y-%m', 'UTC') AS month, source, count() AS count
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and} GROUP BY month, source ORDER BY month`, f.params);
   const monthEditors = {};
   const allSources = new Set();
   for (const r of monthEditorRows) {
@@ -339,21 +360,8 @@ async function getDashboardStats(opts = {}) {
     allSources.add(r.source);
   }
 
-  const velocityRows = await q(`
-    SELECT formatDateTime(c.last_updated_at, '%Y-%m', 'UTC') AS month,
-           avg(total_msgs) AS avgMsgs, avg(input_tokens + output_tokens) AS avgTokens
-    FROM {{sessions_v}} AS c WHERE c.last_updated_at IS NOT NULL${f.and}
-    GROUP BY month ORDER BY month`, f.params);
-
-  const modelRows = await q(`
-    SELECT m.model AS model, count() AS cnt FROM {{messages}} AS m
-    WHERE m.model NOT IN ${EXCLUDED_MODELS}${inSessions(f, 'm.session_id')}
-    GROUP BY model`, f.params);
   const topModels = topN(normalizedModelFreq(modelRows), 10);
 
-  const toolRows = await q(`
-    SELECT tool_name, count() AS cnt FROM {{tool_calls}} AS tc
-    WHERE 1=1${inSessions(f, 'tc.session_id')} GROUP BY tool_name`, f.params);
   let totalToolCalls = 0;
   const toolFreq = {};
   for (const r of toolRows) { toolFreq[r.tool_name] = Number(r.cnt); totalToolCalls += Number(r.cnt); }
@@ -496,14 +504,15 @@ async function getChat(id) {
   // Sessions are keyed (session_id, user_id): constrain the row reloads to the
   // selected rollup's writer, or an owner/no-RLS reader viewing a house where two
   // members share an adapter-local session_id would see their rows merged.
-  const messages = await q(`
+  const [messages, toolCalls] = await Promise.all([
+    q(`
     SELECT role, text AS content, model, input_tokens, output_tokens
     FROM {{messages}} WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY seq`,
-    { cid: chat.id, uid: chat.user_id });
-
-  const toolCalls = await q(`
+      { cid: chat.id, uid: chat.user_id }),
+    q(`
     SELECT tool_name, args FROM {{tool_calls}} WHERE session_id = {cid:String} AND user_id = {uid:String} ORDER BY idx`,
-    { cid: chat.id, uid: chat.user_id });
+      { cid: chat.id, uid: chat.user_id }),
+  ]);
   const toolCallDetails = toolCalls.map(tc => ({ name: tc.tool_name, args: safeParseJson(tc.args) }));
 
   let toolMessages = 0, systemMessages = 0;
@@ -544,10 +553,26 @@ async function getProjects(opts = {}) {
     dateFrom: opts.dateFrom, dateTo: opts.dateTo,
   });
 
-  const perSource = await q(`
+  // Four independent reads, one round trip.
+  const [perSource, sums, modelRows, toolRows] = await Promise.all([
+    q(`
     SELECT folder, source, count() AS count, min(${MS}) AS first_seen, max(${MS}) AS last_seen
     FROM {{sessions_v}} AS c WHERE folder != ''${df.and}
-    GROUP BY folder, source ORDER BY folder, count DESC`, df.params);
+    GROUP BY folder, source ORDER BY folder, count DESC`, df.params),
+    q(`
+    SELECT folder, sum(total_msgs) AS totalMessages,
+           sum(input_tokens) AS totalInputTokens, sum(output_tokens) AS totalOutputTokens,
+           sum(user_chars) AS totalUserChars, sum(assistant_chars) AS totalAssistantChars,
+           sum(cache_read_tokens) AS totalCacheRead, sum(cache_write_tokens) AS totalCacheWrite
+    FROM {{sessions_v}} AS c WHERE folder != ''${df.and} GROUP BY folder`, df.params),
+    q(`
+    SELECT m.folder AS folder, m.model AS model, count() AS cnt FROM {{messages}} AS m
+    WHERE m.folder != '' AND m.model NOT IN ${EXCLUDED_MODELS}${inSessions(df, 'm.session_id')}
+    GROUP BY folder, model`, df.params),
+    q(`
+    SELECT tc.folder AS folder, tc.tool_name AS tool_name, count() AS cnt FROM {{tool_calls}} AS tc
+    WHERE tc.folder != ''${inSessions(df, 'tc.session_id')} GROUP BY folder, tool_name`, df.params),
+  ]);
 
   const map = {};
   for (const r of perSource) {
@@ -558,19 +583,9 @@ async function getProjects(opts = {}) {
     if (r.last_seen != null && r.last_seen > map[r.folder].lastSeen) map[r.folder].lastSeen = r.last_seen;
   }
 
-  const sums = await q(`
-    SELECT folder, sum(total_msgs) AS totalMessages,
-           sum(input_tokens) AS totalInputTokens, sum(output_tokens) AS totalOutputTokens,
-           sum(user_chars) AS totalUserChars, sum(assistant_chars) AS totalAssistantChars,
-           sum(cache_read_tokens) AS totalCacheRead, sum(cache_write_tokens) AS totalCacheWrite
-    FROM {{sessions_v}} AS c WHERE folder != ''${df.and} GROUP BY folder`, df.params);
   const sumByFolder = {};
   for (const r of sums) sumByFolder[r.folder] = r;
 
-  const modelRows = await q(`
-    SELECT m.folder AS folder, m.model AS model, count() AS cnt FROM {{messages}} AS m
-    WHERE m.folder != '' AND m.model NOT IN ${EXCLUDED_MODELS}${inSessions(df, 'm.session_id')}
-    GROUP BY folder, model`, df.params);
   const modelsByFolder = {};
   for (const r of modelRows) {
     const k = normalizeModelName(r.model) || r.model;
@@ -578,9 +593,6 @@ async function getProjects(opts = {}) {
     modelsByFolder[r.folder][k] = (modelsByFolder[r.folder][k] || 0) + Number(r.cnt);
   }
 
-  const toolRows = await q(`
-    SELECT tc.folder AS folder, tc.tool_name AS tool_name, count() AS cnt FROM {{tool_calls}} AS tc
-    WHERE tc.folder != ''${inSessions(df, 'tc.session_id')} GROUP BY folder, tool_name`, df.params);
   const toolsByFolder = {};
   for (const r of toolRows) {
     if (!toolsByFolder[r.folder]) toolsByFolder[r.folder] = {};
@@ -647,18 +659,19 @@ async function getDeepAnalytics(opts = {}) {
   let topTools = [], topModels = [], totalToolCalls = 0;
   if (ids.length > 0) {
     const pairs = { ids, users };
-    const toolRows = await q(`
+    const [toolRows, modelRows] = await Promise.all([
+      q(`
       SELECT tool_name, count() AS cnt FROM {{tool_calls}}
       WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
-      GROUP BY tool_name`, pairs);
+      GROUP BY tool_name`, pairs),
+      q(`
+      SELECT model, count() AS cnt FROM {{messages}}
+      WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
+        AND model NOT IN ${EXCLUDED_MODELS} GROUP BY model`, pairs),
+    ]);
     const toolFreq = {};
     for (const r of toolRows) { toolFreq[r.tool_name] = Number(r.cnt); totalToolCalls += Number(r.cnt); }
     topTools = topN(toolFreq, 30);
-
-    const modelRows = await q(`
-      SELECT model, count() AS cnt FROM {{messages}}
-      WHERE (session_id, user_id) IN arrayZip({ids:Array(String)}, {users:Array(String)})
-        AND model NOT IN ${EXCLUDED_MODELS} GROUP BY model`, pairs);
     topModels = topN(normalizedModelFreq(modelRows), 20);
   }
 
@@ -750,21 +763,33 @@ const CHARS_PER_TOKEN = 4;
 async function estimateCosts(opts = {}) {
   const f = filters(opts, { editorLike: true });
 
-  const modelTokens = await q(`
+  // Five independent reads, one round trip. sourceDominantMap stays lazy below — it is
+  // only needed when unmodeled sessions exist, which most passes have none of.
+  const [modelTokens, orphanRows, dominantMap, charRows, unmodeledRows] = await Promise.all([
+    q(`
     SELECT m.model AS model, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
            sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
     FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
-    GROUP BY model`, f.params);
-
-  const orphanRows = await q(`
+    GROUP BY model`, f.params),
+    q(`
     SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS input, sum(m.output_tokens) AS output,
            sum(m.cache_read_tokens) AS cacheRead, sum(m.cache_write_tokens) AS cacheWrite
     FROM {{messages}} AS m
     WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}
-    GROUP BY session_id, user_id`, f.params);
-
-  const dominantMap = await sessionDominantMap(f);
+    GROUP BY session_id, user_id`, f.params),
+    sessionDominantMap(f),
+    q(`
+    SELECT c.session_id AS session_id, c.user_id AS user_id, c.user_chars AS userChars, c.assistant_chars AS asstChars
+    FROM {{sessions_v}} AS c
+    WHERE notEmpty(c.models) AND c.input_tokens = 0 AND c.output_tokens = 0
+      AND (c.user_chars > 0 OR c.assistant_chars > 0)${f.and}`, f.params),
+    q(`
+    SELECT c.source AS source, c.input_tokens AS input, c.output_tokens AS output,
+           c.cache_read_tokens AS cacheRead, c.cache_write_tokens AS cacheWrite
+    FROM {{sessions_v}} AS c
+    WHERE empty(c.models) AND (c.input_tokens > 0 OR c.output_tokens > 0)${f.and}`, f.params),
+  ]);
 
   const orphanByModel = {};
   const addOrphan = (dominant, input, output, cacheRead, cacheWrite) => {
@@ -780,22 +805,12 @@ async function estimateCosts(opts = {}) {
   }
 
   // Sessions that name models but report zero tokens → estimate from chars.
-  const charRows = await q(`
-    SELECT c.session_id AS session_id, c.user_id AS user_id, c.user_chars AS userChars, c.assistant_chars AS asstChars
-    FROM {{sessions_v}} AS c
-    WHERE notEmpty(c.models) AND c.input_tokens = 0 AND c.output_tokens = 0
-      AND (c.user_chars > 0 OR c.assistant_chars > 0)${f.and}`, f.params);
   for (const r of charRows) {
     const dominant = dominantMap[`${r.session_id}::${r.user_id}`];
     if (dominant) addOrphan(dominant, Math.round((Number(r.userChars) || 0) / CHARS_PER_TOKEN), Math.round((Number(r.asstChars) || 0) / CHARS_PER_TOKEN), 0, 0);
   }
 
   // Sessions with tokens but NO model at all → the source's dominant model.
-  const unmodeledRows = await q(`
-    SELECT c.source AS source, c.input_tokens AS input, c.output_tokens AS output,
-           c.cache_read_tokens AS cacheRead, c.cache_write_tokens AS cacheWrite
-    FROM {{sessions_v}} AS c
-    WHERE empty(c.models) AND (c.input_tokens > 0 OR c.output_tokens > 0)${f.and}`, f.params);
   if (unmodeledRows.length > 0) {
     const { sourceDominant, globalDominant } = await sourceDominantMap(f);
     for (const r of unmodeledRows) {
@@ -841,25 +856,22 @@ async function estimateCosts(opts = {}) {
  */
 async function computePerChatCosts(f, scope = null) {
   const p = scopeParams(f, scope);
-  const aRows = await q(`
+  // Five independent reads, one round trip. This function is called by three endpoints;
+  // sequential, it alone cost 5 x RTT per call.
+  const [aRows, bRows, cRows, dominantMap, sourceDominants] = await Promise.all([
+    q(`
     SELECT m.session_id AS session_id, m.user_id AS user_id, m.model AS model, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM {{messages}} AS m
     WHERE m.model NOT IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
-    GROUP BY session_id, user_id, model`, p);
-  const byChatModel = {};
-  for (const r of aRows) { const k = `${r.session_id}::${r.user_id}`; (byChatModel[k] = byChatModel[k] || []).push(r); }
-
-  const bRows = await q(`
+    GROUP BY session_id, user_id, model`, p),
+    q(`
     SELECT m.session_id AS session_id, m.user_id AS user_id, sum(m.input_tokens) AS i, sum(m.output_tokens) AS o,
            sum(m.cache_read_tokens) AS cr, sum(m.cache_write_tokens) AS cw
     FROM {{messages}} AS m
     WHERE m.model IN ${EXCLUDED_MODELS} AND ${ORPHAN_TOKENS}${inSessions(f, 'm.session_id')}${scopeAnd(scope, 'm')}
-    GROUP BY session_id, user_id`, p);
-  const orphanByChat = {};
-  for (const r of bRows) orphanByChat[`${r.session_id}::${r.user_id}`] = r;
-
-  const cRows = await q(`
+    GROUP BY session_id, user_id`, p),
+    q(`
     SELECT c.session_id AS id, c.user_id AS user_id, c.source AS source, c.name AS name, c.folder AS folder,
            toUnixTimestamp64Milli(c.last_updated_at) AS last_updated_at,
            toUnixTimestamp64Milli(c.created_at) AS created_at,
@@ -868,15 +880,22 @@ async function computePerChatCosts(f, scope = null) {
            c.input_tokens AS ti, c.output_tokens AS to_,
            c.cache_read_tokens AS cr, c.cache_write_tokens AS cw,
            formatDateTime(${TS}, '%Y-%m', 'UTC') AS month
-    FROM {{sessions_v}} AS c WHERE 1=1${f.and}${scopeAnd(scope, 'c')}`, p);
+    FROM {{sessions_v}} AS c WHERE 1=1${f.and}${scopeAnd(scope, 'c')}`, p),
+    sessionDominantMap(f, scope),
+    // NOT scoped, deliberately. This is the house-wide "which model does this editor
+    // usually run", used to price sessions that recorded no model at all. Computed from
+    // the fifty rows on the page it would answer differently on page 1 than on page 2,
+    // and the same session would report a different cost depending on where it was read.
+    // Its scope is the user's FILTER, which is what it has always been.
+    sourceDominantMap(f),
+  ]);
+  const { sourceDominant, globalDominant } = sourceDominants;
 
-  const dominantMap = await sessionDominantMap(f, scope);
-  // NOT scoped, deliberately. This is the house-wide "which model does this editor
-  // usually run", used to price sessions that recorded no model at all. Computed from
-  // the fifty rows on the page it would answer differently on page 1 than on page 2,
-  // and the same session would report a different cost depending on where it was read.
-  // Its scope is the user's FILTER, which is what it has always been.
-  const { sourceDominant, globalDominant } = await sourceDominantMap(f);
+  const byChatModel = {};
+  for (const r of aRows) { const k = `${r.session_id}::${r.user_id}`; (byChatModel[k] = byChatModel[k] || []).push(r); }
+
+  const orphanByChat = {};
+  for (const r of bRows) orphanByChat[`${r.session_id}::${r.user_id}`] = r;
 
   const out = [];
   for (const c of cRows) {
@@ -921,8 +940,7 @@ async function computePerChatCosts(f, scope = null) {
 
 async function getCostAnalytics(opts = {}) {
   const f = filters(opts, { editorLike: true });
-  const overall = await estimateCosts(opts);
-  const perChat = await computePerChatCosts(f);
+  const [overall, perChat] = await Promise.all([estimateCosts(opts), computePerChatCosts(f)]);
 
   const editorAgg = {}, projectAgg = {}, monthCosts = {};
   const sessionCosts = [];
