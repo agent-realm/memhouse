@@ -64,6 +64,12 @@ jobs:
       # local credential is a member either way, so "refused" always looks correct.
       - name: invite matrix (who may provision)
         run: misc/invite-matrix.sh http://localhost:8123 memhouse_root cipw
+      # The shared-database layout: one database, a member's rooms named for them, each
+      # granted only their own. Isolation here is grants rather than policy, so it has to
+      # be proved against a real server — a missing grant and a working one look identical
+      # until somebody reads a table they should not.
+      - name: prefix matrix (one database, per-member rooms)
+        run: misc/prefix-matrix.sh http://localhost:8123 memhouse_root cipw
       - name: headless e2e — install, ship, status
         run: |
           set -euo pipefail

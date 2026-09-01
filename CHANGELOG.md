@@ -4,6 +4,35 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`memhouse invite --shared-db <db>` — one database, a room set per member.** Until now
+  a member meant a database: `alice.messages`. On a ClickHouse where that is not wanted,
+  `--shared-db mem` puts everyone in one database under their own names —
+  `mem.alice_messages`, `mem.bob_messages` — and grants each member only their own three
+  rooms, one statement per table because ClickHouse rejects `ON db.a, db.b` outright
+  ("Syntax error … Expected access type").
+
+  It exists for a reason that is social rather than technical: **a grant is something a
+  colleague can verify and a row policy is not.** Alice runs `SHOW GRANTS FOR alice`, sees
+  her three tables, and `SHOW TABLES FROM mem` does not even list the rooms she was not
+  granted — measured, she cannot read, drop, or enumerate a housemate's rooms, and cannot
+  create tables beside them. Nothing has to be taken on trust.
+
+  The **operator** creates the rooms, during `invite`, while an admin credential is in
+  hand. If the member created them she would need `CREATE TABLE` on the whole database —
+  enough to add tables beside everyone else's, which is the blast radius this layout
+  removes. `CREATE TABLE IF NOT EXISTS` is checked against the grant *before* existence,
+  so `ensure-schema` skips what it may not do and continues, which it already knew how to.
+
+  Members hold `WITH GRANT OPTION` on their own rooms and nothing else, so `memhouse share`
+  still works without an operator and still cannot reach a housemate's rows. Sharing,
+  revoking and the `--only` row policies all target the member's own rooms.
+
+  `MEMHOUSE_TABLE_PREFIX` carries it, written by `invite` into the env file, so the
+  invitee picks nothing. Empty means the layout memhouse has always had — verified byte
+  for byte against the previous resolution.
+
 ## 0.17.0 — 2026-08-25
 
 - **`memhouse share` — partial sharing, by row policy.** A share used to be all or

@@ -233,15 +233,19 @@ const ROOM_MATERIALIZED = {
   tool_calls: ['user_id'],
 };
 
-function currentParse(table, epochSource = table) {
+function currentParse(table, epochSource = table, physical = null) {
+  // `table` names the ROOM (for the materialized-column lookup); `physical` is what goes
+  // into the FROM, which differs whenever a prefix is in play.
   const extra = (ROOM_MATERIALIZED[table] || ['user_id']).join(', ');
+  const from = physical || table;
+  const epochFrom = physical ? physical.replace(new RegExp(`${table}$`), epochSource) : epochSource;
   return `(
     SELECT *, ${extra}
-    FROM ${table} FINAL
+    FROM ${from} FINAL
     WHERE origin != 'ship'
        OR (session_id, user_id, epoch) IN (
             SELECT session_id, user_id, max(epoch)
-            FROM ${epochSource}
+            FROM ${epochFrom}
             WHERE origin = 'ship'
             GROUP BY session_id, user_id)
   )`;
@@ -302,24 +306,35 @@ const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
  * name it produces. See ship.js's delete, which must BIND the user rather than call
  * currentUser() inside a mutation, where it is not evaluated in the caller's context.
  */
-function roomNames(user) {
-  const out = { member: user, user };
+function roomNames(user, prefix = '') {
+  const out = { member: user, user, prefix: prefix || '' };
+  // A PREFIXED house puts every member's rooms in one database under their own names —
+  // `mem.alice_messages` rather than `alice.messages`. It exists for one reason: a grant
+  // is self-evident where a row policy is not. A member runs SHOW GRANTS, sees three
+  // tables, and needs to trust nothing; `SHOW TABLES FROM mem` does not even list the
+  // rooms they were not granted. That is a story you can tell a colleague.
+  //
+  // This is the single place a room name is produced, which is what makes the layout
+  // affordable: nothing else in the codebase spells a table.
+  const phys = (t) => (prefix ? `${prefix}_${t}` : t);
+  out.physical = {};
+  for (const t of [...ROOM_TYPES, ...META_TYPES]) out.physical[t] = phys(t);
   // The raw table names — for INSERT, for DDL, and for the shipper's own bookkeeping
   // reads, which have to see every epoch to decide which one to write next.
-  for (const t of ROOM_TYPES) out[`${t}_raw`] = t;
+  for (const t of ROOM_TYPES) out[`${t}_raw`] = phys(t);
   // What everything else gets. `sessions` is unfiltered: it is one metadata row per
   // session by construction, latest-wins, and carries no epoch anyone may read.
-  out.sessions = 'sessions';
-  out.messages = currentParse('messages');
+  out.sessions = phys('sessions');
+  out.messages = currentParse('messages', 'messages', phys('messages'));
   // tool_calls takes its epoch from MESSAGES, not from itself. A parse that produces
   // messages but NO tool calls is ordinary — a compaction can remove every assistant turn
   // that called something — and it writes zero rows into this room at the new epoch. Asked
   // for its own max(epoch), the room would answer with the SUPERSEDED epoch and serve the
   // old parse's tool calls beside the new parse's messages. Both rooms are written by the
   // same pass at the same epoch, so messages is the authority for both.
-  out.tool_calls = currentParse('tool_calls', 'messages');
+  out.tool_calls = currentParse('tool_calls', 'messages', phys('tool_calls'));
   // The house's own record of itself — plain names, nothing to filter.
-  for (const t of META_TYPES) { out[t] = t; out[`${t}_raw`] = t; }
+  for (const t of META_TYPES) { out[t] = phys(t); out[`${t}_raw`] = phys(t); }
   out.sessions_v = sessionsRollup(out);
   return out;
 }
@@ -333,8 +348,8 @@ async function currentUser(client) {
 }
 
 /** Resolve the rooms for whoever this client is connected as. */
-async function resolveRooms(client) {
-  return roomNames(await currentUser(client));
+async function resolveRooms(client, prefix = '') {
+  return roomNames(await currentUser(client), prefix);
 }
 
 module.exports = {

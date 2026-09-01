@@ -61,7 +61,7 @@ const selfUpdate = require('../self-update');
 // gets. Taking it later would record whatever an upgrade had already replaced.
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
-  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN,
+  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN, createStatement,
   SUPPORTED_SCHEMAS, keyProblem,
 } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
@@ -410,17 +410,25 @@ async function assertRoomKeys(client, rooms) {
   }
 }
 
+// The shipper reads the prefix straight from its environment: it is spawned with the
+// resolved MEMHOUSE_* env by the CLI, and every room name it touches comes from
+// resolveRooms, so this is the only line that needs to know.
+const TABLE_PREFIX = process.env.MEMHOUSE_TABLE_PREFIX || '';
+
 async function ensureSchema(client) {
-  const rooms = await resolveRooms(client);
+  const rooms = await resolveRooms(client, TABLE_PREFIX);
   // BEFORE the CREATEs and ALTERs, not beside the end-of-function asserts. A house whose
   // record says a newer release moved it forward may have columns this template does not
   // know; running this template's DDL first could add back what that release removed —
   // the exact write the guard exists to prevent.
   await assertWriterSupported(client, rooms);
   const tpl = fs.readFileSync(path.join(__dirname, '..', 'house', 'schema.sql.tpl'), 'utf-8');
-  const sql = tpl; // plain shared tables — nothing to render
-  const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
-  const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
+  // Rendered per room rather than taken as one blob, because a prefixed house names its
+  // rooms `<prefix>_messages` and the template says `messages`. With no prefix the two
+  // are identical, so this is the same statements in the same order as before.
+  const stmts = [...ROOM_TYPES, ...META_TYPES]
+    .map((t) => createStatement(tpl, t, rooms.physical ? rooms.physical[t] : t)
+      .replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
   // Two failure shapes are survivable here and both are skipped rather than fatal:
   //
   //   - a permission denial. A read-only credential can still run --ensure-schema for
@@ -1003,7 +1011,7 @@ async function runShip(client, opts = {}) {
   // in incremental mode, but re-shipping a KNOWN session needs its current epoch and row
   // shape: writing at the wrong epoch either forks a session that did not change, or
   // overwrites a stored parse that did.
-  const rooms = await resolveRooms(client);
+  const rooms = await resolveRooms(client, TABLE_PREFIX);
   await assertWriterSupported(client, rooms);
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
@@ -1163,7 +1171,7 @@ function reportAdapterErrors(warned) {
 // Per-source rollup straight from sessions_v (final=1 so ReplacingMergeTree collapses).
 // The rollup resolves like the rooms do — it is a subquery over the caller's own rooms.
 async function printStats(client) {
-  const rooms = await resolveRooms(client);
+  const rooms = await resolveRooms(client, TABLE_PREFIX);
   const rs = await client.query({
     query: `
       SELECT source,

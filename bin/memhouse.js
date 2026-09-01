@@ -94,6 +94,10 @@ function resolveConfig() {
     // works — user 'alice' with house 'default' is a supported pairing.
     db: pick('db', 'MEMHOUSE_DB', pick('user', 'MEMHOUSE_USER', 'memhouse_root')),
     port: pick('port', 'MEMHOUSE_PORT', '4640'),
+    // A PREFIXED house: one database holds every member's rooms under their own names
+    // (`mem.alice_messages`), and each member is granted only their three. Empty means
+    // today's layout — a database per member, rooms named plainly. See roomNames().
+    prefix: pick('table-prefix', 'MEMHOUSE_TABLE_PREFIX', ''),
     // Did anything actually SAY which house this is, or are the values above just the
     // defaults? The defaults are not neutral — localhost:8123 as memhouse_root is a real
     // house on a lot of machines, usually the pilot's own. An agent whose config went
@@ -138,6 +142,9 @@ function childEnv(cfg, override = {}) {
     ...(cfg._quietDenied ? { MEMHOUSE_QUIET_DENIED: '1' } : {}),
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
+    // Always set, even when empty — a child inheriting a STALE prefix from the ambient
+    // environment would write into another member's rooms.
+    MEMHOUSE_TABLE_PREFIX: cfg.prefix || '',
     ...override,
   };
 }
@@ -154,6 +161,10 @@ function writeEnvFile(cfg) {
     `MEMHOUSE_PASSWORD=${sq(cfg.password)}`,
     `MEMHOUSE_DB=${sq(cfg.db)}`,
     `MEMHOUSE_PORT=${sq(cfg.port)}`,
+    // Written only when there IS one: an empty MEMHOUSE_TABLE_PREFIX in the file is
+    // indistinguishable from a member who chose the plain layout, and reading it back as
+    // a prefix would rename every room to `_messages`.
+    ...(cfg.prefix ? [`MEMHOUSE_TABLE_PREFIX=${sq(cfg.prefix)}`] : []),
     '',
   ].join('\n');
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
@@ -259,7 +270,7 @@ async function roomsFor(cfg) {
   const rows = await chRows(cfg, 'SELECT currentUser() AS u');
   const member = rows[0] && rows[0].u;
   if (!member) throw new Error('could not determine currentUser() for room resolution');
-  _rooms = roomNames(member);
+  _rooms = roomNames(member, cfg.prefix || '');
   return _rooms;
 }
 
@@ -365,6 +376,9 @@ Setup        onboard              interactive wizard: discover → configure →
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
                                   --env FILE installs from an invite file (see: invite)
              invite <name>        mint a member + house on the server and write the env
+                                  --shared-db <db>  puts every member in ONE database with
+                                  their own rooms (<db>.<name>_messages …), each granted
+                                  only theirs; --table-prefix overrides the name used
                                   file their install needs (--url --admin-user
                                   [--admin-password, else prompted] [--db NAME]
                                   [--out FILE]); local machine untouched. Refuses a house
@@ -847,7 +861,39 @@ async function adminBootstrap(cfg, admin) {
     // grants SELECT), but the owner is not boxed into read-only sharing of their own house.
     // Scoped to their db: the grant option reaches nothing outside it, and no CREATE USER
     // comes with it, so a member still cannot mint accounts or touch another house.
-    await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
+    if (admin.prefix) {
+      // A PREFIXED house. The member gets NO database-wide grant — only their own three
+      // rooms, named for them, inside a database everyone shares. That is the whole point:
+      // `SHOW GRANTS FOR alice` lists three tables and nothing else, and `SHOW TABLES FROM
+      // mem` shows her only her own, so she can verify the boundary herself instead of
+      // being asked to trust a row policy she cannot see.
+      //
+      // The OPERATOR creates the rooms, here, while an admin credential is in hand. If the
+      // member created them she would need CREATE TABLE on the whole database — enough to
+      // add tables beside everyone else's, which is exactly the blast radius this layout
+      // exists to remove.
+      const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8');
+      const rooms = roomNames(admin.member, admin.prefix);
+      for (const t of [...ROOM_TYPES, ...META_TYPES]) {
+        const physical = rooms.physical[t];
+        await q(createStatement(tpl, t, physical).replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '),
+          { database: cfg.db, settings: { allow_experimental_full_text_index: 1 } });
+      }
+      // One statement per table: ClickHouse rejects `ON db.a, db.b` outright —
+      // "Syntax error … Expected access type" — so there is no shorter form.
+      //
+      // WITH GRANT OPTION, and only on rooms that carry this member's own prefix. It is
+      // what lets `memhouse share` work without an operator: the option reaches exactly
+      // the tables named here and cannot touch a housemate's, so a member can open their
+      // own memory and nothing else. Without it, sharing in a shared database failed with
+      // a raw ACCESS_DENIED naming a grant nobody could explain.
+      for (const t of [...ROOM_TYPES, ...META_TYPES]) {
+        await q(`GRANT SELECT, INSERT, ALTER, OPTIMIZE ON ${cfg.db}.${rooms.physical[t]} TO ${admin.member} WITH GRANT OPTION`, { database: '' });
+      }
+      console.log(ok(`created and granted ${ROOM_TYPES.length + META_TYPES.length} rooms as ${cfg.db}.${admin.prefix}_*`));
+    } else {
+      await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
+    }
     // Self-scoped ALTER USER — the member owns their own password (memhouse passwd needs
     // no admin; an invitee can rotate the password the inviter set). Non-escalating: the
     // grant names this one user, so it reaches no other account. Best-effort: a house on
@@ -870,7 +916,9 @@ async function adminBootstrap(cfg, admin) {
     try { await q(`GRANT REMOTE ON *.* TO ${admin.member}`, { database: '' }); }
     catch { /* no access-management: relocate stays admin-assisted for this member */ }
     await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
-    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', SHOW USERS, REMOTE, async_insert pinned`));
+    console.log(ok(admin.prefix
+      ? `granted '${admin.member}' its own rooms only, SHOW USERS, REMOTE, async_insert pinned`
+      : `granted the house: ALL ON ${cfg.db}.* to '${admin.member}', SHOW USERS, REMOTE, async_insert pinned`));
   } catch (e) {
     console.log(bad(`could not grant the house to '${admin.member}': ${e.message}`));
     if (createdUser) {
@@ -885,7 +933,9 @@ async function adminBootstrap(cfg, admin) {
 
   // The step that makes this trustworthy: stop being admin, and prove the credential we
   // are about to persist can build and reach the rooms itself.
-  const memberCfg = { ...cfg, user: admin.member, password };
+  // Carries the prefix: the proof below runs the real shipper, which resolves room names
+  // from this config. Without it, it looks for `messages` in a house that has `alice_messages`.
+  const memberCfg = { ...cfg, user: admin.member, password, prefix: admin.prefix || '' };
   // An invite must not mint THIS machine's host identity, nor record the invitee as a
   // <invitee>@<inviter-host> writer in a house the inviter will never ship to. Run the
   // schema-build proof against a throwaway MEMHOUSE_HOME so host.json lands there and is
@@ -898,7 +948,9 @@ async function adminBootstrap(cfg, admin) {
     return null;
   }
   try {
-    const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN ('sessions','messages','tool_calls')`, { database: '' });
+    const want = roomNames(admin.member, admin.prefix || '');
+    const names = ROOM_TYPES.map((t) => `'${want.physical[t]}'`).join(',');
+    const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN (${names})`, { database: '' });
     if (Number(seen[0]?.n) !== 3) { console.log(bad(`'${admin.member}' cannot see the three rooms — nothing written`)); return null; }
   } catch (e) { console.log(bad(`'${admin.member}' could not connect after provisioning: ${e.message}`)); return null; }
   console.log(ok(`verified as '${admin.member}' — admin credential discarded, not stored`));
@@ -1002,8 +1054,14 @@ async function cmdInstall({ interactive }) {
     if (missing.length) { console.log(bad(`--env ${flags.env} is missing ${missing.join(', ')} — not a complete invite file?`)); return 1; }
     // Clear ambient MEMHOUSE_* so ONLY the file speaks (exported vars normally win over the
     // file; an invite intake is the one place they must not).
-    for (const k of ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB', 'MEMHOUSE_PORT']) delete process.env[k];
+    for (const k of ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB', 'MEMHOUSE_PORT',
+      'MEMHOUSE_TABLE_PREFIX']) delete process.env[k];
     for (const k of wanted) process.env[k] = parsed[k];
+    // OPTIONAL, and only present for a shared house — but load-bearing when it is: without
+    // it the invitee resolves `messages` in a database that holds `alice_messages`, and the
+    // install fails claiming the rooms were never created. Cleared above first, so an
+    // ambient prefix from another house cannot bleed into this one.
+    if (parsed.MEMHOUSE_TABLE_PREFIX) process.env.MEMHOUSE_TABLE_PREFIX = parsed.MEMHOUSE_TABLE_PREFIX;
     console.log(ok(`using the invite file ${String(flags.env)} (nothing persisted until the install proves out)`));
     _inviteFileToShred = path.resolve(String(flags.env));
     _inviteWantsRotate = parsed.MEMHOUSE_INVITE === '1';
@@ -3033,6 +3091,14 @@ async function cmdShare() {
   const cfg = requireConfig(resolveConfig(), 'share');
   if (!cfg.user) return 1;
   const db = cfg.db;
+  // In a SHARED database a member owns three named rooms, not the database. Granting
+  // `ON <db>.*` there would hand over every housemate's rooms as well — it fails closed
+  // today (the member has no grant option on the database) but with a raw ACCESS_DENIED
+  // naming a privilege nobody can explain. Grant the rooms this member actually owns.
+  const mine = roomNames(cfg.user, cfg.prefix || '');
+  const shareTargets = cfg.prefix
+    ? ROOM_TYPES.map((t) => `${db}.${mine.physical[t]}`)
+    : [`${db}.*`];
 
   // Statements, not reads: this is the one command in the read family that writes, so it
   // does NOT go through the readonly connection the skills use.
@@ -3060,10 +3126,10 @@ async function cmdShare() {
   if (flags.revoke === true) {
     let dropped = 0;
     for (const room of ROOM_TYPES) {
-      try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${room}`); dropped++; }
+      try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); dropped++; }
       catch (e) { console.log(warn(`could not drop the policy on ${room}: ${e.message.split('\n')[0]}`)); }
     }
-    try { await run(`REVOKE SELECT ON ${db}.* FROM ${user}`); }
+    try { for (const tgt of shareTargets) await run(`REVOKE SELECT ON ${tgt} FROM ${user}`); }
     catch (e) { console.log(bad(`could not revoke: ${netReason(e)}`)); return 1; }
     await houseMeta(cfg, `share:${user}`, `revoked ${new Date().toISOString().slice(0, 10)}`);
     console.log(ok(`revoked '${user}' — SELECT withdrawn and ${dropped} row polic${dropped === 1 ? 'y' : 'ies'} dropped`));
@@ -3098,7 +3164,7 @@ async function cmdShare() {
     if (verdict === null) console.log(warn('could not verify how this server treats readers without a policy — continuing'));
   }
 
-  try { await run(`GRANT SELECT ON ${db}.* TO ${user}`); }
+  try { for (const tgt of shareTargets) await run(`GRANT SELECT ON ${tgt} TO ${user}`); }
   catch (e) { console.log(bad(`could not grant: ${netReason(e)}`)); return 1; }
 
   if (!scope) {
@@ -3108,21 +3174,24 @@ async function cmdShare() {
     for (const room of ROOM_TYPES) {
       try {
         const had = await rows(`SELECT count() AS n FROM system.row_policies WHERE database = ${sqlStr(db)} AND short_name = ${sqlStr(share.policyName(user, room))}`);
-        if (Number(had[0] && had[0].n) > 0) { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${room}`); cleared++; }
+        if (Number(had[0] && had[0].n) > 0) { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); cleared++; }
       } catch { /* nothing to clear */ }
     }
     await houseMeta(cfg, `share:${user}`, `granted ${new Date().toISOString().slice(0, 10)}`);
-    console.log(ok(`'${user}' can now read every session in '${db}'`));
+    console.log(ok(cfg.prefix
+      ? `'${user}' can now read every session in your rooms (${db}.${cfg.prefix}_*)`
+      : `'${user}' can now read every session in '${db}'`));
     if (cleared) console.log(warn(`cleared ${cleared} row polic${cleared === 1 ? 'y' : 'ies'} from an earlier scoped share — this is now a FULL share`));
     console.log(`  Everything: every project, machine and editor, including anything ever pasted`);
-    console.log(`  into a session. Narrow it with:  memhouse share ${user} --only project=<name>`);
+    console.log(`  into a session${cfg.prefix ? ' of yours — housemates\' rooms are untouched' : ''}.`);
+    console.log(`  Narrow it with:  memhouse share ${user} --only project=<name>`);
     console.log(`  Withdraw with:                   memhouse share ${user} --revoke`);
     return 0;
   }
 
   for (const room of ROOM_TYPES) {
     const pred = share.scopePredicate(scope, room, sqlStr);
-    try { await run(`CREATE ROW POLICY OR REPLACE ${share.policyName(user, room)} ON ${db}.${room} USING ${pred} TO ${user}`); }
+    try { await run(`CREATE ROW POLICY OR REPLACE ${share.policyName(user, room)} ON ${db}.${mine.physical[room]} USING ${pred} TO ${user}`); }
     catch (e) {
       console.log(bad(`could not scope ${room}: ${e.message.split('\n')[0]}`));
       console.log('  PARTIALLY APPLIED — a share filtered on some rooms and not others leaks.');
@@ -3301,9 +3370,28 @@ async function cmdInvite() {
     console.log('  for the same-machine case.');
     return 1;
   }
-  const db = flags.db && flags.db !== true ? String(flags.db) : name;
+  // Two layouts. DEFAULT: a database per member, rooms named plainly — `alice.messages`.
+  // SHARED: one database everyone uses, each member's rooms carrying their own prefix —
+  // `mem.alice_messages` — and each member granted only their three tables. The second
+  // exists because a grant is something a colleague can verify for themselves, where a
+  // row policy is machinery they are asked to trust.
+  const sharedDb = flags['shared-db'] && flags['shared-db'] !== true ? String(flags['shared-db']) : null;
+  const db = sharedDb || (flags.db && flags.db !== true ? String(flags.db) : name);
   try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(db, 'house'); }
   catch (e) { console.log(bad(e.message)); return 1; }
+  // The prefix defaults to the member's own name; --table-prefix overrides it. It becomes
+  // a table name, so it has to survive being spliced bare into DDL.
+  let prefix = null;
+  if (sharedDb) {
+    prefix = flags['table-prefix'] && flags['table-prefix'] !== true ? String(flags['table-prefix']) : name;
+    try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(prefix, 'table prefix'); }
+    catch (e) { console.log(bad(e.message)); return 1; }
+  } else if (flags['table-prefix'] !== undefined) {
+    console.log(bad('--table-prefix only means something with --shared-db.'));
+    console.log('  Without a shared database each member already has rooms of their own.');
+    console.log(`     memhouse invite ${name} --url … --shared-db mem`);
+    return 1;
+  }
 
   // The way out for someone who is NOT the administrator. Being unable to invite is not a
   // bug to be worked around — a member holds no CREATE USER by design — but "ask your
@@ -3421,15 +3509,18 @@ async function cmdInvite() {
   const adminCfg = { ...cfg, url: provisionUrl, user: adminUser, password: adminPass || '', db, stated: true };
   let occupied = null;
   try {
-    const exists = await chRows(adminCfg, `SELECT count() AS n FROM system.tables WHERE database = '${db.replace(/'/g, "\\'")}' AND name = 'messages'`, { database: '' });
+    // In a shared database the question is not "does this house hold messages" — it will,
+    // everyone else's — but "does THIS MEMBER's room already hold some".
+    const room = prefix ? `${prefix}_messages` : 'messages';
+    const exists = await chRows(adminCfg, `SELECT count() AS n FROM system.tables WHERE database = '${db.replace(/'/g, "\\'")}' AND name = '${room.replace(/'/g, "\\'")}'`, { database: '' });
     if (Number(exists[0] && exists[0].n) > 0) {
-      const r = await chRows(adminCfg, 'SELECT count() AS msgs, uniqExact(user_id) AS writers FROM messages', { database: db });
+      const r = await chRows(adminCfg, `SELECT count() AS msgs, uniqExact(user_id) AS writers FROM ${room}`, { database: db });
       const msgs = Number(r[0] && r[0].msgs) || 0;
       if (msgs > 0) occupied = { msgs, writers: Number(r[0].writers) || 0 };
     }
   } catch { /* cannot tell — provisioning below will surface any real access problem */ }
   if (occupied && flags.adopt !== true) {
-    console.log(bad(`house '${db}' already exists and holds ${occupied.msgs} messages from ${occupied.writers} writer(s) — NOT inviting.`));
+    console.log(bad(`${prefix ? `${db}.${prefix}_messages` : `house '${db}'`} already exists and holds ${occupied.msgs} messages from ${occupied.writers} writer(s) — NOT inviting.`));
     console.log(`  Inviting '${name}' here would hand them somebody else's memory, and their`);
     console.log('  first ship would land on top of it. Nothing has been changed.');
     console.log('  Pick a different handle:   memhouse invite <other-name> --url …');
@@ -3442,8 +3533,9 @@ async function cmdInvite() {
   }
 
   const built = await adminBootstrap({ ...cfg, url: provisionUrl, db, stated: true }, {
-    user: adminUser, password: adminPass || '', member: name, quiet: true,
+    user: adminUser, password: adminPass || '', member: name, quiet: true, prefix,
   });
+  if (built) built.prefix = prefix || '';
   if (built) built.url = url; // the invitee reaches the house at --url, not the admin's endpoint
   if (!built) return 1;
 
@@ -3459,6 +3551,11 @@ async function cmdInvite() {
     `MEMHOUSE_USER=${sq(built.user)}`,
     `MEMHOUSE_PASSWORD=${sq(built.password)}`,
     `MEMHOUSE_DB=${sq(built.db)}`,
+    ...(built.prefix ? [
+      `# This house is SHARED: your rooms are ${built.db}.${built.prefix}_* and you are granted`,
+      '# only those. Other members keep their own rooms in the same database.',
+      `MEMHOUSE_TABLE_PREFIX=${sq(built.prefix)}`,
+    ] : []),
     '# This credential was issued by an invitation (no admin access here); memhouse offers',
     '# to rotate it on install so the inviter no longer knows it.',
     'MEMHOUSE_INVITE=1',

@@ -1009,5 +1009,56 @@ test('policy names are predictable, so revoke finds every room', () => {
   assert.strictEqual(new Set(names).size, 3);
 });
 
+// ── prefixed houses: one database, a member's rooms named for them ───────────────
+// The layout exists because a grant is something a colleague can verify and a row policy
+// is not. It lives or dies on one property: every room name comes from roomNames(), so
+// nothing else in the codebase has to know which layout it is looking at.
+test('no prefix resolves exactly as before', () => {
+  const a = rooms.roomNames('alice');
+  const b = rooms.roomNames('alice', '');
+  assert.deepStrictEqual(a, b, 'an empty prefix must be the old behaviour, byte for byte');
+  assert.strictEqual(a.sessions, 'sessions');
+  assert.strictEqual(a.messages_raw, 'messages');
+  assert.strictEqual(a.house_meta, 'house_meta');
+});
+
+test('a prefix renames every room, including the house record', () => {
+  const r = rooms.roomNames('alice', 'alice');
+  assert.strictEqual(r.sessions, 'alice_sessions');
+  assert.strictEqual(r.messages_raw, 'alice_messages');
+  assert.strictEqual(r.tool_calls_raw, 'alice_tool_calls');
+  assert.strictEqual(r.house_meta, 'alice_house_meta');
+  assert.strictEqual(r.house_events, 'alice_house_events');
+});
+
+test('the epoch subquery reads the prefixed table, not the bare one', () => {
+  const r = rooms.roomNames('alice', 'alice');
+  const flat = r.messages.replace(/\s+/g, ' ');
+  assert.ok(/FROM alice_messages FINAL/.test(flat), 'the outer read must be prefixed');
+  assert.ok(!/FROM messages\b/.test(flat), 'a bare `messages` would read another layout entirely');
+});
+
+test('tool_calls still takes its epoch from MESSAGES, prefixed', () => {
+  // A parse producing messages but no tool calls writes nothing into tool_calls at the
+  // new epoch; asked for its own max(epoch) that room answers with the superseded one.
+  const r = rooms.roomNames('alice', 'alice');
+  const flat = r.tool_calls.replace(/\s+/g, ' ');
+  assert.ok(/FROM alice_tool_calls FINAL/.test(flat));
+  assert.ok(/FROM alice_messages WHERE origin/.test(flat), 'epoch source must be the prefixed messages room');
+});
+
+test('physical names are exposed for DDL and grants', () => {
+  const r = rooms.roomNames('alice', 'alice');
+  assert.strictEqual(r.physical.messages, 'alice_messages');
+  assert.strictEqual(r.physical.sessions, 'alice_sessions');
+  assert.strictEqual(rooms.roomNames('alice').physical.messages, 'messages');
+});
+
+test('the rollup follows the prefix', () => {
+  const v = rooms.roomNames('alice', 'alice').sessions_v;
+  assert.ok(v.includes('alice_sessions'), 'the rollup must join the prefixed rooms');
+  assert.ok(!/\bFROM sessions\b/.test(v.replace(/\s+/g, ' ')));
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
