@@ -412,6 +412,7 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              search <terms…>      full-text search across all sessions
              resume <session-id>  print the command that reopens that session in its editor
              sessions-query       print the session rollup SQL for this credential
+             rooms                what your rooms are actually called (--json)
              start | stop |       shipper loop + dashboard as background daemons
              share <user>         let someone read this house (--only project=… |
                                   session=… | host=… | source=… | folder=… | since=… |
@@ -3874,6 +3875,27 @@ async function cmdUninstall() {
       // carries FINAL and join_use_nulls itself, so the note is provenance, not a warning.
       if (!JSON_OUT) console.log(`-- memhouse rollup for '${r.member}' — self-contained (FINAL + join_use_nulls).`);
       console.log(r.sessions_v);
+      break;
+    }
+    case 'rooms': {
+      // What are my rooms ACTUALLY called? In the default layout the answer is boring —
+      // `messages`, in a database of your own. In a shared house it is `alice_messages`
+      // in a database full of other people's rooms, and nothing else can tell you that:
+      // the env file has the prefix but not the arithmetic. This is the same roomNames()
+      // every other code path resolves through, so the answer cannot drift from reality.
+      const cfg = requireConfig(resolveConfig(), 'rooms');
+      const r = await roomsFor(cfg);
+      const names = {};
+      for (const t of [...ROOM_TYPES, ...META_TYPES]) names[t] = r.physical[t];
+      if (JSON_OUT) {
+        console.log(JSON.stringify({ database: cfg.db, prefix: cfg.prefix || '', shared: !!cfg.prefix, rooms: names }, null, 2));
+      } else {
+        console.log(cfg.prefix
+          ? `${cfg.db} — SHARED house; you hold these rooms and no others:`
+          : `${cfg.db} — your own house:`);
+        for (const t of [...ROOM_TYPES, ...META_TYPES]) console.log(`  ${cfg.db}.${names[t]}`);
+        if (cfg.prefix) console.log(`\n  Housemates keep their own rooms in ${cfg.db}. Prefix reads and writes\n  with '${cfg.prefix}_' — a bare 'messages' is not a table you have.`);
+      }
       break;
     }
     case 'plugins': process.exitCode = await cmdPlugins(); break;

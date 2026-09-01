@@ -33,6 +33,22 @@ migration path is planned work, not a promise the old versions can cash.
   invitee picks nothing. Empty means the layout memhouse has always had — verified byte
   for byte against the previous resolution.
 
+- **`memhouse rooms`** — what your rooms are actually called. Boring in your own house
+  (`messages`); the only way to know in a shared one (`mem.alice_messages`). It resolves
+  through the same function the shipper writes with, so it cannot drift from the server.
+
+- **The `/mem:*` skills work in a shared house.** They write `FROM messages` bare in some
+  fourteen places, which names nothing in a house holding `alice_messages`. Rather than
+  teach fourteen query sites about prefixes, the `q()` helper in `reference/HOUSE.md` —
+  the single connection every skill routes through — now rewrites room names after
+  `FROM`/`JOIN`. A needle like `LIKE '%messages%'` is untouched, and `FROM yigit_messages`
+  is left alone so a shared room still reads.
+
+  Written with `[[:space:]]` classes, not `\b`: **BSD `sed` does not support `\b`**, and
+  the first version matched nothing on macOS. `misc/prefix-skill-recipe.sh` extracts
+  `q()` from the reference and runs it against both layouts — the doc is executable
+  because it is load-bearing.
+
 ## 0.17.0 — 2026-08-25
 
 - **`memhouse share` — partial sharing, by row policy.** A share used to be all or

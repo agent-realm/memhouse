@@ -45,7 +45,8 @@ if [ -z "${MEMHOUSE_URL:-}" ] || [ -z "${MEMHOUSE_USER:-}" ]; then
 fi
 
 q() {  # read-only by construction; every read path should use this
-  curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
+  sed -E "s/([[:space:](]|^)(FROM|JOIN)[[:space:]]+(sessions|messages|tool_calls|house_meta|house_events)([[:space:];,)]|\$)/\1\2 ${MEMHOUSE_TABLE_PREFIX:+${MEMHOUSE_TABLE_PREFIX}_}\3\4/g" \
+  | curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
     --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&readonly=1"
 }
 q <<'SQL'
@@ -56,11 +57,35 @@ SQL
 `readonly=1` is a ClickHouse-side setting: even a mis-generated `DROP` is refused by the
 server, not by discipline.
 
+**The `sed` is what makes every query below work in both layouts** — write room names
+bare and it supplies the prefix when there is one. It rewrites only after `FROM`/`JOIN`,
+so a needle like `LIKE '%messages%'` is untouched, and `FROM yigit_messages` is left
+alone — the room name must follow whitespace, and there is none inside `yigit_messages`.
+With no prefix set it expands to nothing and the query passes through verbatim.
+
+It is spelled with `[[:space:]]` classes rather than `\b` because **BSD `sed` does not
+support `\b`**: on macOS the `\b` form matched nothing and sent the query through
+unprefixed. That fails loudly as `UNKNOWN_TABLE` rather than quietly reading wrong rows,
+which is the right way round — but it fails.
+
+**Two layouts, and you may be in either.** Normally a member owns a whole database and
+the rooms are plainly named — `alice.messages`. But a house provisioned with
+`invite --shared-db` puts everyone in ONE database under their own names —
+`mem.alice_messages`, `mem.bob_messages` — and grants each member only their own rooms.
+`memhouse rooms` reports which you are in and what your tables are actually called; it
+resolves through the same function the shipper writes with, so it cannot drift. A bare
+`FROM messages` in a shared house is not a table you have — hence the `sed`.
+
 **Reading someone else's house.** A share is a read-only `GRANT SELECT` on their
 database. `SHOW DATABASES` lists what your credential may read; anything that is not
 `system`, `information_schema`, `default` or your own `$MEMHOUSE_DB` was shared with you.
 To read it, change `database=` in the URL and leave the table names bare. Say whose house
 an answer came from.
+
+In a **shared** house a share is narrower still — a `GRANT SELECT` on the individual
+rooms, so what you gain is `mem.yigit_messages`, not a database. Name those rooms in full
+(`FROM yigit_messages`); the `sed` leaves them alone, since it would otherwise apply your
+prefix to someone else's room. `SHOW TABLES FROM mem` lists exactly what you may read.
 
 ---
 

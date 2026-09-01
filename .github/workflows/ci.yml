@@ -70,6 +70,11 @@ jobs:
       # until somebody reads a table they should not.
       - name: prefix matrix (one database, per-member rooms)
         run: misc/prefix-matrix.sh http://localhost:8123 memhouse_root cipw
+      # The /mem:* skills write room names bare and rely on the q() in reference/HOUSE.md
+      # to supply a prefix. That makes a doc load-bearing, so the test extracts q() from
+      # the doc itself and runs it — a paraphrase passing would prove nothing.
+      - name: skill recipe (the documented q(), both layouts)
+        run: misc/prefix-skill-recipe.sh http://localhost:8123 memhouse_root cipw
       - name: headless e2e — install, ship, status
         run: |
           set -euo pipefail
