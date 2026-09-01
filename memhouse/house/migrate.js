@@ -124,7 +124,8 @@ async function unfinishedBy(q, ctx, migrationId) {
     const rows = await q.rows(
       `SELECT argMax(status, event_at) AS status, argMax(actor, event_at) AS actor,
               formatDateTime(max(event_at), '%Y-%m-%d %H:%i') AS at
-       FROM house_events WHERE kind = 'migration' AND id = '${migrationId}'`);
+       FROM ${(ctx.rooms && ctx.rooms.physical && ctx.rooms.physical.house_events) || 'house_events'}
+       WHERE kind = 'migration' AND id = '${migrationId}'`);
     const r = rows[0];
     if (r && r.status === 'pending' && r.actor && r.actor !== ctx.member) return r;
   } catch { /* no events table yet */ }

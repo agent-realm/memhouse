@@ -86,6 +86,20 @@ r=$(M bob "$APW_B" "SELECT count() FROM mem.alice_messages")
 printf '%s' "$r" | grep -q "ACCESS_DENIED" && ok "bob loses access after revoke" || bad "revoke did not bite" "$r"
 
 echo
+echo "=== the metadata plane — it used to fail SILENTLY in a prefixed house ==="
+# Every meta read and write in the CLI spelled `house_meta`/`house_events` by hand and
+# swallowed the error, so a prefixed house had no ledger, no schema version, and a
+# `share --list` that said "nobody has been granted a read" while a grant was live.
+export MEMHOUSE_HOME="$WORK/alicehome"
+r=$(A "SELECT count() FROM mem.alice_house_meta" | tr -d '\n')
+case "$r" in ''|*[!0-9]*) bad "alice_house_meta is not readable" "$r";; *) ok "the member's own meta room exists ($r rows)";; esac
+$CLI share bob --yes >/dev/null 2>&1
+out=$($CLI share --list 2>&1)
+printf '%s' "$out" | grep -q "bob" && ok "share --list reports a live share" || bad "share --list lost a real share" "$(printf '%s' "$out" | head -2)"
+printf '%s' "$out" | grep -q "your rooms in" && ok "  and says ROOMS, not the whole database" || bad "  share --list still names the database"
+$CLI share bob --revoke --yes >/dev/null 2>&1
+
+echo
 echo "=== cleanup ==="
 A "DROP DATABASE IF EXISTS mem SYNC" >/dev/null
 for u in alice bob; do A "DROP USER IF EXISTS $u" >/dev/null; done

@@ -12,19 +12,33 @@
 //   host     LowCardinality(String)              — the machine's fingerprint, minted once
 //                                                  per install (../host.js)
 //
-// That pair IS the provenance model. Alice and Bob point their shippers at `team_a` and
-// both write; `WHERE user_id = 'alice'` is one person, `WHERE host = '…'` is one machine.
-// The model is collaborative — housemates trust each other with the house — and the
-// boundary between houses is the database: joining someone's ClickHouse takes a database
-// and a credential (`GRANT ALL ON team_a.* TO alice`), nothing else, because ALL on your
-// own database reaches nothing outside it.
+// That pair IS the provenance model, and it is unforgeable in both layouts below.
 //
-// THIS REPLACES THE PER-MEMBER LAYOUT. Rooms were `sessions_<member>` with per-member
-// grants, Merge rooms for team reads, and isolation between members of one database.
-// All of it is gone: suffixed names made every client resolve its room names first (and
-// `FROM messages` a documented trap), the Merge rooms existed only to undo the
-// splitting, and per-member isolation inside a shared house solved an adversarial
-// problem the product does not have. Separate houses isolate; one house shares.
+// TWO LAYOUTS, and roomNames() is where the difference lives:
+//
+//   a house of your own    `alice.messages`      alice holds ALL ON alice.*
+//   rooms in a shared house `mem.alice_messages`  alice holds her five tables, nothing else
+//
+// The first is the default: one member, one database, plainly named rooms. The second is
+// for a ClickHouse where you cannot make a database per person, and it is provisioned by
+// `invite --shared-db mem`.
+//
+// A DATABASE HAS ONE OWNER, OR IT HAS PER-MEMBER ROOMS. Never both. Two members in one
+// database with `ALL ON db.*` apiece looks like a team and is not one: either can read the
+// other's rows AND grant them onward — measured, alice ran `GRANT SELECT ON team.* TO
+// carol` and carol read bob's messages, with no admin involved and nobody told. cmdInvite
+// enforces this; --adopt does not override it.
+//
+// THIS FILE ONCE SAID THE OPPOSITE, and the history is worth keeping. An early per-member
+// layout (suffixed `sessions_<member>`, plus Merge rooms to read across them) was removed
+// for three reasons: clients had to resolve names before querying, the Merge rooms existed
+// only to undo the splitting, and isolation between housemates looked like an adversarial
+// problem the product did not have. The first two were right and are paid again here — see
+// physicalRoom() and the eight callers that used to spell tables by hand. The third was
+// wrong, twice over: the shared shape leaked, and "trust the row policy" is a sentence you
+// cannot ask a colleague to accept when "here are your grants, check them" is available.
+// merge() replaces the Merge rooms and is filtered by grant, so a team still reads across
+// everyone without anyone being granted more than their own.
 //
 // `sessions_v` IS A SAVED QUERY, NOT AN OBJECT — substituted into the same `FROM … AS c`
 // position a view name would occupy, running under the caller's own credential. It was
@@ -306,6 +320,21 @@ const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
  * name it produces. See ship.js's delete, which must BIND the user rather than call
  * currentUser() inside a mutation, where it is not evaluated in the caller's context.
  */
+/**
+ * The table a room type lands in. THE naming rule, and the only copy of it.
+ *
+ * Depends on the prefix alone — the member's name is already inside the prefix — so this
+ * needs no server round-trip and callers that hold only a config can use it. That matters:
+ * the rule used to live solely inside roomNames(), which meant every caller that could not
+ * afford `SELECT currentUser()` spelled the table by hand instead. Eight of them did, all
+ * for `house_meta`/`house_events`, and all swallowed the resulting error — so a prefixed
+ * house silently had no metadata plane at all: no ledger, no schema version, and a
+ * `share --list` that answered "nobody has been granted a read" while a grant was live.
+ */
+function physicalRoom(type, prefix = '') {
+  return prefix ? `${prefix}_${type}` : type;
+}
+
 function roomNames(user, prefix = '') {
   const out = { member: user, user, prefix: prefix || '' };
   // A PREFIXED house puts every member's rooms in one database under their own names —
@@ -314,9 +343,9 @@ function roomNames(user, prefix = '') {
   // tables, and needs to trust nothing; `SHOW TABLES FROM mem` does not even list the
   // rooms they were not granted. That is a story you can tell a colleague.
   //
-  // This is the single place a room name is produced, which is what makes the layout
-  // affordable: nothing else in the codebase spells a table.
-  const phys = (t) => (prefix ? `${prefix}_${t}` : t);
+  // Every room name in the codebase comes from physicalRoom() above — through this
+  // function where a caller has the rooms, directly where it has only a prefix.
+  const phys = (t) => physicalRoom(t, prefix);
   out.physical = {};
   for (const t of [...ROOM_TYPES, ...META_TYPES]) out.physical[t] = phys(t);
   // The raw table names — for INSERT, for DDL, and for the shipper's own bookkeeping
@@ -353,6 +382,7 @@ async function resolveRooms(client, prefix = '') {
 }
 
 module.exports = {
+  physicalRoom,
   ROOM_TYPES, META_TYPES, SCHEMA_VERSION, SUPPORTED_SCHEMAS, MIN_WRITER_SCHEMA,
   MIGRATIONS, ROOM_KEYS, keyProblem,
   READ_SETTINGS, MEMBER_PIN,

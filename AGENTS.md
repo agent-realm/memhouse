@@ -10,7 +10,11 @@ live in [`~/agent-realm/CLAUDE.md`](../CLAUDE.md) and are not repeated here.
 
 A local shipper parses coding-agent sessions from 17 editors and writes them as typed rows
 into a ClickHouse database the user owns. A **house** is a database; its **rooms** are
-three shared tables (`sessions`, `messages`, `tool_calls`); a **member** owns one house.
+tables (`sessions`, `messages`, `tool_calls`). A **member** owns a house of their own
+(`alice.messages`), or — where a database per person is not available — their own rooms in
+a shared one (`mem.alice_messages`), granted those and nothing else. A database has ONE
+owner or per-member rooms, never both; `roomNames()` in `memhouse/house/house.js` is where
+that difference lives, and no other code spells a table name.
 There is no cloud and no LLM anywhere in the write or read path.
 
 `memhouse/DESIGN.md` argues the design. `TERMINOLOGY.md` is the canon for names — if a

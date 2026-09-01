@@ -24,7 +24,7 @@ const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
 const {
-  roomNames, ROOM_TYPES, MEMBER_PIN, installCommand, keyProblem,
+  roomNames, physicalRoom, ROOM_TYPES, MEMBER_PIN, installCommand, keyProblem,
   SCHEMA_VERSION, MIN_WRITER_SCHEMA, MIGRATIONS, META_TYPES, createStatement,
 } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
@@ -264,14 +264,20 @@ function shipperHealth() {
 // Room routing for the CLI's own queries. The shipper and dashboard resolve rooms through
 // @clickhouse/client; the CLI speaks raw HTTP, so it asks the same question over its own
 // transport and builds the names with the same shared function.
-let _rooms = null;
+// Keyed by the connection the answer belongs to, NOT a single slot. One slot was right
+// only while a process talked to one house as one member; `relocate` talks to two, and the
+// second call would have been handed the first house's names — silently, in the one
+// command whose whole job is moving rooms between houses.
+const _rooms = new Map();
 async function roomsFor(cfg) {
-  if (_rooms) return _rooms;
+  const key = JSON.stringify([cfg.url, cfg.user, cfg.db, cfg.prefix || '']);
+  if (_rooms.has(key)) return _rooms.get(key);
   const rows = await chRows(cfg, 'SELECT currentUser() AS u');
   const member = rows[0] && rows[0].u;
   if (!member) throw new Error('could not determine currentUser() for room resolution');
-  _rooms = roomNames(member, cfg.prefix || '');
-  return _rooms;
+  const r = roomNames(member, cfg.prefix || '');
+  _rooms.set(key, r);
+  return r;
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────────
@@ -1575,14 +1581,14 @@ async function fleetState(cfg) {
   try {
     const writers = new Map(); // 'member@host' -> row
     for (const d of await chRows(cfg,
-      "SELECT user_id, host, formatDateTime(max(ingested_at), '%Y-%m-%dT%H:%i:%SZ') AS last_row FROM messages GROUP BY user_id, host")) {
+      `SELECT user_id, host, formatDateTime(max(ingested_at), '%Y-%m-%dT%H:%i:%SZ') AS last_row FROM ${physicalRoom('messages', cfg.prefix)} GROUP BY user_id, host`)) {
       writers.set(`${d.user_id}@${d.host}`, { writer: `${d.user_id}@${d.host}`, lastRow: d.last_row, version: null, schema: null, lastShip: null });
     }
     if (!writers.size) return null;
     let houseSchema = 0;
     try {
       for (const r of await chRows(cfg,
-        "SELECT key, value FROM house_meta FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'")) {
+        `SELECT key, value FROM ${physicalRoom('house_meta', cfg.prefix)} FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'`)) {
         if (r.key === 'schema_version') { houseSchema = Number(r.value) || 0; continue; }
         const cut = r.key.indexOf(':');
         const kind = r.key.slice(0, cut); const who = r.key.slice(cut + 1);
@@ -1830,12 +1836,12 @@ async function cmdDoctor() {
     // that still work and a `<room>__migrating` nobody would notice; the events table is
     // the only place that shows it, so doctor reads it rather than the pilot.
     try {
-      const meta = new Map((await chRows(cfg, 'SELECT key, value FROM house_meta FINAL'))
+      const meta = new Map((await chRows(cfg, `SELECT key, value FROM ${physicalRoom('house_meta', cfg.prefix)} FINAL`))
         .map((m) => [m.key, String(m.value)]));
       const at = meta.get('schema_version');
       const last = (await chRows(cfg,
         `SELECT id, argMax(status, event_at) AS status, formatDateTime(max(event_at), '%Y-%m-%d %H:%i') AS at
-         FROM house_events WHERE kind = 'migration' GROUP BY id ORDER BY max(event_at) DESC LIMIT 1`))[0];
+         FROM ${physicalRoom('house_events', cfg.prefix)} WHERE kind = 'migration' GROUP BY id ORDER BY max(event_at) DESC LIMIT 1`))[0];
       const stuck = last && last.status !== 'applied';
       // The ROOMS are the truth; this table is the paperwork. A house whose keys are
       // already current but whose record is missing — a fresh install by an older client,
@@ -2609,14 +2615,14 @@ async function houseEvent(cfg, e) {
     ? String(Number(e[c]) || 0)
     : sqlStr(e[c] || '')));
   try {
-    await ch(cfg, `INSERT INTO house_events (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
+    await ch(cfg, `INSERT INTO ${physicalRoom('house_events', cfg.prefix)} (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
       { settings: { async_insert: 0 } });
   } catch { /* an unwritable log is not a reason to abandon a rebuild */ }
 }
 
 async function houseMeta(cfg, key, value) {
   try {
-    await ch(cfg, `INSERT INTO house_meta (key, value) VALUES (${sqlStr(key)}, ${sqlStr(value)})`,
+    await ch(cfg, `INSERT INTO ${physicalRoom('house_meta', cfg.prefix)} (key, value) VALUES (${sqlStr(key)}, ${sqlStr(value)})`,
       { settings: { async_insert: 0 } });
   } catch { /* same */ }
 }
@@ -2662,7 +2668,7 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   // record (schema 3 -> 2) — defeating the writer guard for every old shipper whose key
   // shapes happen to match. An older memhouse cannot migrate a newer house, only say so.
   try {
-    const rec = await q.rows("SELECT value FROM house_meta FINAL WHERE key = 'schema_version'");
+    const rec = await q.rows(`SELECT value FROM ${physicalRoom('house_meta', cfg.prefix)} FINAL WHERE key = 'schema_version'`);
     const recorded = rec.length ? Number(rec[0].value) || 0 : 0;
     if (recorded > SCHEMA_VERSION) {
       console.log(bad(`this house is at schema ${recorded}; this memhouse knows migrations up to ${SCHEMA_VERSION}.`));
@@ -2849,7 +2855,7 @@ async function cmdRelocate() {
   try { srcMember = (await chRows(src, 'SELECT currentUser() AS u', { database: '' }))[0]?.u; }
   catch (e) { console.log(bad(`source not reachable: ${netReason(e)}`)); return 1; }
   try {
-    const rec = await chRows(src, "SELECT value FROM house_meta FINAL WHERE key = 'schema_version'", { database: src.db });
+    const rec = await chRows(src, `SELECT value FROM ${physicalRoom('house_meta', src.prefix)} FINAL WHERE key = 'schema_version'`, { database: src.db });
     const v = rec.length ? Number(rec[0].value) || 0 : 0;
     if (v !== SCHEMA_VERSION) {
       console.log(bad(`source house is at schema ${v || 'pre-record'}; this memhouse is ${SCHEMA_VERSION}.`));
@@ -3246,7 +3252,7 @@ async function shareList(cfg, share) {
   const db = cfg.db;
   let recorded = [];
   try {
-    recorded = await chRows(cfg, "SELECT substring(key, 7) AS user, value AS state FROM house_meta FINAL WHERE key LIKE 'share:%' ORDER BY key", { database: db });
+    recorded = await chRows(cfg, `SELECT substring(key, 7) AS user, value AS state FROM ${physicalRoom('house_meta', cfg.prefix)} FINAL WHERE key LIKE 'share:%' ORDER BY key`, { database: db });
   } catch { /* unreadable record */ }
   let policies = [];
   try {
@@ -3254,14 +3260,21 @@ async function shareList(cfg, share) {
   } catch { /* members may not read system.row_policies on every server */ }
 
   if (!recorded.length && !policies.length) {
-    console.log(ok(`nobody has been granted a read of '${db}'`));
+    console.log(ok(cfg.prefix
+      ? `nobody has been granted a read of your rooms in '${db}'`
+      : `nobody has been granted a read of '${db}'`));
     console.log(`  Share it with:  memhouse share <user> [--only project=<name>]`);
     return 0;
   }
-  console.log(`  who can read '${db}' — memhouse's own record, not ClickHouse's grant table:`);
+  // In a shared house a grantee reads YOUR ROOMS, never the database — every other member
+  // keeps their own rooms in it and none of them were shared by this.
+  console.log(cfg.prefix
+    ? `  who can read your rooms in '${db}' — memhouse's own record, not ClickHouse's grant table:`
+    : `  who can read '${db}' — memhouse's own record, not ClickHouse's grant table:`);
   for (const r of recorded) {
     const scoped = policies.filter((p) => String(p.short_name).startsWith(`mh_share_${r.user}_`));
-    console.log(`    ${String(r.user).padEnd(16)} ${r.state}${scoped.length ? '' : (String(r.state).startsWith('granted') ? '  (full house)' : '')}`);
+    const whole = cfg.prefix ? '  (all your rooms)' : '  (full house)';
+    console.log(`    ${String(r.user).padEnd(16)} ${r.state}${scoped.length ? '' : (String(r.state).startsWith('granted') ? whole : '')}`);
     for (const p of scoped) console.log(`      ${String(p.table).padEnd(11)} ${p.select_filter}`);
   }
   console.log('  A grant made by hand does not appear here — this list is what memhouse recorded.');

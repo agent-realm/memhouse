@@ -8,13 +8,24 @@ or wrong everywhere.
 
 ## What this is
 
-A **house** is a ClickHouse **database**. Its **rooms** are three shared tables:
-`sessions`, `messages`, `tool_calls`. Everyone granted on the database writes into the
-same tables; the server stamps who. There is no per-user table and no cloud — the
-database *is* the boundary, and a house's grants reach nothing outside it.
+A **house** is a ClickHouse **database**. Its **rooms** are tables — `sessions`,
+`messages`, `tool_calls` — and the server stamps who wrote every row. No cloud: a house's
+grants reach nothing outside it.
 
-A **member** owns one house. An **administrator** owns the ClickHouse. `memhouse whoami`
-says which you are holding.
+What a member owns inside a house depends on how it was set up, and there are two answers:
+
+| | rooms | the member holds |
+|---|---|---|
+| **a house of their own** | `alice.messages` | `ALL` on the database |
+| **rooms in a shared house** | `mem.alice_messages` | those rooms, and nothing else in the database |
+
+The second exists for a ClickHouse where a database per person is not available. Both
+isolate; a housemate can never read rooms they were not granted. **`memhouse rooms` says
+which you are in and what your tables are actually called** — in a shared house a bare
+`FROM messages` names nothing you have, and the `q()` below supplies the prefix for you.
+
+An **operator** owns the ClickHouse itself; an **admin credential** is what proves it.
+`memhouse whoami` says which you are holding.
 
 Rows arrive from a **shipper** that parses local transcripts from 17 editors. It only
 ever inserts. Nothing in memhouse runs an LLM over your data — these skills retrieve

@@ -8,7 +8,7 @@ allowed-tools: Bash
 
 # /mem:admin — operate the house as its administrator
 
-A member owns one database. An **administrator** owns the ClickHouse: every house, every
+A member owns a house, or rooms in one. An **administrator** owns the ClickHouse: every house, every
 account, every grant. This skill is the second one, and it is the only skill allowed to
 act outside the caller's own house.
 
