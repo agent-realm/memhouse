@@ -68,6 +68,11 @@ jobs:
       # granted only their own. Isolation here is grants rather than policy, so it has to
       # be proved against a real server — a missing grant and a working one look identical
       # until somebody reads a table they should not.
+      # The shape this refuses used to be documented as the way to run a team, and it let
+      # any member grant a housemate's rows to an outsider. The matrix attempts that leak
+      # against a real server, so a regression fails the build rather than the next audit.
+      - name: one-owner invariant (a database has one owner, or per-member rooms)
+        run: misc/one-owner-matrix.sh http://localhost:8123 memhouse_root cipw
       - name: prefix matrix (one database, per-member rooms)
         run: misc/prefix-matrix.sh http://localhost:8123 memhouse_root cipw
       # The /mem:* skills write room names bare and rely on the q() in reference/HOUSE.md

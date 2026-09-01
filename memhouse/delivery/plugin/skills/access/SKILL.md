@@ -105,7 +105,7 @@ for this** — partial sharing has four ways to go wrong quietly, and the comman
 each one:
 
 ```
-memhouse share <user>                          the whole house
+memhouse share <user>                          everything you own
 memhouse share <user> --only project=memhouse  just one project
 memhouse share <user> --only session=<id>      just one conversation
 memhouse share --list                          who can read it, and how much

@@ -382,8 +382,9 @@ Setup        onboard              interactive wizard: discover → configure →
                                   file their install needs (--url --admin-user
                                   [--admin-password, else prompted] [--db NAME]
                                   [--out FILE]); local machine untouched. Refuses a house
-                                  that already holds someone's messages — --adopt if
-                                  sharing it is intended. Not an admin? --print-sql gives
+                                  that already holds someone's messages — --adopt takes it
+                                  over (same person, new credential); it is not a way to
+                                  put two members in one house. Not an admin? --print-sql gives
                                   the statements to hand to whoever is
              passwd               rotate this member's password + rewrite the env file
                                   (admin-assisted: --admin-user --admin-password)
@@ -3508,6 +3509,52 @@ async function cmdInvite() {
   // Read-only, best-effort: an admin that cannot count rows should not lose the ability
   // to invite, and a house that does not exist yet is the ordinary case.
   const adminCfg = { ...cfg, url: provisionUrl, user: adminUser, password: adminPass || '', db, stated: true };
+
+  // THE ONE-OWNER INVARIANT. A database is either ONE member's house — they hold a
+  // database-wide grant and nobody else is in it — or a shared house where every member
+  // holds per-room grants and NOBODY holds a database-wide one. Never both.
+  //
+  // The mixed shape used to be reachable (`invite bob --db alices-house --adopt`) and was
+  // documented as the way to run a team. It leaks: a member holding ALL ON db.* WITH
+  // GRANT OPTION can read every housemate's rows AND hand them to an outsider, needing no
+  // admin and notifying nobody. Measured on a real server — alice granted SELECT ON
+  // team.* to a stranger and bob's messages went with it.
+  //
+  // Checked BEFORE occupancy below: who owns the database is a harder question than
+  // whether a room has rows, and warning about a takeover we are about to refuse reads
+  // as a bug. Best-effort — an admin that cannot read system.grants should not lose the
+  // ability to invite, and it says so rather than failing silently.
+  try {
+    const esc = (v) => String(v).replace(/'/g, "\\'");
+    const others = await chRows(adminCfg,
+      `SELECT user_name AS u, max(table IS NULL) AS db_wide FROM system.grants
+        WHERE database = '${esc(db)}' AND user_name IS NOT NULL AND user_name != '${esc(name)}'
+        GROUP BY user_name ORDER BY user_name`, { database: '' });
+    // A global GRANT ... ON *.* carries database = NULL, so the operator's own superuser
+    // rights never appear here and never trip this.
+    const owners = others.filter((r) => Number(r.db_wide) === 1).map((r) => r.u);
+    if (!prefix && others.length) {
+      console.log(bad(owners.length
+        ? `'${name}' cannot join house '${db}' — it already belongs to '${owners[0]}'.`
+        : `'${name}' cannot join house '${db}' — ${others.length} member(s) already hold rooms in it.`));
+      console.log(`  Putting '${name}' in it too would give them a database-wide grant as well, and`);
+      console.log('  either member could then read the other\'s rooms and share them onward.');
+      console.log(`  A house of their own:   memhouse invite ${name} --url … --db ${name}`);
+      console.log(`  Or rooms of their own:  memhouse invite ${name} --url … --shared-db ${db}`);
+      if (owners.length) console.log(`  (the second needs '${owners[0]}' moved to rooms first — see 'memhouse migrate --help')`);
+      return 1;
+    }
+    if (prefix && owners.length) {
+      console.log(bad(`'${owners[0]}' holds a database-wide grant on '${db}' — NOT inviting.`));
+      console.log(`  Giving '${name}' rooms in it would not isolate them: '${owners[0]}' can read`);
+      console.log('  every table in the database, including the ones about to be created.');
+      console.log(`  Move the existing member to rooms first:  memhouse migrate --to-shared-db ${db} --member ${owners[0]}`);
+      return 1;
+    }
+  } catch {
+    console.log(warn(`could not read system.grants — not verifying that '${db}' has no other members`));
+  }
+
   let occupied = null;
   try {
     // In a shared database the question is not "does this house hold messages" — it will,
@@ -3526,11 +3573,13 @@ async function cmdInvite() {
     console.log('  first ship would land on top of it. Nothing has been changed.');
     console.log('  Pick a different handle:   memhouse invite <other-name> --url …');
     console.log(`  Or a different house:      memhouse invite ${name} --url … --db <house>`);
-    console.log(`  If sharing this house IS the intent, say so:  --adopt`);
+    console.log(`  Taking the house over — same person, new credential:  --adopt`);
     return 1;
   }
   if (occupied) {
     console.log(warn(`adopting existing house '${db}' — ${occupied.msgs} messages already here (--adopt)`));
+    console.log(`  '${name}' will read and ship on top of them. If that memory belongs to`);
+    console.log('  somebody else, stop now — this is a takeover, not a shared house.');
   }
 
   const built = await adminBootstrap({ ...cfg, url: provisionUrl, db, stated: true }, {

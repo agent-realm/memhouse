@@ -130,15 +130,31 @@ export MEMHOUSE_HOME="$WORK/admin"
 if [ "${seeded:-0}" = "0" ]; then
   bad "could not seed an occupied house" "rooms missing or insert refused"
 else
-  out=$(cd "$WORK" && $CLI invite im_occupy --url "$URL" --allow-local --db im_member 2>&1 || true)
+  # Two DIFFERENT refusals meet here, and the order matters.
+  #
+  # A second member is refused on OWNERSHIP, before occupancy is even considered: putting
+  # two members in one database gives each a database-wide grant, and either can then read
+  # and share the other's rows onward. --adopt does not override that — it used to, which
+  # is how the shape was reachable at all.
+  for extra in "" "--adopt"; do
+    # shellcheck disable=SC2086
+    out=$(cd "$WORK" && $CLI invite im_occupy --url "$URL" --allow-local --db im_member $extra 2>&1 || true)
+    case "$out" in
+      *"cannot join house"*) ok "a second member is refused${extra:+ even with $extra}" ;;
+      *) bad "a second member was allowed in${extra:+ with $extra}" "$(printf '%s' "$out" | head -3)" ;;
+    esac
+  done
+  # The SAME member re-invited into their own populated house is the OCCUPANCY guard, and
+  # that one --adopt does override: a takeover is the case the flag exists for.
+  out=$(cd "$WORK" && $CLI invite im_member --url "$URL" --allow-local --db im_member 2>&1 || true)
   case "$out" in
-    *"already exists and holds"*) ok "an occupied house is refused" ;;
+    *"already exists and holds"*) ok "re-inviting the owner warns the house holds messages" ;;
     *) bad "an occupied house was not refused" "$(printf '%s' "$out" | head -3)" ;;
   esac
-  out=$(cd "$WORK" && $CLI invite im_occupy --url "$URL" --allow-local --db im_member --adopt 2>&1 || true)
+  out=$(cd "$WORK" && $CLI invite im_member --url "$URL" --allow-local --db im_member --adopt 2>&1 || true)
   case "$out" in
-    *"adopting existing house"*) ok "--adopt overrides, loudly" ;;
-    *) bad "--adopt did not override" "$(printf '%s' "$out" | head -3)" ;;
+    *"adopting existing house"*) ok "--adopt takes over one's own house, loudly" ;;
+    *) bad "--adopt did not allow a takeover" "$(printf '%s' "$out" | head -3)" ;;
   esac
 fi
 

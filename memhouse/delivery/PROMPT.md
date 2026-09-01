@@ -36,11 +36,13 @@ FIRST. Only say you don't know after a search comes back empty.
 
 Without skills, query directly.
 
-**Table names.** The house's rooms are three plain, shared tables — `messages`,
-`sessions`, `tool_calls` — in the connection's database. Everyone in the house writes
-into the same tables; `user_id` (server-stamped) says whose row it is and `host` says
-which machine. Query the whole house by default; add `WHERE user_id = '<name>'` for one
-person. **There is no `sessions_v` object** — the rollup is a saved query, and
+**Table names.** The rooms are `messages`, `sessions`, `tool_calls` in the connection's
+database — unless this is a shared house, where they carry the member's own prefix
+(`alice_messages`). `memhouse rooms` prints what yours are actually called; a bare
+`FROM messages` is not a table you have in a shared house. `user_id` (server-stamped)
+says whose row it is and `host` says which machine. To read across every member you may
+read, `merge(<db>, '^.*_messages$')` covers them in one query and returns only what your
+grants allow. **There is no `sessions_v` object** — the rollup is a saved query, and
 `memhouse sessions-query` prints it ready to drop into a `FROM (...) AS c`.
 
 **One session can be stored more than once.** The shipper never deletes: when an editor

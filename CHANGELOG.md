@@ -6,6 +6,23 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **Two members can no longer share one database with a grant each — it leaked.** Until
+  now `invite bob --db alices-house --adopt` put both in one database with `ALL ON db.*`
+  apiece, and the README taught it as the way to run a team. Measured on a real server:
+  alice runs `GRANT SELECT ON team.* TO carol` and carol reads **bob's** messages. No
+  admin involved, nothing written to any log, bob never told.
+
+  `invite` now enforces one invariant: **a database is one member's house, or it holds
+  per-member rooms — never both, and never two database-wide owners.** `--adopt` does not
+  override it; that flag now means what it was needed for, taking over your *own* house
+  with a new credential. Inviting a second member into an occupied database points at
+  `--shared-db` instead.
+
+  A team dashboard does not need the removed shape. `merge(mem, '^.*_messages$')` reads
+  every room in one query and is filtered by grant: the operator sees all of them, a
+  member sees only their own from the identical query, and a member who joins tomorrow
+  stays invisible until someone grants their room. Aggregate visibility became opt-in.
+
 - **`memhouse invite --shared-db <db>` — one database, a room set per member.** Until now
   a member meant a database: `alice.messages`. On a ClickHouse where that is not wanted,
   `--shared-db mem` puts everyone in one database under their own names —

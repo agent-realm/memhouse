@@ -184,30 +184,41 @@ immediate.
 
 ## How your memory is stored
 
-**A house is a database; its rooms are three shared tables.** `sessions`, `messages`
-and `tool_calls` live in whatever database you point at — your own name by default
-(`polat.messages`), a team's (`team_a.messages`), even `default`. Everyone in the
-house writes into the same tables with their own credential, and every row says where
-it came from: `user_id`, stamped by the server (`MATERIALIZED currentUser()`, with
-async inserts pinned off so the stamp cannot be skipped), and `host`, the machine's
-install fingerprint.
+**A house is a database; its rooms are tables.** `sessions`, `messages` and `tool_calls`
+hold your turns. Every row says where it came from: `user_id`, stamped by the server
+(`MATERIALIZED currentUser()`, with async inserts pinned off so the stamp cannot be
+skipped), and `host`, the machine's install fingerprint. `WHERE user_id = 'alice'` is one
+person; `WHERE host = '…'` is one machine. Neither is forgeable from the client.
 
-`WHERE user_id = 'alice'` is one person. `WHERE host = '…'` is one machine. No filter
-is the whole house — which is exactly what a team dashboard wants.
+What you *own* inside a house depends on how it was set up. There are two layouts, and
+the operator picks one when they invite the first person:
 
-Sharing is not a feature bolted on top; it IS the house. A team makes a database,
-grants each person `ALL` on it, and their shippers all write into the same rooms:
+| | rooms | member holds | a member can share |
+|---|---|---|---|
+| **a house of your own** | `polat.messages` | `ALL` on the database | the whole house — it is all theirs |
+| **rooms in a shared house** | `mem.polat_messages` | their own rooms | a room, and only their own |
+
+The first is the default, and what a solo pilot gets. The second is for a ClickHouse
+where you cannot make a database per person — a company server you do not administer —
+and it is what `memhouse invite alice --shared-db mem` provisions: alice's rooms created
+for her, granted to her, and nothing else in that database reachable.
+
+**One database, one owner.** memhouse will not put two members in one database with a
+database-wide grant each. That shape looks like a team and is not one: `ALL ON team.*`
+lets either member read the other's rows *and grant them to an outsider* — no admin
+involved, nobody notified. `invite` refuses it, `--adopt` does not override it, and it
+points you at `--shared-db` instead.
+
+A team dashboard still reads across everyone, with one query, filtered by grant:
 
 ```sql
-CREATE DATABASE team_a;
-CREATE USER alice IDENTIFIED BY '…';
-GRANT ALL ON team_a.* TO alice;    -- repeat per housemate
+SELECT user_id, count() FROM merge(mem, '^.*_messages$') GROUP BY user_id
 ```
 
-`ALL` on your own house reaches nothing outside it — the database is the boundary,
-which is also why joining a ClickHouse someone else runs (a kernel's, a team's) needs
-no negotiation beyond a database and a credential. Housemates are collaborators;
-groups that should not see each other get separate houses.
+The operator sees every room. Alice runs the identical query and sees only her own. A
+dashboard account sees exactly the rooms it was granted, and a member who joins tomorrow
+stays invisible until someone grants theirs. Aggregate visibility became something people
+opt into rather than the default.
 
 ### The house never destroys what it cannot rebuild
 
