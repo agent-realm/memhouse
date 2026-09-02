@@ -9,9 +9,12 @@ something durable was keeping it.
 memhouse is that something. It reads the session transcripts your editors already
 write to disk — **17 of them**: Claude Code, Codex, Cursor, Zed, Copilot, Gemini
 CLI and the rest — parses them locally, and ships typed rows into a ClickHouse
-**you own**. Nothing is proxied, intercepted, or sent to anyone's cloud. Then you
-can search every past session, see what it cost, resume the conversation that
-solved this before, and let an agent query its own history.
+**you choose**: a container on this laptop, a box you run, your company's cluster,
+or ClickHouse Cloud. memhouse runs no service of its own — there is no memhouse
+cloud to sign up for and nothing is proxied through anyone — so the account is
+yours and the data is wherever you decided to put it. Then you can search every
+past session, see what it cost, resume the conversation that solved this before,
+and let an agent query its own history.
 
 And every row says where it came from, in a way no client can fake: `user_id` is
 stamped **by the server** (`MATERIALIZED currentUser()`, async inserts pinned off
@@ -77,14 +80,21 @@ memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
 memhouse invite <name>                     mint a member + house, hand them one env file
+memhouse invite <name> --shared-db <db>    …or rooms of their own in a house you share
+memhouse members [--db X]                  who is in a house, and what each can reach
+memhouse whoami [--admin]                  which credential is in play, and what it may do
+memhouse rooms                             what your rooms are actually called
+memhouse share <user> [--only …|--revoke|--list]
+                                           let a housemate read yours, in whole or in part
+memhouse sessions-query                    print the session rollup SQL
 memhouse passwd                            rotate this member's password
 memhouse migrate | migrate-rooms [--dry-run] [--yes]
                                            run whatever this house still needs
 memhouse relocate --to <url>               copy this house to a new ClickHouse, then repoint
 memhouse nightly [--out DIR]               build an installable tarball from this checkout
-memhouse plugins install claude            9 skills — ask, hello, invite, search,
-                                           sessions, share, sql, status, users — into
-                                           every Claude Code config dir found
+memhouse plugins install claude            5 skills — house, recall, sql, access,
+                                           admin — into every Claude Code config
+                                           dir found
 memhouse prompt                            memory snippet for an agent's system prompt
 memhouse prompt --install                  an install prompt, rendered for this machine
 ```

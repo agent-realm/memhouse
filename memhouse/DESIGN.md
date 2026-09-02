@@ -5,12 +5,34 @@ on your machines — across **all 17 editors** agentlytics supports — parsed l
 shipped to a typed ClickHouse store, shareable with a team, installable on the
 ultimagent kernel as an **agency**, and visible through the agentlytics dashboard.
 
-**A house is a database; its rooms are three shared tables** — `sessions`, `messages`,
-`tool_calls`. Everyone in the house writes into the same tables with their own
-credential; the server-stamped `user_id` says who, the install fingerprint `host` says
-which machine. Sharing IS the house; the boundary between groups is the database. (The
-layout has moved twice: shared-tables-with-row-policies fell in 0.4.0, per-member
-suffixed rooms fell in 0.8.0 — see `house/HOUSE.md` for why.)
+**A house is a database; its rooms are tables** — `sessions`, `messages`, `tool_calls`.
+The server-stamped `user_id` says who wrote a row, the install fingerprint `host` says
+which machine.
+
+**What a member owns inside a house is the layout's whole question, and it has three
+answers, two of them retired.** Shared tables with row policies fell in 0.4.0 (policies
+are permissive and OR'd — a catch-all fails OPEN). Per-member suffixed rooms fell in
+0.8.0, on the argument that isolation between housemates solved an adversarial problem
+the product did not have. That argument was wrong, and the counter-example is measured:
+with everyone holding `ALL ON db.* WITH GRANT OPTION`, one member ran
+`GRANT SELECT ON db.* TO <outsider>` and handed over a housemate's transcripts — no
+admin, no notification.
+
+So the layout today is per-member rooms again, prefixed rather than suffixed, and with
+the invariant the earlier attempt lacked: **a database has ONE owner or per-member rooms,
+never both.** A member owns a house of their own (`alice.messages`) or their own rooms in
+a shared one (`mem.alice_messages`); `roomNames()` in `house/house.js` is the only place
+in the codebase that spells a table name.
+
+The two objections that retired the 0.8.0 layout were real and are paid again here:
+clients must resolve names before querying (`memhouse rooms`, and the `q()` helper the
+skills route through), and reading across members needs a `UNION ALL` rather than one
+table. Both are cheaper than the leak.
+
+**Why grants and not policies.** A grant is something a colleague can verify for
+themselves — `SHOW GRANTS` lists their rooms, and `SHOW TABLES` does not show them what
+they were not granted. "Trust the row policy protecting your rows" is a sentence you
+cannot ask a teammate to accept when "here are your grants, check them" is available.
 
 **Agency, precisely.** In constellation terms (`../TERMINOLOGY.md`) memhouse is a
 **house** — the `mem` database — **plus a resident**: the shipper. That pairing
@@ -60,7 +82,7 @@ them free and further along; **bet 3 is the one nobody else attempts.**
    write axis this bet is precisely *moving work from routine to resident*:
    memory-house parses when you query, memhouse parses before anyone asks and
    writes the result down.
-2. **Typed common schema** (`house/schema.sql.tpl` — three shared tables per house).
+2. **Typed common schema** (`house/schema.sql.tpl` — the rooms, rendered per member).
    Physical typed columns (what memory-house derives in views) + `tool_calls`
    (memory-house has no tool table) + one `extra JSON` escape hatch per room so
    unnormalized adapter fields are never lost. `ReplacingMergeTree(ingested_at)`;
@@ -84,7 +106,7 @@ them free and further along; **bet 3 is the one nobody else attempts.**
 | Path | What | Notes |
 |---|---|---|
 | `house/house.js` | room names + the session rollup + the user pin | one rule for both transports |
-| `house/schema.sql.tpl` | the house's three shared tables (typed) | applied by each member's own shipper |
+| `house/schema.sql.tpl` | the rooms (typed) | applied by the member's shipper, or by the operator at invite in a shared house |
 | `house/HOUSE.md` | the model, and what it replaced | |
 | `shipper/ship.js` | parse-on-client shipper CLI — the resident (`worker`) | reuses `../../editors`; incremental; idempotent |
 | `server/server.js` | REST API + dashboard | same API contract as agentlytics; serves `../../public` |

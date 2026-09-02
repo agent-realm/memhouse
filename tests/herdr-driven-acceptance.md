@@ -22,7 +22,7 @@ the source.
   you drive the *existing* instance — do not try to launch one.
 - Read `/Users/polat/.claude/skills/herdr/SKILL.md` for the command surface.
 - Read `memhouse/house/HOUSE.md` — it states the model: a house is a database, its
-  rooms are three shared tables, provenance is `user_id` × `host`. That document is the
+  rooms are per-member tables, provenance is `user_id` × `host`. That document is the
   contract you are testing.
 - Have the branch under test checked out in a worktree. Do not test the pilot's
   primary checkout.

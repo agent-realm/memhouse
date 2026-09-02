@@ -37,13 +37,13 @@ read-only SQL surface when you want real questions answered.
 
 The part I think is genuinely new: **teams with attribution the server enforces.**
 A team's house is one database. Everyone's shipper writes into the same three
-tables with their own credential, and every row carries `user_id` stamped by
-ClickHouse itself (`MATERIALIZED currentUser()` — async inserts are pinned off so
-the stamp can't be skipped) plus a per-install host fingerprint. `WHERE user_id =
-'alice'` is one person; `WHERE host = '…'` is one machine; no filter is the whole
-team. Joining is the two statements any DBA already knows: `CREATE USER` +
-`GRANT ALL ON house.*`. No row policies, no sync service, no per-seat pricing —
-the database is the boundary.
+their own rooms, and every row carries `user_id` stamped by ClickHouse itself
+(`MATERIALIZED currentUser()` — async inserts are pinned off so the stamp can't be
+skipped) plus a per-install host fingerprint. `WHERE user_id = 'alice'` is one
+person; `WHERE host = '…'` is one machine. Joining is the statements any DBA already
+knows: `CREATE USER` + a `GRANT` per room. No row policies, no sync service, no
+per-seat pricing — and a teammate can run `SHOW GRANTS` and see exactly what they
+hold, rather than being asked to trust a filter they cannot inspect.
 
 Design choices people will ask about:
 

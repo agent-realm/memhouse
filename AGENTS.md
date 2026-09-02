@@ -15,7 +15,9 @@ tables (`sessions`, `messages`, `tool_calls`). A **member** owns a house of thei
 a shared one (`mem.alice_messages`), granted those and nothing else. A database has ONE
 owner or per-member rooms, never both; `roomNames()` in `memhouse/house/house.js` is where
 that difference lives, and no other code spells a table name.
-There is no cloud and no LLM anywhere in the write or read path.
+The ClickHouse is whichever one the user points at — local container, their own server,
+or ClickHouse Cloud; memhouse runs no service of its own and proxies nothing. There is no
+LLM anywhere in the write or read path.
 
 `memhouse/DESIGN.md` argues the design. `TERMINOLOGY.md` is the canon for names — if a
 thing has a name there, use it and do not invent another.
