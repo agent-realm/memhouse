@@ -365,10 +365,9 @@ and are not part of `npm test`.
 | `agency/` | the earlier agentlytics-agency wrap — prior art, not how memhouse works |
 | `TERMINOLOGY.md` | the constellation terminology canon |
 
-Deeper reading: `memhouse/DESIGN.md` (the four bets),
-`memhouse/per-member/INSTALL.md` (the three install paths and every refusal),
-`memhouse/per-member/SCHEMA.md`, `memhouse/delivery/kernel-install.md`,
-`memhouse/COMPETITION.md`.
+Deeper reading: `memhouse/DESIGN.md` (the bets, and why the room layout has moved three
+times), `memhouse/house/HOUSE.md` (the two layouts and the schema), `SECURITY.md` (what
+holds, and what does not), `memhouse/delivery/kernel-install.md`, `memhouse/COMPETITION.md`.
 
 Deferred designs (captured, not yet built): `docs/design/host-repoint-reconciliation.md`
 — what should happen when the shipper is repointed at a new, empty host (house identity,

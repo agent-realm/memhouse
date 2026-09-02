@@ -121,7 +121,7 @@ drop it between runs).
 
 | Path | Command | Must end with |
 |---|---|---|
-| admin bootstrap | `install --admin-user … --admin-password … --member <m> --member-password …` | user created (or verified by password if it exists), `GRANT ALL ON <db>.*`, async pin, **the member's own shipper builds the rooms**, reconnect verified as the member, admin credential NOT in the env file |
+| admin bootstrap | `install --admin-user … --admin-password … --member <m> --member-password …` | user created (or verified by password if it exists), the grant for the layout (`ALL ON <db>.*` for a house of their own, per-room otherwise), async pin, **the rooms built by the member's shipper, or by the operator when the house is shared**, reconnect verified as the member, admin credential NOT in the env file |
 | member credential | `install --url … --user … --password …` | rooms found or created (the credential holds ALL on the house), config written |
 | print the SQL | `install --print-sql --member <m>` | SQL printed (CREATE DATABASE, CREATE USER, GRANT ALL, table DDL, ADD SETTING pin), **nothing contacted, nothing written** |
 
@@ -148,7 +148,7 @@ Verify the "change nothing" half by counting rows before and after.
 - install with an existing `--member` and no `--member-password` → refuses and says the
   password is how you install as them; with the RIGHT password → proceeds (verified by
   connecting); wrong password → refuses. There is no identity-takeover concept —
-  shared tables stamp `user_id` server-side, so an existing handle hands nobody anything.
+  every room stamps `user_id` server-side, so an existing handle hands nobody anything.
 - a handle starting with a digit → refuses
 - `--db system` or `--db information_schema` (any case) → refuses, creates NOTHING.
   This one is load-bearing: before the check, `install --db system` granted a member

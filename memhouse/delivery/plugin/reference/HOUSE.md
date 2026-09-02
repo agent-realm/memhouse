@@ -8,9 +8,10 @@ or wrong everywhere.
 
 ## What this is
 
-A **house** is a ClickHouse **database**. Its **rooms** are tables — `sessions`,
-`messages`, `tool_calls` — and the server stamps who wrote every row. No cloud: a house's
-grants reach nothing outside it.
+A **house** is a ClickHouse **database** — on the user's machine, their server, or a
+hosted ClickHouse; memhouse runs no service of its own. Its **rooms** are tables —
+`sessions`, `messages`, `tool_calls` — and the server stamps who wrote every row. A
+house's grants reach nothing outside it.
 
 What a member owns inside a house depends on how it was set up, and there are two answers:
 
@@ -20,7 +21,14 @@ What a member owns inside a house depends on how it was set up, and there are tw
 | **rooms in a shared house** | `mem.alice_messages` | those rooms, and nothing else in the database |
 
 The second exists for a ClickHouse where a database per person is not available. Both
-isolate; a housemate can never read rooms they were not granted. **`memhouse rooms` says
+isolate; a housemate can never read rooms they were not granted.
+
+**A database has ONE owner, or per-member rooms — never both.** Someone holding `ALL` on
+the database beside members holding rooms could read *and re-grant* every housemate's
+transcripts. `invite` refuses to build that shape; bringing a housemate into a house
+someone already owns fences the owner to their own rooms first, which moves no data. If
+you are provisioning through `/mem:access`, that is why an invite may report fencing
+before it reports the invite. **`memhouse rooms` says
 which you are in and what your tables are actually called** — in a shared house a bare
 `FROM messages` names nothing you have, and the `q()` below supplies the prefix for you.
 
@@ -78,14 +86,6 @@ It is spelled with `[[:space:]]` classes rather than `\b` because **BSD `sed` do
 support `\b`**: on macOS the `\b` form matched nothing and sent the query through
 unprefixed. That fails loudly as `UNKNOWN_TABLE` rather than quietly reading wrong rows,
 which is the right way round — but it fails.
-
-**Two layouts, and you may be in either.** Normally a member owns a whole database and
-the rooms are plainly named — `alice.messages`. But a house provisioned with
-`invite --shared-db` puts everyone in ONE database under their own names —
-`mem.alice_messages`, `mem.bob_messages` — and grants each member only their own rooms.
-`memhouse rooms` reports which you are in and what your tables are actually called; it
-resolves through the same function the shipper writes with, so it cannot drift. A bare
-`FROM messages` in a shared house is not a table you have — hence the `sed`.
 
 **Reading someone else's house.** A share is a read-only `GRANT SELECT` on their
 database. `SHOW DATABASES` lists what your credential may read; anything that is not
