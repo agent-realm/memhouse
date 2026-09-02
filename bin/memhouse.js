@@ -1031,8 +1031,8 @@ async function cmdInstall({ interactive }) {
       console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
     }
     console.log(ok('installed'));
-    console.log('  adding a housemate later is two statements for the admin:');
-    console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
+    console.log('  adding a housemate later — the admin credential is in your env file, so no flags:');
+    console.log(`     memhouse invite <name> --url ${cfg.url}`);
     printGettingStarted(cfg);
     await finishInvite(cfg);
     // The first ship loads the whole backlog; do it in the background so install returns
