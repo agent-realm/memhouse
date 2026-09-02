@@ -457,8 +457,17 @@ async function ensureSchema(client) {
     }
   }
   if (denied) {
-    console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);
-    console.error('[memhouse] creating or replacing a ROOM is the house owner\'s job; adding a missing COLUMN is not.');
+    // In a SHARED house this is the designed state, not a shortfall: the operator creates
+    // each member's rooms during `invite` precisely so the member cannot — a member who
+    // could CREATE TABLE here could add tables beside every housemate's. Saying "you do
+    // not hold these rights" and then "schema ensured" about the same statements reads as
+    // a contradiction on every routine ship, which is how often a member sees it.
+    if (TABLE_PREFIX) {
+      console.error(`[memhouse] ${denied} room(s) already exist and are not yours to create — as designed; your rooms were made for you.`);
+    } else {
+      console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);
+      console.error('[memhouse] creating or replacing a ROOM is the house owner\'s job; adding a missing COLUMN is not.');
+    }
   }
   // A house created before origin existed has no such column, and every read and write
   // scopes by it. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
