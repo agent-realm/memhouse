@@ -6,6 +6,23 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **`share --only project=x` granted every project, then failed to scope.** The worst
+  defect in this branch, and it was reachable by any member of a shared house. `share`
+  granted `SELECT` on all rooms first and built the row-policy filters second; the
+  prefixed layout never granted the row-policy rights (`ALL ON db.*` carries them, an
+  explicit per-table list does not), so the scoping step could not succeed at all. A
+  member asking to share ONE project handed over ALL of them, and `share --list` then
+  reported "nobody has been granted a read" — the bookkeeping write happens after the step
+  that failed.
+
+  Now the filters are built BEFORE anything is granted, a failure drops what it built and
+  grants nothing, and members hold `CREATE/ALTER/DROP/SHOW ROW POLICY` on their own rooms.
+  The matrix asserts both halves — that a scoped share exposes only the named project, and
+  that a scoping failure leaves the grantee with exactly what they had before.
+
+  Found in a drill: an agent asked to open one project to a colleague, which no matrix
+  did because every matrix shares whole rooms.
+
 - **`invite --print-sql` printed the configuration the live path refuses.** It ignored
   `--shared-db` and `--table-prefix` entirely and emitted unprefixed shared rooms plus
   `GRANT ALL ON db.* TO <member> WITH GRANT OPTION` — the shape that lets any member read

@@ -100,6 +100,31 @@ printf '%s' "$out" | grep -q "your rooms in" && ok "  and says ROOMS, not the wh
 $CLI share bob --revoke --yes >/dev/null 2>&1
 
 echo
+echo "=== SCOPED sharing: asking for one project must not hand over all of them ==="
+# The worst failure this command had. `share <user> --only project=x` granted SELECT
+# first and built the row-policy filters second; in a shared house the member had no
+# CREATE ROW POLICY right at all, so the grant always landed and the scoping always
+# failed — a member asking to share ONE project gave away EVERY one, and share --list
+# then reported "nobody has been granted". Found in a drill.
+A "INSERT INTO mem.alice_messages (session_id, seq, source, host, ts, role, text, line_hash, project) VALUES ('sa',7,'x','h',now(),'user','scoped alpha',77,'alpha'),('sb',8,'x','h',now(),'user','scoped beta',78,'beta')" >/dev/null 2>&1
+export MEMHOUSE_HOME="$WORK/alicehome"
+out=$($CLI share bob --only project=alpha --yes 2>&1)
+printf '%s' "$out" | grep -q "✓" && ok "a member can scope a share to one project" || bad "scoped share failed" "$(printf '%s' "$out" | grep '✗' | head -1)"
+r=$(M bob "$APW_B" "SELECT groupUniqArray(project) FROM mem.alice_messages FORMAT TSV")
+printf '%s' "$r" | grep -q "beta" && bad "LEAK: a --only share exposed another project" "$r" || ok "  the grantee sees only the named project"
+$CLI share bob --revoke --yes >/dev/null 2>&1
+
+# And when scoping CANNOT be done, nothing may be granted at all.
+A "REVOKE CREATE ROW POLICY ON mem.alice_sessions FROM alice" >/dev/null 2>&1
+out=$($CLI share bob --only project=alpha --yes 2>&1)
+printf '%s' "$out" | grep -q "NOTHING WAS GRANTED" && ok "a scoping failure grants nothing" || bad "a scoping failure did not say it granted nothing" "$(printf '%s' "$out" | tail -2)"
+r=$(M bob "$APW_B" "SELECT count() FROM mem.alice_messages")
+printf '%s' "$r" | grep -q "ACCESS_DENIED\|Not enough privileges" && ok "  and the grantee really has no access" || bad "  LEAK: grantee has access after a failed scoped share" "$r"
+n=$(A "SELECT count() FROM system.row_policies WHERE database='mem' AND short_name LIKE '%bob%' FORMAT TSV" | tr -d '\n')
+[ "$n" = "0" ] && ok "  and no half-built filters were left behind" || bad "  $n orphaned row polic(y/ies) left"
+A "GRANT CREATE ROW POLICY ON mem.alice_sessions TO alice" >/dev/null 2>&1
+
+echo
 echo "=== cleanup ==="
 A "DROP DATABASE IF EXISTS mem SYNC" >/dev/null
 for u in alice bob; do A "DROP USER IF EXISTS $u" >/dev/null; done

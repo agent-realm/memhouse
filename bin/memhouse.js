@@ -764,7 +764,7 @@ ${prefix ? `-- ONE STATEMENT PER ROOM, and no database-wide grant. ClickHouse re
 -- option is scoped to '${member}'s own rooms: enough to share their own memory without an
 -- operator (\`memhouse share\`), and reaching nothing a housemate wrote.
 ${[...ROOM_TYPES, ...META_TYPES]
-    .map((t) => `GRANT SELECT, INSERT, ALTER, OPTIMIZE ON ${db}.${physicalRoom(t, prefix)} TO ${member} WITH GRANT OPTION;`)
+    .map((t) => `GRANT SELECT, INSERT, ALTER, OPTIMIZE, CREATE ROW POLICY, ALTER ROW POLICY, DROP ROW POLICY, SHOW ROW POLICIES ON ${db}.${physicalRoom(t, prefix)} TO ${member} WITH GRANT OPTION;`)
     .join('\n')}`
     : `-- The whole database, WITH GRANT OPTION. ALL on your own house reaches nothing outside it
 -- — the database is the boundary — and it lets the shipper create and evolve its own
@@ -927,7 +927,11 @@ async function adminBootstrap(cfg, admin) {
       // own memory and nothing else. Without it, sharing in a shared database failed with
       // a raw ACCESS_DENIED naming a grant nobody could explain.
       for (const t of [...ROOM_TYPES, ...META_TYPES]) {
-        await q(`GRANT SELECT, INSERT, ALTER, OPTIMIZE ON ${cfg.db}.${rooms.physical[t]} TO ${admin.member} WITH GRANT OPTION`, { database: '' });
+        // ROW POLICY rides along, scoped to the member's OWN room. `ALL ON db.*` carries it
+        // in a house of your own; an explicit per-table list did not, so `share --only
+        // project=x` failed AFTER already granting the whole room — a member asking to
+        // share ONE project handed over ALL of them. Verified grantable at table scope.
+        await q(`GRANT SELECT, INSERT, ALTER, OPTIMIZE, CREATE ROW POLICY, ALTER ROW POLICY, DROP ROW POLICY, SHOW ROW POLICIES ON ${cfg.db}.${rooms.physical[t]} TO ${admin.member} WITH GRANT OPTION`, { database: '' });
       }
       console.log(ok(`created and granted ${ROOM_TYPES.length + META_TYPES.length} rooms as ${cfg.db}.${admin.prefix}_*`));
     } else {
@@ -3203,8 +3207,43 @@ async function cmdShare() {
     if (verdict === null) console.log(warn('could not verify how this server treats readers without a policy — continuing'));
   }
 
+  // A SCOPED share builds its filters BEFORE it grants anything. The order used to be the
+  // other way round, and the failure mode was the worst one this command has: a member ran
+  // `share <user> --only project=x`, the GRANT landed, the policy step was refused, and the
+  // grantee was left able to read EVERY project — the exact opposite of what was asked for,
+  // reported as "PARTIALLY APPLIED" after the fact. Building filters first means a refusal
+  // leaves the grantee with exactly what they had before: nothing.
+  if (scope) {
+    const made = [];
+    for (const room of ROOM_TYPES) {
+      const pred = share.scopePredicate(scope, room, sqlStr);
+      try {
+        await run(`CREATE ROW POLICY OR REPLACE ${share.policyName(user, room)} ON ${db}.${mine.physical[room]} USING ${pred} TO ${user}`);
+        made.push(room);
+      } catch (e) {
+        console.log(bad(`could not scope ${room}: ${e.message.split('\n')[0]}`));
+        for (const r of made) {
+          try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, r)} ON ${db}.${mine.physical[r]}`); } catch { /* best effort */ }
+        }
+        console.log(`  NOTHING WAS GRANTED — '${user}' can read no more than before, and any`);
+        console.log('  filters this attempt created have been removed.');
+        return 1;
+      }
+    }
+  }
+
   try { for (const tgt of shareTargets) await run(`GRANT SELECT ON ${tgt} TO ${user}`); }
-  catch (e) { console.log(bad(`could not grant: ${netReason(e)}`)); return 1; }
+  catch (e) {
+    console.log(bad(`could not grant: ${netReason(e)}`));
+    // Filters without a grant are inert, but leaving them behind would make a later full
+    // share silently scoped — the case the widening path below exists to catch.
+    if (scope) {
+      for (const room of ROOM_TYPES) {
+        try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); } catch { /* best effort */ }
+      }
+    }
+    return 1;
+  }
 
   if (!scope) {
     // A previous partial share leaves policies that would still be filtering. Widening to
@@ -3228,20 +3267,13 @@ async function cmdShare() {
     return 0;
   }
 
-  for (const room of ROOM_TYPES) {
-    const pred = share.scopePredicate(scope, room, sqlStr);
-    try { await run(`CREATE ROW POLICY OR REPLACE ${share.policyName(user, room)} ON ${db}.${mine.physical[room]} USING ${pred} TO ${user}`); }
-    catch (e) {
-      console.log(bad(`could not scope ${room}: ${e.message.split('\n')[0]}`));
-      console.log('  PARTIALLY APPLIED — a share filtered on some rooms and not others leaks.');
-      console.log(`  Put it right with:  memhouse share ${user} --revoke`);
-      return 1;
-    }
-  }
+  // The filters are already in place — built above, before the grant.
   await houseMeta(cfg, `share:${user}`, `granted ${new Date().toISOString().slice(0, 10)} scope=${scopeRaw}`);
 
   // Say what they can actually reach, counted through their own filter.
-  console.log(ok(`'${user}' can read '${db}' where ${scopeRaw}`));
+  console.log(ok(cfg.prefix
+    ? `'${user}' can read your rooms in '${db}' where ${scopeRaw}`
+    : `'${user}' can read '${db}' where ${scopeRaw}`));
   for (const room of ROOM_TYPES) {
     try {
       const r = await rows(`SELECT count() AS n FROM ${room} WHERE ${share.scopePredicate(scope, room, sqlStr)}`);
@@ -3291,6 +3323,7 @@ async function shareList(cfg, share) {
   } catch { /* members may not read system.row_policies on every server */ }
 
   if (!recorded.length && !policies.length) {
+    if (JSON_OUT) { console.log(JSON.stringify({ database: db, shared: !!cfg.prefix, grantees: [] }, null, 2)); return 0; }
     console.log(ok(cfg.prefix
       ? `nobody has been granted a read of your rooms in '${db}'`
       : `nobody has been granted a read of '${db}'`));
@@ -3299,6 +3332,21 @@ async function shareList(cfg, share) {
   }
   // In a shared house a grantee reads YOUR ROOMS, never the database — every other member
   // keeps their own rooms in it and none of them were shared by this.
+  if (JSON_OUT) {
+    // The flag was accepted and ignored, so `share --list --json` printed the human text
+    // and any caller parsing it got prose. It is the audit surface; it should be readable
+    // by something other than a person.
+    console.log(JSON.stringify({
+      database: db, shared: !!cfg.prefix, rooms: cfg.prefix ? `${cfg.prefix}_*` : null,
+      grantees: recorded.map((r) => ({
+        user: r.user, state: r.state,
+        scoped: policies.filter((p) => String(p.short_name).startsWith(`mh_share_${r.user}_`))
+          .map((p) => ({ room: p.table, filter: p.select_filter })),
+      })),
+      note: "memhouse's own record, not ClickHouse's grant table — a grant made by hand does not appear here",
+    }, null, 2));
+    return 0;
+  }
   console.log(cfg.prefix
     ? `  who can read your rooms in '${db}' — memhouse's own record, not ClickHouse's grant table:`
     : `  who can read '${db}' — memhouse's own record, not ClickHouse's grant table:`);

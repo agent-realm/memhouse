@@ -86,7 +86,10 @@ echo "=== --print-sql must not print the shape the live path refuses ==="
 out=$(cd "$WORK" && $CLI invite psql --shared-db mem --url "$URL" --admin-user "$ADM" --admin-password "$APW" --member-password 'x' --print-sql 2>&1)
 printf '%s' "$out" | grep -qE "GRANT ALL ON mem\.\*" && bad "LEAK: --print-sql emits a database-wide grant in a shared house" || ok "no database-wide grant in the printed SQL"
 printf '%s' "$out" | grep -q "CREATE TABLE IF NOT EXISTS mem.psql_messages" && ok "  printed rooms carry the member's prefix" || bad "  printed rooms are unprefixed" "$(printf '%s' "$out" | grep -m1 'CREATE TABLE')"
-printf '%s' "$out" | grep -q "GRANT SELECT, INSERT, ALTER, OPTIMIZE ON mem.psql_messages" && ok "  and the grants are per-room" || bad "  grants are not per-room"
+# Assert the SHAPE (one grant, named at one room), not the exact privilege list — that
+# list grows, and a test pinned to its wording fails for the wrong reason.
+printf '%s' "$out" | grep -qE "^GRANT .* ON mem\.psql_messages TO psql" && ok "  and the grants are per-room" || bad "  grants are not per-room" "$(printf '%s' "$out" | grep -m1 '^GRANT')"
+printf '%s' "$out" | grep -qE "^GRANT .*ROW POLICY.* ON mem\.psql_messages" && ok "  including the row-policy rights a scoped share needs" || bad "  no row-policy rights — scoped sharing would fail after granting"
 # The printed SQL is only worth anything if it RUNS and yields the same isolation.
 # Split on ';' but KEEP the newlines inside each statement: the schema template carries
 # inline `-- ...` comments, and collapsing a statement onto one line makes the first of
