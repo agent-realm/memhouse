@@ -413,14 +413,14 @@ async function assertRoomKeys(client, rooms) {
 // The shipper reads the prefix straight from its environment: it is spawned with the
 // resolved MEMHOUSE_* env by the CLI, and every room name it touches comes from
 // resolveRooms, so this is the only line that needs to know.
-const TABLE_PREFIX = process.env.MEMHOUSE_TABLE_PREFIX || '';
 
 async function ensureSchema(client) {
-  const rooms = await resolveRooms(client, TABLE_PREFIX);
+  const rooms = await resolveRooms(client);
   // BEFORE the CREATEs and ALTERs, not beside the end-of-function asserts. A house whose
   // record says a newer release moved it forward may have columns this template does not
   // know; running this template's DDL first could add back what that release removed —
   // the exact write the guard exists to prevent.
+  await assertNotLegacyLayout(client, rooms);
   await assertWriterSupported(client, rooms);
   const tpl = fs.readFileSync(path.join(__dirname, '..', 'house', 'schema.sql.tpl'), 'utf-8');
   // Rendered per room rather than taken as one blob, because a prefixed house names its
@@ -462,18 +462,11 @@ async function ensureSchema(client) {
     // could CREATE TABLE here could add tables beside every housemate's. Saying "you do
     // not hold these rights" and then "schema ensured" about the same statements reads as
     // a contradiction on every routine ship, which is how often a member sees it.
-    if (process.env.MEMHOUSE_PROVISION_PROOF === '1') {
-      // The operator created these rooms seconds ago and is now watching invite verify
-      // them AS the new member, who has no CREATE right on them by design. "5 rooms
-      // already exist" reads as a name collision with an existing member on a database
-      // that was empty a moment earlier — it was, and it sent one operator to
-      // system.tables to find out what had gone wrong. Nothing had.
-    } else if (TABLE_PREFIX) {
-      console.error(`[memhouse] ${denied} room(s) already exist and are not yours to create — as designed; your rooms were made for you.`);
-    } else {
-      console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);
-      console.error('[memhouse] creating or replacing a ROOM is the house owner\'s job; adding a missing COLUMN is not.');
-    }
+    // A member holds CREATE TABLE on their own name pattern, so this is no longer the
+    // ordinary path — it is a credential provisioned outside memhouse with less than the
+    // plan gives. Say what to ask for rather than whose job it is.
+    console.error(`[memhouse] ${denied} schema statement(s) needed rights this credential does not hold — continuing with what it can do.`);
+    console.error('[memhouse] the memhouse grant is one line — `memhouse install --print-sql` shows it; ask whoever administers the house to run it.');
   }
   // A house created before origin existed has no such column, and every read and write
   // scopes by it. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
@@ -642,6 +635,31 @@ async function recordHouseState(client, rooms, host) {
  * Releases before 0.10.0 never read this — for them the floor is enforced by the
  * pilot's GRANTs, not by code.
  */
+/**
+ * A house from before the one-layout holds plain rooms — `messages`, not `<member>_messages`.
+ * Shipping into it would quietly create a second, empty set of rooms beside the full ones
+ * and write there: every past session invisible to the member's own reads, the dashboard
+ * and the skills, with nothing anywhere saying why. Refuse, and say exactly what moves the
+ * old rooms across — a RENAME, instant, nothing copied.
+ *
+ * Trips only when the member's rooms are ABSENT and the plain ones PRESENT; a house holding
+ * both is mid-conversion and is left alone.
+ */
+async function assertNotLegacyLayout(client, rooms) {
+  const rs = await client.query({
+    query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ('messages', '${rooms.physical.messages}')`,
+    format: 'JSONEachRow',
+  });
+  const names = new Set((await rs.json()).map((r) => r.name));
+  if (names.has(rooms.physical.messages) || !names.has('messages')) return;
+  const moves = [...ROOM_TYPES, ...META_TYPES].map((t) => `RENAME TABLE ${t} TO ${rooms.physical[t]};`).join('\n     ');
+  throw new Error(
+    'this house holds plain rooms (messages, sessions, tool_calls) — the layout before rooms were named for their member.\n'
+    + `  Shipping now would create empty ${rooms.pattern} rooms beside them and write there, hiding every past session.\n`
+    + `  Move the old rooms across (a rename — instant, nothing copied), then ship again:\n     ${moves}\n`
+    + `  Then replace the database-wide grant with the one-layout grant:  memhouse install --print-sql --member ${rooms.member}`);
+}
+
 async function assertWriterSupported(client, rooms) {
   let have;
   try {
@@ -1026,7 +1044,8 @@ async function runShip(client, opts = {}) {
   // in incremental mode, but re-shipping a KNOWN session needs its current epoch and row
   // shape: writing at the wrong epoch either forks a session that did not change, or
   // overwrites a stored parse that did.
-  const rooms = await resolveRooms(client, TABLE_PREFIX);
+  const rooms = await resolveRooms(client);
+  await assertNotLegacyLayout(client, rooms);
   await assertWriterSupported(client, rooms);
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
@@ -1186,7 +1205,7 @@ function reportAdapterErrors(warned) {
 // Per-source rollup straight from sessions_v (final=1 so ReplacingMergeTree collapses).
 // The rollup resolves like the rooms do — it is a subquery over the caller's own rooms.
 async function printStats(client) {
-  const rooms = await resolveRooms(client, TABLE_PREFIX);
+  const rooms = await resolveRooms(client);
   const rs = await client.query({
     query: `
       SELECT source,

@@ -18,11 +18,12 @@ with everyone holding `ALL ON db.* WITH GRANT OPTION`, one member ran
 `GRANT SELECT ON db.* TO <outsider>` and handed over a housemate's transcripts — no
 admin, no notification.
 
-So the layout today is per-member rooms again, prefixed rather than suffixed, and with
-the invariant the earlier attempt lacked: **a database has ONE owner or per-member rooms,
-never both.** A member owns a house of their own (`alice.messages`) or their own rooms in
-a shared one (`mem.alice_messages`); `roomNames()` in `house/house.js` is the only place
-in the codebase that spells a table name.
+So the layout today is per-member rooms again, prefixed rather than suffixed, and this
+time there is only one of it: **every member's rooms are named for them, and one wildcard
+grant — `ON mem.<name>_*` — is the whole of what they hold.** Nobody is granted the
+database. A house with one member is a house of one, not a different layout; standalone,
+team and kernel are the same statements. `roomNames()` in `house/house.js` is the only
+place a table name is produced and `provision.js` the only description of the grant.
 
 The two objections that retired the 0.8.0 layout were real and are paid again here:
 clients must resolve names before querying (`memhouse rooms`, and the `q()` helper the

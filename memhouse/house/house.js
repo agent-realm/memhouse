@@ -1,9 +1,8 @@
 // The house.
 //
-// A house is a ClickHouse DATABASE — any database, named whatever its people name it
-// (`polat`, `team_a`, even `default`). Its rooms are three plain tables: `sessions`,
-// `messages`, `tool_calls`. Everyone in the house writes into the SAME tables, each with
-// their own credential, and two columns say who and where every row came from:
+// A house is a ClickHouse DATABASE, `mem` by default. Its rooms are tables — `sessions`,
+// `messages`, `tool_calls` — one set per member, named for them, and two columns say who
+// and where every row came from:
 //
 //   user_id  String MATERIALIZED currentUser()   — stamped by the server, unforgeable by
 //                                                  clients (async_insert is pinned to 0
@@ -12,33 +11,30 @@
 //   host     LowCardinality(String)              — the machine's fingerprint, minted once
 //                                                  per install (../host.js)
 //
-// That pair IS the provenance model, and it is unforgeable in both layouts below.
+// That pair IS the provenance model.
 //
-// TWO LAYOUTS, and roomNames() is where the difference lives:
+// ONE LAYOUT. A house is a database — `mem` unless somebody has a reason — and every
+// member's rooms in it carry the member's name: `mem.alice_messages`, `mem.polat_messages`.
+// A member holds one grant, on the wildcard `mem.<name>_*`, and nothing else in the
+// database. That is the whole access model, and roomNames() below is the only place a
+// table name is produced.
 //
-//   a house of your own    `alice.messages`      alice holds ALL ON alice.*
-//   rooms in a shared house `mem.alice_messages`  alice holds her five tables, nothing else
+//   alone on a laptop        mem.polat_*            a house of one
+//   a team on one server     mem.polat_*, mem.alice_*
+//   an agency on a kernel    the same, in the kernel's `mem`
 //
-// The first is the default: one member, one database, plainly named rooms. The second is
-// for a ClickHouse where you cannot make a database per person, and it is provisioned by
-// `invite --shared-db mem`.
+// Nobody ever holds ALL ON <db>.*. That grant is dynamic — it covers rooms created later —
+// and it is what turned two members in one database into a leak: either could read and
+// re-grant the other's transcripts, measured. The wildcard reaches nothing outside the
+// member's own name: measured, a member cannot create, read, list or re-grant a
+// housemate's rooms, and can read their own grant back with SHOW GRANTS in one line.
 //
-// A DATABASE HAS ONE OWNER, OR IT HAS PER-MEMBER ROOMS. Never both. Two members in one
-// database with `ALL ON db.*` apiece looks like a team and is not one: either can read the
-// other's rows AND grant them onward — measured, alice ran `GRANT SELECT ON team.* TO
-// carol` and carol read bob's messages, with no admin involved and nobody told. cmdInvite
-// enforces this; --adopt does not override it.
-//
-// THIS FILE ONCE SAID THE OPPOSITE, and the history is worth keeping. An early per-member
-// layout (suffixed `sessions_<member>`, plus Merge rooms to read across them) was removed
-// for three reasons: clients had to resolve names before querying, the Merge rooms existed
-// only to undo the splitting, and isolation between housemates looked like an adversarial
-// problem the product did not have. The first two were right and are paid again here — see
-// physicalRoom() and the eight callers that used to spell tables by hand. The third was
-// wrong, twice over: the shared shape leaked, and "trust the row policy" is a sentence you
-// cannot ask a colleague to accept when "here are your grants, check them" is available.
-// merge() replaces the Merge rooms and is filtered by grant, so a team still reads across
-// everyone without anyone being granted more than their own.
+// THIS FILE HAS SAID THREE OTHER THINGS. Shared tables with row policies (0.4.0: policies
+// are permissive and OR'd, a catch-all fails open). Suffixed per-member rooms with Merge
+// rooms over them (0.8.0: removed because clients had to resolve names first and
+// isolation "solved a problem the product did not have" — the second half was wrong).
+// Then a house per member with `ALL ON db.*`, plus a prefixed variant beside it, plus the
+// machinery to keep the two from meeting. All three were special cases of this one.
 //
 // `sessions_v` IS A SAVED QUERY, NOT AN OBJECT — substituted into the same `FROM … AS c`
 // position a view name would occupy, running under the caller's own credential. It was
@@ -323,29 +319,33 @@ const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
 /**
  * The table a room type lands in. THE naming rule, and the only copy of it.
  *
- * Depends on the prefix alone — the member's name is already inside the prefix — so this
- * needs no server round-trip and callers that hold only a config can use it. That matters:
- * the rule used to live solely inside roomNames(), which meant every caller that could not
- * afford `SELECT currentUser()` spelled the table by hand instead. Eight of them did, all
- * for `house_meta`/`house_events`, and all swallowed the resulting error — so a prefixed
- * house silently had no metadata plane at all: no ledger, no schema version, and a
- * `share --list` that answered "nobody has been granted a read" while a grant was live.
+ * ONE LAYOUT. Every member's rooms carry the member's own name: `mem.alice_messages`,
+ * and `mem.polat_messages` even when polat is the only one in there. A house with one
+ * member is a house of one, not a different kind of house — so there is no second case
+ * here, no prefix to configure, and nothing for an invite file to carry.
+ *
+ * Depends on nothing but the member, so a caller holding only a config can name a table
+ * without a server round-trip. That matters: when the rule lived only inside roomNames(),
+ * callers that could not afford `SELECT currentUser()` spelled tables by hand instead —
+ * eight of them, all swallowing the error — and a house silently had no metadata plane.
  */
-function physicalRoom(type, prefix = '') {
-  return prefix ? `${prefix}_${type}` : type;
+function physicalRoom(type, user) {
+  if (!user) throw new Error(`physicalRoom(${type}): a room belongs to a member, and none was given`);
+  return `${user}_${type}`;
 }
 
-function roomNames(user, prefix = '') {
-  const out = { member: user, user, prefix: prefix || '' };
-  // A PREFIXED house puts every member's rooms in one database under their own names —
-  // `mem.alice_messages` rather than `alice.messages`. It exists for one reason: a grant
-  // is self-evident where a row policy is not. A member runs SHOW GRANTS, sees three
-  // tables, and needs to trust nothing; `SHOW TABLES FROM mem` does not even list the
-  // rooms they were not granted. That is a story you can tell a colleague.
-  //
+/** The wildcard every grant to a member is scoped to: `<member>_*`. */
+function roomPattern(user) {
+  if (!user) throw new Error('roomPattern: a member is required');
+  return `${user}_*`;
+}
+
+function roomNames(user) {
+  if (!user) throw new Error('roomNames: a member is required');
+  const out = { member: user, user, pattern: roomPattern(user) };
   // Every room name in the codebase comes from physicalRoom() above — through this
-  // function where a caller has the rooms, directly where it has only a prefix.
-  const phys = (t) => physicalRoom(t, prefix);
+  // function where a caller has the rooms, directly where it has only a member name.
+  const phys = (t) => physicalRoom(t, user);
   out.physical = {};
   for (const t of [...ROOM_TYPES, ...META_TYPES]) out.physical[t] = phys(t);
   // The raw table names — for INSERT, for DDL, and for the shipper's own bookkeeping
@@ -377,12 +377,12 @@ async function currentUser(client) {
 }
 
 /** Resolve the rooms for whoever this client is connected as. */
-async function resolveRooms(client, prefix = '') {
-  return roomNames(await currentUser(client), prefix);
+async function resolveRooms(client) {
+  return roomNames(await currentUser(client));
 }
 
 module.exports = {
-  physicalRoom,
+  physicalRoom, roomPattern,
   ROOM_TYPES, META_TYPES, SCHEMA_VERSION, SUPPORTED_SCHEMAS, MIN_WRITER_SCHEMA,
   MIGRATIONS, ROOM_KEYS, keyProblem,
   READ_SETTINGS, MEMBER_PIN,

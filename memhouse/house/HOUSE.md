@@ -4,19 +4,15 @@
 `polat`, `team_a`, even `default`. Its rooms are tables: `sessions`, `messages`,
 `tool_calls`. No views, no Merge rooms, no settings profile.
 
-**What a member owns inside one depends on the layout**, and there are exactly two:
+**Every member's rooms are named for them, and one grant covers them.** `mem.polat_*`
+for polat, `mem.alice_*` for alice, in the same database — `mem` unless somebody has a
+reason. The grant is `GRANT … ON mem.polat_* TO polat WITH GRANT OPTION`: it lets the
+member create and rebuild their own rooms, share them, and reach nothing else. Nobody is
+granted the database itself. A house with one member is a house of one, not a different
+kind of house — a colleague joins as one more member and nothing about the first changes.
+`roomNames()` in `house.js` is the only place a table name is produced.
 
-| | rooms | the member holds |
-|---|---|---|
-| a house of their own | `polat.messages` | `ALL` on the database |
-| rooms in a shared house | `mem.polat_messages` | those rooms, and nothing else in it |
-
-A database has ONE owner or per-member rooms, never both — a member holding the whole
-database beside members holding rooms can read and re-grant everyone else's transcripts.
-`roomNames()` in `house.js` is the only place a table name is produced; nothing else in
-the codebase spells one.
-
-Two columns say where every row came from, in both layouts:
+Two columns say where every row came from:
 
 | Column | Meaning | Comes from |
 |---|---|---|

@@ -8,16 +8,16 @@ makes the security model short, and worth stating without varnish.
 
 ## What holds
 
-- **A member reaches their own rooms and nothing else.** In a house of their own that is
-  `ALL` on one database; in a shared house it is per-table grants on their own rooms, and
-  ungranted rooms are not merely unreadable but absent from `SHOW TABLES`. Two houses on
-  one server cannot read each other. Reserved databases (`system`, `information_schema`)
-  are refused as house names everywhere.
-- **A database has ONE owner, or per-member rooms — never both.** A member holding
-  `ALL ON db.*` beside members holding rooms could read *and* re-grant everyone else's
-  transcripts, needing no admin and notifying nobody. `invite` refuses to create that
-  shape, `--adopt` does not override it, and bringing a housemate into a house someone
-  already owns fences the owner to their own rooms first.
+- **A member reaches their own rooms and nothing else.** One grant, on `mem.<name>_*`:
+  their rooms, present and future. Ungranted rooms are not merely unreadable but absent
+  from `SHOW TABLES`, and a member cannot create, drop or re-grant outside their pattern
+  (measured on 25.11 and 26.7). Reserved databases (`system`, `information_schema`) are
+  refused as house names everywhere.
+- **Nobody is granted the database.** `ALL ON db.*` is dynamic — it covers rooms created
+  later — and a member holding it beside others could read *and* re-grant every
+  housemate's transcripts, needing no admin and notifying nobody. memhouse never issues
+  it: not to a member, not to the operator's own member account. The operator's reach is
+  the admin credential, kept separately.
 - **A member can only share what is theirs.** Grant option is scoped to their own rooms,
   so `memhouse share` needs no operator and cannot reach a housemate's rows. A scoped
   share (`--only`) builds its row filters BEFORE granting anything, so a scoping failure

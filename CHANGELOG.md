@@ -6,6 +6,41 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **One layout.** Every member's rooms are named for them — `mem.polat_messages`,
+  `mem.alice_messages` — and one grant covers them: `GRANT … ON mem.<name>_* TO <name>
+  WITH GRANT OPTION`. A wildcard on the member's own name, verified on 25.11 and 26.7: it
+  lets the member create and rebuild their own rooms and share them, and reaches nothing
+  else — not a housemate's rooms to read, list, drop or re-grant. Nobody is granted the
+  database. A house with one member is a house of one, not a different kind of house.
+
+  This replaces the two layouts of the previous unreleased work (a house per member with
+  `ALL ON db.*`, and a prefixed variant beside it) together with everything that existed
+  to keep them apart: the one-owner invariant, the fencing step, `--shared-db`,
+  `--table-prefix`, `MEMHOUSE_TABLE_PREFIX`, the operator creating rooms at invite, and a
+  layout branch in eight code sites and nine documents. The database name is `mem` unless
+  somebody has a reason; `--db` remains for that reason.
+
+- **One provisioning plan.** `memhouse/provision.js` is the only description of what a
+  member is granted. The live path executes it, `--print-sql` renders it, the unit tests
+  assert on it. Three copies of this used to exist and had drifted — the printed one
+  handed a non-admin the configuration the live path refused.
+
+- **Standalone is a team of one.** `deploy --local` creates the container with an admin
+  credential (`memhouse_root`) and a member named after your OS user, keeps both in
+  `~/.memhouse/env`, and ships as the member. `invite`, `members` and `whoami --admin`
+  use the admin credential from the file, so a house you deployed needs no `--admin-*`
+  flags. A volume from before this release was initialised with the member as superuser
+  and is reused as it is.
+
+- **Houses from before this layout are refused, loudly.** A shipper that finds plain rooms
+  (`messages`, not `<name>_messages`) stops and prints the five `RENAME TABLE` statements
+  that move them across — instant, nothing copied — rather than creating an empty second
+  set beside them and hiding every past session. Conversion of an existing house is a
+  rename plus one grant swap; `doctor --fix` for that is the next change, not this one.
+
+- `memhouse members` reads wildcard grants on servers without the `is_wildcard` column
+  (25.11, the default local tag).
+
 - **Bringing a housemate into a house you already own now works, and moves nothing.** A
   member alone in their own database holds `ALL ON polat.*`. That grant is **dynamic** —
   it covers rooms created later — so a housemate's rooms would be readable *and

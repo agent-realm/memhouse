@@ -13,24 +13,12 @@ hosted ClickHouse; memhouse runs no service of its own. Its **rooms** are tables
 `sessions`, `messages`, `tool_calls` — and the server stamps who wrote every row. A
 house's grants reach nothing outside it.
 
-What a member owns inside a house depends on how it was set up, and there are two answers:
-
-| | rooms | the member holds |
-|---|---|---|
-| **a house of their own** | `alice.messages` | `ALL` on the database |
-| **rooms in a shared house** | `mem.alice_messages` | those rooms, and nothing else in the database |
-
-The second exists for a ClickHouse where a database per person is not available. Both
-isolate; a housemate can never read rooms they were not granted.
-
-**A database has ONE owner, or per-member rooms — never both.** Someone holding `ALL` on
-the database beside members holding rooms could read *and re-grant* every housemate's
-transcripts. `invite` refuses to build that shape; bringing a housemate into a house
-someone already owns fences the owner to their own rooms first, which moves no data. If
-you are provisioning through `/mem:access`, that is why an invite may report fencing
-before it reports the invite. **`memhouse rooms` says
-which you are in and what your tables are actually called** — in a shared house a bare
-`FROM messages` names nothing you have, and the `q()` below supplies the prefix for you.
+Every member's rooms are named for them — `mem.alice_messages`, `mem.alice_sessions`,
+`mem.alice_tool_calls` — and one grant covers exactly those: `ON mem.alice_*`. Housemates
+keep their own rooms beside yours and cannot read them, list them, or grant them onward;
+you cannot read theirs. `SHOW GRANTS` shows you the one line you hold. **A bare
+`FROM messages` names nothing you have** — the `q()` below prefixes room names with your
+member name for you, and `memhouse rooms` prints what yours are called.
 
 An **operator** owns the ClickHouse itself; an **admin credential** is what proves it.
 `memhouse whoami` says which you are holding.
@@ -64,7 +52,7 @@ if [ -z "${MEMHOUSE_URL:-}" ] || [ -z "${MEMHOUSE_USER:-}" ]; then
 fi
 
 q() {  # read-only by construction; every read path should use this
-  sed -E "s/([[:space:](]|^)(FROM|JOIN)[[:space:]]+(sessions|messages|tool_calls|house_meta|house_events)([[:space:];,)]|\$)/\1\2 ${MEMHOUSE_TABLE_PREFIX:+${MEMHOUSE_TABLE_PREFIX}_}\3\4/g" \
+  sed -E "s/([[:space:](]|^)(FROM|JOIN)[[:space:]]+(sessions|messages|tool_calls|house_meta|house_events)([[:space:];,)]|\$)/\1\2 ${MEMHOUSE_USER}_\3\4/g" \
   | curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
     --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&readonly=1"
 }
@@ -87,16 +75,11 @@ support `\b`**: on macOS the `\b` form matched nothing and sent the query throug
 unprefixed. That fails loudly as `UNKNOWN_TABLE` rather than quietly reading wrong rows,
 which is the right way round — but it fails.
 
-**Reading someone else's house.** A share is a read-only `GRANT SELECT` on their
-database. `SHOW DATABASES` lists what your credential may read; anything that is not
-`system`, `information_schema`, `default` or your own `$MEMHOUSE_DB` was shared with you.
-To read it, change `database=` in the URL and leave the table names bare. Say whose house
-an answer came from.
-
-In a **shared** house a share is narrower still — a `GRANT SELECT` on the individual
-rooms, so what you gain is `mem.yigit_messages`, not a database. Name those rooms in full
-(`FROM yigit_messages`); the `sed` leaves them alone, since it would otherwise apply your
-prefix to someone else's room. `SHOW TABLES FROM mem` lists exactly what you may read.
+**Reading a housemate's memory.** A share is `GRANT SELECT ON mem.<them>_*` — their
+rooms, not the database. `SHOW TABLES` lists exactly what you may read: your own rooms plus
+any shared with you. Name a housemate's rooms in full (`FROM yigit_messages`); the `q()`
+rewrite leaves an already-prefixed name alone, since applying yours would point at the
+wrong rooms. Say whose memory an answer came from.
 
 ---
 

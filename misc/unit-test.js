@@ -32,11 +32,13 @@ function test(name, fn) {
 }
 
 // ── the house's rooms ───────────────────────────────────────────────────────────
-test('rooms are plain shared tables — the database is the boundary', () => {
+test('rooms are named for the member — one layout, one grant pattern', () => {
   const r = rooms.roomNames('alice');
-  assert.strictEqual(r.sessions_raw, 'sessions');
-  assert.strictEqual(r.messages_raw, 'messages');
-  assert.strictEqual(r.tool_calls_raw, 'tool_calls');
+  assert.strictEqual(r.sessions_raw, 'alice_sessions');
+  assert.strictEqual(r.messages_raw, 'alice_messages');
+  assert.strictEqual(r.tool_calls_raw, 'alice_tool_calls');
+  assert.strictEqual(r.pattern, 'alice_*', 'the grant is scoped to this pattern and nothing else');
+  assert.throws(() => rooms.roomNames(''), /member is required/, 'a room without a member is not a thing');
   // The identity still travels with the names: writers BIND it (the shipper's inserts and
   // its epoch bookkeeping), and readers scope by it. Losing it here silently un-scopes
   // every consumer.
@@ -67,14 +69,14 @@ test('the transcript rooms read as the CURRENT parse, and only the raw name is t
   assert.match(r.tool_calls, /SELECT \*, user_id/);
   // sessions is one metadata row per session by construction; there is nothing to filter,
   // and its epoch column is for people only.
-  assert.strictEqual(r.sessions, 'sessions');
+  assert.strictEqual(r.sessions, 'alice_sessions');
 });
 
 test('the session rollup is a QUERY, not a fourth object', () => {
   const r = rooms.roomNames('alice');
   // SQL text, substituted into the same `FROM ... AS c` position a view name would hold.
   assert.ok(r.sessions_v.startsWith('('), 'the rollup must be a subquery');
-  assert.ok(r.sessions_v.includes('FROM sessions AS s'), r.sessions_v);
+  assert.ok(r.sessions_v.includes('FROM alice_sessions AS s'), r.sessions_v);
   assert.ok(r.sessions_v.includes('AS m ON m.session_id'), 'the LEFT JOIN must survive');
   // Shared tables make this the load-bearing line: two housemates' rows must never merge,
   // even on a colliding session_id.
@@ -90,12 +92,12 @@ test('the rollup is self-contained — it needs nothing from the caller', () => 
   const v = rooms.roomNames('alice').sessions_v;
   assert.match(v, /SETTINGS join_use_nulls = 1/, 'rollup must carry join_use_nulls itself');
   // Alias BEFORE final: `FROM t FINAL AS s` is a syntax error, `FROM t AS s FINAL` is not.
-  assert.match(v, /FROM sessions AS s FINAL/, 'sessions must be read FINAL');
+  assert.match(v, /FROM alice_sessions AS s FINAL/, 'sessions must be read FINAL');
   // The messages side carries its FINAL INSIDE the current-parse subquery instead —
   // `FROM (SELECT …) AS m FINAL` does not parse, and appending FINAL to whatever the room
   // resolved to is exactly the trap the raw/filtered split exists to remove.
   assert.match(v, /LEFT JOIN \(\s*\n\s*SELECT \*/, 'messages must join as the current-parse subquery');
-  assert.match(v, /FROM messages FINAL/, 'the current-parse subquery must read FINAL');
+  assert.match(v, /FROM alice_messages FINAL/, 'the current-parse subquery must read FINAL');
   // READ_SETTINGS still applies to DIRECT room reads, which carry no FINAL of their own.
   assert.strictEqual(rooms.READ_SETTINGS.join_use_nulls, 1);
   assert.strictEqual(rooms.READ_SETTINGS.final, 1);
@@ -1009,55 +1011,64 @@ test('policy names are predictable, so revoke finds every room', () => {
   assert.strictEqual(new Set(names).size, 3);
 });
 
-// ── prefixed houses: one database, a member's rooms named for them ───────────────
-// The layout exists because a grant is something a colleague can verify and a row policy
-// is not. It lives or dies on one property: every room name comes from roomNames(), so
-// nothing else in the codebase has to know which layout it is looking at.
-test('no prefix resolves exactly as before', () => {
-  const a = rooms.roomNames('alice');
-  const b = rooms.roomNames('alice', '');
-  assert.deepStrictEqual(a, b, 'an empty prefix must be the old behaviour, byte for byte');
-  assert.strictEqual(a.sessions, 'sessions');
-  assert.strictEqual(a.messages_raw, 'messages');
-  assert.strictEqual(a.house_meta, 'house_meta');
+// ── one layout: every member's rooms carry their name, and one grant covers them ────────
+// The product rests on a colleague being able to read their isolation back with SHOW
+// GRANTS. That works only if there is exactly one shape of grant, and only if every
+// table name in the codebase comes from the same function — so both are asserted here.
+test('physicalRoom refuses to name a room without a member', () => {
+  assert.throws(() => rooms.physicalRoom('messages'), /a member/, 'there is no unprefixed room any more');
+  assert.throws(() => rooms.physicalRoom('messages', ''), /a member/);
+  assert.strictEqual(rooms.physicalRoom('house_meta', 'bob'), 'bob_house_meta');
 });
 
-test('a prefix renames every room, including the house record', () => {
-  const r = rooms.roomNames('alice', 'alice');
-  assert.strictEqual(r.sessions, 'alice_sessions');
-  assert.strictEqual(r.messages_raw, 'alice_messages');
-  assert.strictEqual(r.tool_calls_raw, 'alice_tool_calls');
-  assert.strictEqual(r.house_meta, 'alice_house_meta');
-  assert.strictEqual(r.house_events, 'alice_house_events');
+test('the epoch subquery reads the member\'s room, and tool_calls takes its epoch from MESSAGES', () => {
+  const r = rooms.roomNames('alice');
+  const m = r.messages.replace(/\s+/g, ' ');
+  const t = r.tool_calls.replace(/\s+/g, ' ');
+  assert.ok(/FROM alice_messages FINAL/.test(m), 'the outer read must be the member\'s room');
+  assert.ok(!/FROM messages\b/.test(m), 'a bare `messages` would be someone else\'s layout');
+  assert.ok(/FROM alice_tool_calls FINAL/.test(t));
+  // A parse producing messages but no tool calls writes nothing into tool_calls at the new
+  // epoch; asked for its own max(epoch) that room would answer with the superseded one.
+  assert.ok(/FROM alice_messages WHERE origin/.test(t), 'epoch source must be the member\'s messages room');
 });
 
-test('the epoch subquery reads the prefixed table, not the bare one', () => {
-  const r = rooms.roomNames('alice', 'alice');
-  const flat = r.messages.replace(/\s+/g, ' ');
-  assert.ok(/FROM alice_messages FINAL/.test(flat), 'the outer read must be prefixed');
-  assert.ok(!/FROM messages\b/.test(flat), 'a bare `messages` would read another layout entirely');
+const provision = require('../memhouse/provision');
+test('the provisioning plan is ONE grant on the member\'s pattern, and never the database', () => {
+  const steps = provision.plan({ db: 'mem', member: 'alice', password: 'pw' });
+  const sql = steps.map((s) => s.sql);
+  const grants = sql.filter((q) => q.startsWith('GRANT') && / ON mem\./.test(q));
+  assert.strictEqual(grants.length, 1, `exactly one grant inside the house, got: ${grants.join(' | ')}`);
+  assert.match(grants[0], /ON mem\.alice_\* TO alice WITH GRANT OPTION$/, 'scoped to alice_*, with grant option so she can share it');
+  assert.ok(!sql.some((q) => /ON mem\.\* /.test(q)), 'ALL ON db.* is dynamic — it covers rooms created later — and is what made two members in one database a leak');
+  // What the grant must carry, each for a reason the comments in provision.js give.
+  for (const priv of ['CREATE TABLE', 'DROP TABLE', 'CREATE ROW POLICY']) {
+    assert.ok(grants[0].includes(priv), `${priv} — without it the member cannot build/rebuild their rooms or scope a share`);
+  }
+  // The pin is required, not optional: an async insert stores user_id as the empty string.
+  const pin = steps.find((s) => /ADD SETTING/.test(s.sql));
+  assert.ok(pin && !pin.optional, 'async_insert pin must be a required step');
+  // A member that already exists: the plan omits CREATE USER and keeps everything else.
+  const again = provision.plan({ db: 'mem', member: 'alice' }).map((s) => s.sql);
+  assert.ok(!again.some((q) => q.startsWith('CREATE USER')));
+  assert.ok(again.some((q) => q.startsWith('GRANT') && /alice_\*/.test(q)));
 });
 
-test('tool_calls still takes its epoch from MESSAGES, prefixed', () => {
-  // A parse producing messages but no tool calls writes nothing into tool_calls at the
-  // new epoch; asked for its own max(epoch) that room answers with the superseded one.
-  const r = rooms.roomNames('alice', 'alice');
-  const flat = r.tool_calls.replace(/\s+/g, ' ');
-  assert.ok(/FROM alice_tool_calls FINAL/.test(flat));
-  assert.ok(/FROM alice_messages WHERE origin/.test(flat), 'epoch source must be the prefixed messages room');
+test('the printed plan and the executed plan are the same statements', () => {
+  // --print-sql used to be a second description of provisioning and drifted from the first
+  // — it printed the leaking shape while the live path refused it. Now it renders the same
+  // array the live path executes, so this asserts the rendering carries every statement.
+  const steps = provision.plan({ db: 'mem', member: 'alice', password: "p'w" });
+  const text = provision.render(steps, { db: 'mem', member: 'alice' });
+  for (const s of steps) assert.ok(text.includes(`${s.sql};`), `rendered SQL must carry: ${s.sql.slice(0, 50)}`);
+  assert.ok(text.includes("IDENTIFIED BY 'p\\'w'"), 'the password must be escaped for SQL');
+  assert.ok(!/ON mem\.\* /.test(text));
+  assert.ok(/Do NOT widen it to/.test(text), 'the rendered plan must warn the DBA off the database-wide grant');
 });
 
-test('physical names are exposed for DDL and grants', () => {
-  const r = rooms.roomNames('alice', 'alice');
-  assert.strictEqual(r.physical.messages, 'alice_messages');
-  assert.strictEqual(r.physical.sessions, 'alice_sessions');
-  assert.strictEqual(rooms.roomNames('alice').physical.messages, 'messages');
-});
-
-test('the rollup follows the prefix', () => {
-  const v = rooms.roomNames('alice', 'alice').sessions_v;
-  assert.ok(v.includes('alice_sessions'), 'the rollup must join the prefixed rooms');
-  assert.ok(!/\bFROM sessions\b/.test(v.replace(/\s+/g, ' ')));
+test('a name that would break the pattern is refused before it reaches SQL', () => {
+  assert.throws(() => provision.plan({ db: 'mem', member: 'al ice', password: 'x' }));
+  assert.throws(() => provision.plan({ db: 'system', member: 'alice', password: 'x' }), /system|reserved/i);
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);

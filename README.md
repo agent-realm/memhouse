@@ -80,7 +80,6 @@ memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
 memhouse invite <name>                     mint a member + house, hand them one env file
-memhouse invite <name> --shared-db <db>    …or rooms of their own in a house you share
 memhouse members [--db X]                  who is in a house, and what each can reach
 memhouse whoami [--admin]                  which credential is in play, and what it may do
 memhouse rooms                             what your rooms are actually called
@@ -200,26 +199,25 @@ hold your turns. Every row says where it came from: `user_id`, stamped by the se
 skipped), and `host`, the machine's install fingerprint. `WHERE user_id = 'alice'` is one
 person; `WHERE host = '…'` is one machine. Neither is forgeable from the client.
 
-What you *own* inside a house depends on how it was set up. There are two layouts, and
-the operator picks one when they invite the first person:
+**Your rooms are named for you, and one grant covers them.** Every member of a house holds
+`GRANT … ON mem.<name>_* TO <name>`: their own rooms, present and future, and nothing else
+in the database. That is the whole access model, and it is the same on a laptop, a team's
+server, or a kernel:
 
-| | rooms | member holds | a member can share |
-|---|---|---|---|
-| **a house of your own** | `polat.messages` | `ALL` on the database | the whole house — it is all theirs |
-| **rooms in a shared house** | `mem.polat_messages` | their own rooms | a room, and only their own |
+| | rooms | the member holds |
+|---|---|---|
+| alone on your laptop | `mem.polat_*` | one grant on `mem.polat_*` |
+| a team on one server | `mem.polat_*`, `mem.alice_*`, … | each their own |
 
-The first is the default, and what a solo pilot gets. The second is for a ClickHouse
-where you cannot make a database per person — a company server you do not administer —
-and it is what `memhouse invite alice --shared-db mem` provisions: alice's rooms created
-for her, granted to her, and nothing else in that database reachable.
+A colleague can read their isolation back with `SHOW GRANTS` in one line, which is the
+property this rests on. There is no row policy to trust and no database-wide grant to
+worry about: `ALL ON mem.*` would cover rooms created later, which is how two people in one
+database once became a leak, so memhouse never issues it — not to a member, not to you.
 
-**One database, one owner.** memhouse will not put two members in one database with a
-database-wide grant each. That shape looks like a team and is not one: `ALL ON team.*`
-lets either member read the other's rows *and grant them to an outsider* — no admin
-involved, nobody notified. It is also not a state you can end up in by accident: bringing
-a housemate into a house someone already owns **fences the owner to their own rooms
-first**, which is a grant change only — no rename, no copy, no re-ship, and their data
-does not move.
+Standalone is a team of one. `memhouse deploy --local` creates the house with an admin
+credential (`memhouse_root`) and a member named after your OS user, keeps both in the env
+file, and ships as the member. Inviting a colleague later is `memhouse invite <name>`; the
+admin credential is already there.
 
 Reading across everyone is a `UNION ALL` over the rooms you hold:
 
@@ -366,7 +364,7 @@ and are not part of `npm test`.
 | `TERMINOLOGY.md` | the constellation terminology canon |
 
 Deeper reading: `memhouse/DESIGN.md` (the bets, and why the room layout has moved three
-times), `memhouse/house/HOUSE.md` (the two layouts and the schema), `SECURITY.md` (what
+times), `memhouse/house/HOUSE.md` (the layout and the schema), `SECURITY.md` (what
 holds, and what does not), `memhouse/delivery/kernel-install.md`, `memhouse/COMPETITION.md`.
 
 Deferred designs (captured, not yet built): `docs/design/host-repoint-reconciliation.md`

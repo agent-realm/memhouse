@@ -9,6 +9,8 @@ URL=${1:?url}; ADM=${2:?admin}; APW=${3:?password}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DOC="$ROOT/memhouse/delivery/plugin/reference/HOUSE.md"
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+# Never read this machine's real ~/.memhouse — a test once took its database name from it.
+export MEMHOUSE_HOME="$WORK/nohome"; mkdir -p "$MEMHOUSE_HOME"
 
 pass=0; fail=0
 ok(){ printf '  \033[32mok\033[0m   %s\n' "$1"; pass=$((pass+1)); }
@@ -24,7 +26,7 @@ echo
 echo "=== a prefixed house, read through the documented recipe ==="
 A "DROP DATABASE IF EXISTS mem SYNC" >/dev/null; A "DROP USER IF EXISTS carol" >/dev/null
 A "CREATE DATABASE mem" >/dev/null
-(cd "$WORK" && node "$ROOT/bin/memhouse.js" invite carol --url "$URL" --shared-db mem \
+(cd "$WORK" && node "$ROOT/bin/memhouse.js" invite carol --url "$URL" --db mem \
    --admin-user "$ADM" --admin-password "$APW" --allow-local --out "$WORK/carol.env" >/dev/null 2>&1)
 A "INSERT INTO mem.carol_messages (session_id, seq, source, host, ts, role, text, line_hash) VALUES ('s',0,'x','h',now(),'user','the needle',1)" >/dev/null 2>&1
 
@@ -51,7 +53,7 @@ case "$r" in ''|*[!0-9]*) bad "FROM sessions did not resolve" "$r";; *) ok "FROM
 echo
 echo "=== the rooms verb agrees with the server ==="
 out=$(cd "$WORK" && MEMHOUSE_HOME="$WORK/ch" sh -c 'mkdir -p "$MEMHOUSE_HOME" && cp '"$WORK"'/carol.env "$MEMHOUSE_HOME/env" && node '"$ROOT"'/bin/memhouse.js rooms --json' 2>&1)
-printf '%s' "$out" | grep -q '"shared": true' && ok "rooms reports a shared house" || bad "rooms --json" "$(printf '%s' "$out" | head -3)"
+printf '%s' "$out" | grep -qF '"pattern": "carol_*"' && ok "rooms reports the member pattern" || bad "rooms --json" "$(printf '%s' "$out" | head -3)"
 printf '%s' "$out" | grep -q 'carol_messages' && ok "  and names carol_messages" || bad "  rooms did not name the real table"
 
 echo
