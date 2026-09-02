@@ -3634,15 +3634,74 @@ async function cmdInvite() {
       console.log('  either member could then read the other\'s rooms and share them onward.');
       console.log(`  A house of their own:   memhouse invite ${name} --url … --db ${name}`);
       console.log(`  Or rooms of their own:  memhouse invite ${name} --url … --shared-db ${db}`);
-      if (owners.length) console.log(`  (the second needs '${owners[0]}' moved to rooms first — see 'memhouse migrate --help')`);
+      if (owners.length) console.log(`  (the second fences '${owners[0]}' to their own rooms first — it will ask; nothing moves)`);
       return 1;
     }
     if (prefix && owners.length) {
-      console.log(bad(`'${owners[0]}' holds a database-wide grant on '${db}' — NOT inviting.`));
-      console.log(`  Giving '${name}' rooms in it would not isolate them: '${owners[0]}' can read`);
-      console.log('  every table in the database, including the ones about to be created.');
-      console.log(`  Move the existing member to rooms first:  memhouse migrate --to-shared-db ${db} --member ${owners[0]}`);
-      return 1;
+      // The house has a sitting owner — almost always the operator's own member account,
+      // which holds ALL ON db.* only because it was alone in there. That grant is DYNAMIC:
+      // it covers rooms created later, so the invitee's rooms would be readable AND
+      // DROPPABLE by the owner the moment they exist (measured, both).
+      //
+      // Nothing has to move to fix this. The owner's rooms stay exactly where they are;
+      // the owner is FENCED to them — a REVOKE plus one GRANT per room. No rename, no
+      // copy, no downtime. And the operator loses nothing they had: they installed this
+      // ClickHouse and hold an admin credential, which is what /mem:admin is for. The
+      // member account was over-granted; this makes the grant say what it always meant.
+      const owner = owners[0];
+      console.log(warn(`'${owner}' currently holds ALL of '${db}', including rooms that do not exist yet.`));
+      console.log(`  Inviting '${name}' here without changing that would not isolate them:`);
+      console.log(`  '${owner}' could read AND drop '${name}''s rooms the moment they are created.`);
+      console.log('');
+      console.log(`  Fencing '${owner}' to their own rooms fixes it. Their data does NOT move —`);
+      console.log('  this is a grant change only: no rename, no copy, no re-ship, no downtime.');
+      console.log(`  '${owner}' keeps every room they have and loses only the reach into rooms`);
+      console.log('  that are not theirs. An admin credential still reads the whole house.');
+      if (flags.yes !== true) {
+        const a = await ask(`  Fence '${owner}' and invite '${name}'? [y/N]`, 'N');
+        if (!/^y/i.test(String(a || ''))) { console.log('  nothing was changed.'); return 1; }
+      }
+      try {
+        const ownerRooms = roomNames(owner, '');
+        const held = await chRows(adminCfg,
+          `SELECT name FROM system.tables WHERE database = '${esc(db)}' AND name IN (${[...ROOM_TYPES, ...META_TYPES].map((t) => `'${esc(ownerRooms.physical[t])}'`).join(',')})`,
+          { database: '' });
+        if (!held.length) {
+          console.log(bad(`'${owner}' holds '${db}' but none of the expected rooms are there — not guessing.`));
+          console.log('  Inspect it and narrow the grant by hand, then invite again.');
+          return 1;
+        }
+        // REVOKE FIRST, then grant — the opposite of what feels safe, and the only order
+        // that works. `REVOKE ALL ON db.*` covers every table under it, so a per-table
+        // grant issued BEFORE it is wiped by it: measured, granting SELECT on one room and
+        // then revoking the database left the member with zero grants and locked out of
+        // their own memory. Revoking first leaves a window where the owner has nothing, so
+        // any failure past this point restores the database-wide grant rather than leaving
+        // them fenced out of their own rooms.
+        await ch(adminCfg, `REVOKE ALL ON ${db}.* FROM ${owner}`, { database: '' });
+        try {
+          for (const r of held) {
+            await ch(adminCfg, `GRANT SELECT, INSERT, ALTER, OPTIMIZE, CREATE ROW POLICY, ALTER ROW POLICY, DROP ROW POLICY, SHOW ROW POLICIES ON ${db}.${r.name} TO ${owner} WITH GRANT OPTION`, { database: '' });
+          }
+        } catch (grantErr) {
+          await ch(adminCfg, `GRANT ALL ON ${db}.* TO ${owner} WITH GRANT OPTION`, { database: '' });
+          throw grantErr;
+        }
+        // Prove it before claiming it: the owner must still reach their own rooms.
+        const back = await chRows(adminCfg,
+          `SELECT count() AS n FROM system.grants WHERE user_name = '${esc(owner)}' AND database = '${esc(db)}' AND table IS NOT NULL`,
+          { database: '' });
+        if (!Number(back[0] && back[0].n)) {
+          await ch(adminCfg, `GRANT ALL ON ${db}.* TO ${owner} WITH GRANT OPTION`, { database: '' });
+          console.log(bad(`fencing '${owner}' left them with no grants — restored the house grant, nothing invited.`));
+          return 1;
+        }
+        console.log(ok(`fenced '${owner}' to their own ${held.length} room(s) — nothing moved`));
+      } catch (e) {
+        console.log(bad(`could not fence '${owner}': ${e.message.split('\n')[0]}`));
+        console.log(`  '${name}' was NOT invited, and '${owner}' is unchanged.`);
+        return 1;
+      }
     }
   } catch {
     console.log(warn(`could not read system.grants — not verifying that '${db}' has no other members`));

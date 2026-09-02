@@ -6,6 +6,27 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **Bringing a housemate into a house you already own now works, and moves nothing.** A
+  member alone in their own database holds `ALL ON polat.*`. That grant is **dynamic** —
+  it covers rooms created later — so a housemate's rooms would be readable *and
+  droppable* by the owner the moment they existed (both measured). `invite` used to
+  refuse and point at a migration command that did not exist.
+
+  It now **fences** the sitting owner instead: a `REVOKE` plus one `GRANT` per room they
+  already have. Their rooms keep their names, their data does not move, there is no
+  rename, no copy, no re-ship and no downtime — and an admin credential still reads the
+  whole house, which is what an operator has.
+
+  The order is REVOKE-then-GRANT, which is the opposite of what looks safe and the only
+  one that works: `REVOKE ALL ON db.*` covers every table beneath it, so per-room grants
+  issued first are wiped by it. Doing it the intuitive way locked a member out of their
+  own memory — caught on a real server, now a test.
+
+- Reading across members is `UNION ALL` over the rooms you hold, not a `merge()` pattern.
+  The anchored pattern the README carried (`'^.*_messages$'`) silently dropped the house
+  owner's own rooms, which are unprefixed — the one person most likely to run a team
+  query saw everyone's memory except their own.
+
 - **`share --only project=x` granted every project, then failed to scope.** The worst
   defect in this branch, and it was reachable by any member of a shared house. `share`
   granted `SELECT` on all rooms first and built the row-policy filters second; the

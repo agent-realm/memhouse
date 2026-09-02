@@ -17,6 +17,7 @@ pass=0; fail=0
 ok(){ printf '  \033[32mok\033[0m   %s\n' "$1"; pass=$((pass+1)); }
 bad(){ printf '  \033[31mFAIL\033[0m %s\n       %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
 A(){ curl -sS -u "$ADM:$APW" --data-binary "$1" "$URL/"; }
+M(){ u=$1; pw=$2; curl -sS -u "$u:$pw" --data-binary "$3" "$URL/" 2>&1 | head -1; }
 inv(){ (cd "$WORK" && $CLI invite "$@" --url "$URL" --admin-user "$ADM" --admin-password "$APW" --allow-local 2>&1); }
 
 reset_all(){
@@ -83,7 +84,7 @@ echo "=== --print-sql must not print the shape the live path refuses ==="
 # to whoever is." It used to ignore --shared-db entirely and emit unprefixed shared rooms
 # plus GRANT ALL ON db.* WITH GRANT OPTION — the leaking configuration, handed to the one
 # person who could not check it, at exit 0. A drill caught it; nothing else did.
-out=$(cd "$WORK" && $CLI invite psql --shared-db mem --url "$URL" --admin-user "$ADM" --admin-password "$APW" --member-password 'x' --print-sql 2>&1)
+out=$(cd "$WORK" && $CLI invite psql --shared-db mem --url "$URL" --allow-local --admin-user "$ADM" --admin-password "$APW" --member-password 'x' --print-sql 2>&1)
 printf '%s' "$out" | grep -qE "GRANT ALL ON mem\.\*" && bad "LEAK: --print-sql emits a database-wide grant in a shared house" || ok "no database-wide grant in the printed SQL"
 printf '%s' "$out" | grep -q "CREATE TABLE IF NOT EXISTS mem.psql_messages" && ok "  printed rooms carry the member's prefix" || bad "  printed rooms are unprefixed" "$(printf '%s' "$out" | grep -m1 'CREATE TABLE')"
 # Assert the SHAPE (one grant, named at one room), not the exact privilege list — that
@@ -99,7 +100,9 @@ i=0
 while [ $i -lt 40 ]; do
   st=$(printf '%s\n' "$out" | awk -v n=$i 'BEGIN{RS=";"} { if (++c == n+1) { print $0 } }')
   [ -z "$(printf '%s' "$st" | tr -d ' \t\n')" ] && { i=$((i+1)); continue; }
-  curl -sS --data-binary "$st" "$URL/?allow_experimental_full_text_index=1" >/dev/null 2>&1
+  # Authenticate: a DBA runs this as themselves. Unauthenticated worked only against a
+  # passwordless `default`, which made the whole case pass for the wrong reason.
+  curl -sS -u "$ADM:$APW" --data-binary "$st" "$URL/?allow_experimental_full_text_index=1" >/dev/null 2>&1
   i=$((i+1))
 done
 r=$(curl -sS -u psql:x --data-binary "SELECT count() FROM mem.psql_messages FORMAT TSV" "$URL/" 2>&1 | head -1)
@@ -107,6 +110,45 @@ case "$r" in ''|*[!0-9]*) bad "the printed SQL did not produce a working member"
 r=$(curl -sS -u psql:x --data-binary "SELECT count() FROM mem.alice_messages" "$URL/" 2>&1 | head -1)
 printf '%s' "$r" | grep -q "ACCESS_DENIED\|Not enough privileges" && ok "  and isolates exactly like the live path" || bad "  LEAK: DBA-run setup can read a housemate" "$r"
 A "DROP USER IF EXISTS psql" >/dev/null
+
+echo
+echo "=== a solo house gains a housemate: the owner is FENCED, nothing moves ==="
+# The real path: someone has had a house to themselves for months and now wants a
+# colleague in it. Their ALL ON db.* is dynamic — it would cover the newcomer's rooms the
+# moment they exist, read AND drop. invite fences them instead. Their data does not move.
+A "DROP DATABASE IF EXISTS solo SYNC" >/dev/null
+for u in owner guest; do A "DROP USER IF EXISTS $u" >/dev/null; done
+out=$(inv owner --db solo --out "$WORK/owner.env")
+printf '%s' "$out" | grep -q "invite written" && ok "owner has a house to themselves" || bad "invite owner" "$(printf '%s' "$out" | tail -2)"
+OPW=$(grep -o "MEMHOUSE_PASSWORD='[^']*'" "$WORK/owner.env" | sed "s/.*='//;s/'//")
+A "INSERT INTO solo.messages (session_id, seq, source, host, ts, role, text, line_hash) VALUES ('s',0,'x','h',now(),'user','owner memory',1)" >/dev/null 2>&1
+out=$(inv guest --shared-db solo --yes --out "$WORK/guest.env")
+printf '%s' "$out" | grep -q "fenced 'owner'" && ok "inviting a housemate fenced the owner" || bad "owner was not fenced" "$(printf '%s' "$out" | grep -E '✗|•' | head -2)"
+printf '%s' "$out" | grep -q "invite written" && ok "  and the guest was invited" || bad "  guest not invited"
+
+# THE regression: fencing must not lock the owner out of their own memory. Granting the
+# per-room replacement BEFORE revoking the database looks safer and is wrong — REVOKE at
+# db.* covers every table under it and wipes the grants just issued. It left the owner
+# with zero grants and no access to their own rooms.
+r=$(M owner "$OPW" "SELECT text FROM solo.messages FORMAT TSV")
+printf '%s' "$r" | grep -q "owner memory" && ok "  the owner still reads their own memory" || bad "  LOCKED OUT: owner cannot read their own rooms" "$r"
+r=$(M owner "$OPW" "INSERT INTO solo.messages (session_id, seq, source, host, ts, role, text, line_hash) VALUES ('s2',0,'x','h',now(),'user','still shipping',2)")
+[ -z "$r" ] && ok "  and can still ship" || bad "  owner can no longer write to their own rooms" "$r"
+n=$(A "SELECT count() FROM solo.messages FORMAT TSV" | tr -d '\n')
+[ "${n:-0}" -ge 1 ] && ok "  their data never moved ($n rows, same table)" || bad "  owner data lost ($n)"
+
+# And the fence actually fences, both directions.
+GPW=$(grep -o "MEMHOUSE_PASSWORD='[^']*'" "$WORK/guest.env" | sed "s/.*='//;s/'//")
+r=$(M owner "$OPW" "SELECT count() FROM solo.guest_messages")
+printf '%s' "$r" | grep -q "ACCESS_DENIED\|Not enough privileges" && ok "  the owner cannot read the guest's rooms" || bad "  LEAK: owner reads guest rooms" "$r"
+r=$(M owner "$OPW" "DROP TABLE solo.guest_messages")
+printf '%s' "$r" | grep -q "ACCESS_DENIED\|Not enough privileges" && ok "  nor drop them" || bad "  LEAK: owner can drop guest rooms" "$r"
+r=$(M guest "$GPW" "SELECT count() FROM solo.messages")
+printf '%s' "$r" | grep -q "ACCESS_DENIED\|Not enough privileges" && ok "  and the guest cannot read the owner's" || bad "  LEAK: guest reads owner rooms" "$r"
+n=$(A "SELECT count() FROM system.grants WHERE database='solo' AND table IS NULL AND user_name IS NOT NULL FORMAT TSV" | tr -d '\n')
+[ "$n" = "0" ] && ok "  nobody holds the house any more" || bad "  a database-wide grant survived ($n)"
+A "DROP DATABASE IF EXISTS solo SYNC" >/dev/null
+for u in owner guest; do A "DROP USER IF EXISTS $u" >/dev/null; done
 
 echo
 echo "=== cleanup ==="

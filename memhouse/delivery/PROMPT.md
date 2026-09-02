@@ -40,9 +40,8 @@ Without skills, query directly.
 database — unless this is a shared house, where they carry the member's own prefix
 (`alice_messages`). `memhouse rooms` prints what yours are actually called; a bare
 `FROM messages` is not a table you have in a shared house. `user_id` (server-stamped)
-says whose row it is and `host` says which machine. To read across every member you may
-read, `merge(<db>, '^.*_messages$')` covers them in one query and returns only what your
-grants allow. **There is no `sessions_v` object** — the rollup is a saved query, and
+says whose row it is and `host` says which machine. To read across several members, UNION ALL over the rooms you hold — naming a room
+you do not hold is an error rather than a silent omission. **There is no `sessions_v` object** — the rollup is a saved query, and
 `memhouse sessions-query` prints it ready to drop into a `FROM (...) AS c`.
 
 **One session can be stored more than once.** The shipper never deletes: when an editor

@@ -206,19 +206,22 @@ for her, granted to her, and nothing else in that database reachable.
 **One database, one owner.** memhouse will not put two members in one database with a
 database-wide grant each. That shape looks like a team and is not one: `ALL ON team.*`
 lets either member read the other's rows *and grant them to an outsider* — no admin
-involved, nobody notified. `invite` refuses it, `--adopt` does not override it, and it
-points you at `--shared-db` instead.
+involved, nobody notified. It is also not a state you can end up in by accident: bringing
+a housemate into a house someone already owns **fences the owner to their own rooms
+first**, which is a grant change only — no rename, no copy, no re-ship, and their data
+does not move.
 
-A team dashboard still reads across everyone, with one query, filtered by grant:
+Reading across everyone is a `UNION ALL` over the rooms you hold:
 
 ```sql
-SELECT user_id, count() FROM merge(mem, '^.*_messages$') GROUP BY user_id
+SELECT user_id, count() FROM mem.polat_messages GROUP BY user_id
+UNION ALL
+SELECT user_id, count() FROM mem.alice_messages GROUP BY user_id
 ```
 
-The operator sees every room. Alice runs the identical query and sees only her own. A
-dashboard account sees exactly the rooms it was granted, and a member who joins tomorrow
-stays invisible until someone grants theirs. Aggregate visibility became something people
-opt into rather than the default.
+An operator with an admin credential reads every room; a member reads the ones they own
+plus whatever was shared with them, and naming a room they do not hold is an error rather
+than a silent omission.
 
 ### The house never destroys what it cannot rebuild
 
