@@ -380,24 +380,26 @@ memhouse ${PKG.version} — agent conversation memory across 17 editors
 
 Setup        onboard              interactive wizard: discover → configure → ship → start
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
+                                  --print-sql            print the SQL, run it yourself
+                                  with admin: --admin-user --admin-password [--member NAME]
+                                  builds house + user + rooms + grants, then verifies as
+                                  the member. The admin credential is never stored.
                                   --env FILE installs from an invite file (see: invite)
              invite <name>        mint a member + house on the server and write the env
-                                  --shared-db <db>  puts every member in ONE database with
-                                  their own rooms (<db>.<name>_messages …), each granted
-                                  only theirs; --table-prefix overrides the name used
                                   file their install needs (--url --admin-user
                                   [--admin-password, else prompted] [--db NAME]
                                   [--out FILE]); local machine untouched. Refuses a house
                                   that already holds someone's messages — --adopt takes it
                                   over (same person, new credential); it is not a way to
-                                  put two members in one house. Not an admin? --print-sql gives
-                                  the statements to hand to whoever is
+                                  put two members in one house.
+                                  --shared-db <db> puts every member in ONE database with
+                                  rooms of their own (<db>.<name>_messages …), each granted
+                                  only theirs — for a ClickHouse where you cannot make a
+                                  database per person; --table-prefix overrides the name.
+                                  Not an admin? --print-sql gives the statements to hand
+                                  to whoever is (it honours --shared-db).
              passwd               rotate this member's password + rewrite the env file
                                   (admin-assisted: --admin-user --admin-password)
-                                  --print-sql            print the SQL, run it yourself
-                                  with admin: --admin-user --admin-password [--member NAME]
-                                  builds house + user + rooms + grants, then verifies as
-                                  the member. The admin credential is never stored.
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
              uninstall            stop daemons + service, clear runtime state (asks; --yes).
@@ -420,6 +422,7 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              resume <session-id>  print the command that reopens that session in its editor
              sessions-query       print the session rollup SQL for this credential
              rooms                what your rooms are actually called (--json)
+             members              who is in a house and what each can reach (--db, admin)
              start | stop |       shipper loop + dashboard as background daemons
              share <user>         let someone read this house (--only project=… |
                                   session=… | host=… | source=… | folder=… | since=… |
@@ -701,20 +704,37 @@ function generatePassword() {
  * hand produces exactly what `--admin-user` would have produced. It is rendered from the
  * same templates provision.js applies, so the two cannot drift into different houses.
  */
-function memberSql(db, member, password) {
+function memberSql(db, member, password, prefix = '') {
   // The template is written unqualified because the shipper applies it with the house
   // already selected. A human pastes this somewhere unknown — clickhouse-client, the
   // play UI, curl — so every name is qualified here and there is no `USE`.
+  //
+  // THE PREFIX IS LOAD-BEARING HERE. This function used to ignore it, so
+  // `invite --shared-db mem --print-sql` printed the SHARED-TABLE setup — unprefixed rooms
+  // plus `GRANT ALL ON db.* WITH GRANT OPTION` — which is exactly the configuration the
+  // live path refuses, because it lets any member read a housemate's rows and grant them
+  // to an outsider. The help routes non-admins here ("Not an admin? --print-sql gives the
+  // statements to hand to whoever is"), so the one person who could not check the result
+  // was handed the leak, confidently, at exit 0. Found in a drill, not by a test.
   const qualify = (sql) => sql
-    .replace(/CREATE TABLE IF NOT EXISTS (\w+)/g, `CREATE TABLE IF NOT EXISTS ${db}.$1`);
+    .replace(/CREATE TABLE IF NOT EXISTS (\w+)/g, (_, t) => `CREATE TABLE IF NOT EXISTS ${db}.${physicalRoom(t, prefix)}`);
   const rooms = qualify(fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8'));
+  const model = prefix
+    ? `-- A SHARED house: one database, and '${member}' holds ONLY their own rooms in it
+-- (${db}.${prefix}_*). Housemates keep theirs in the same database and none of you can
+-- read another's — the grants below are per-table, and there is deliberately no
+-- \`GRANT ... ON ${db}.*\`. Adding a housemate later is this same block under their name.
+-- Do NOT collapse it into a database-wide grant to "simplify": that hands every member
+-- the ability to read and re-grant everyone else's conversations.`
+    : `-- A house is a database, and '${member}' owns this one. Every row carries who
+-- (user_id, stamped by the server) and where from (host, the install's fingerprint).
+-- A SECOND member does not belong in this database — give them one of their own, or run
+-- \`memhouse invite <name> --shared-db ${db}\` to put everyone in one database with
+-- rooms of their own.`;
   return `-- memhouse: everything '${member}' needs in house '${db}'. Run as a user with
 -- ACCESS MANAGEMENT (a stock 'default' with access_management=1 will do).
 --
--- A house is a database; its rooms are three shared tables. Everyone granted on the
--- database writes into the same tables, and every row carries who (user_id, stamped by
--- the server) and where from (host, the install's fingerprint). Adding a housemate later
--- is the same two statements: CREATE USER, GRANT ALL ON the house.
+${model}
 --
 -- Every name is qualified and there is no USE, so this runs anywhere: clickhouse-client,
 -- the play UI, curl, a GUI. Order matters only in that the database comes first.
@@ -739,13 +759,24 @@ CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'
 
 ${rooms.trim()}
 
--- The whole database, WITH GRANT OPTION. ALL on your own house reaches nothing outside it
+${prefix ? `-- ONE STATEMENT PER ROOM, and no database-wide grant. ClickHouse rejects a multi-target
+-- \`ON db.a, db.b\` outright ("Expected access type"), so this is the short form. The grant
+-- option is scoped to '${member}'s own rooms: enough to share their own memory without an
+-- operator (\`memhouse share\`), and reaching nothing a housemate wrote.
+${[...ROOM_TYPES, ...META_TYPES]
+    .map((t) => `GRANT SELECT, INSERT, ALTER, OPTIMIZE ON ${db}.${physicalRoom(t, prefix)} TO ${member} WITH GRANT OPTION;`)
+    .join('\n')}`
+    : `-- The whole database, WITH GRANT OPTION. ALL on your own house reaches nothing outside it
 -- — the database is the boundary — and it lets the shipper create and evolve its own
 -- tables. The grant option makes the member the real owner: they can hand on any of their
 -- own data (\`/mem:access\` still opens only a read-only SELECT window, but the owner is not
 -- boxed into read-only sharing of their own house). Scoped to this db, and no CREATE USER
 -- rides with it — a member still cannot mint accounts or reach another house.
-GRANT ALL ON ${db}.* TO ${member} WITH GRANT OPTION;
+--
+-- THIS IS FOR ONE MEMBER. Running it a second time against the same database, under
+-- another name, gives two people a database-wide grant each and lets either read and
+-- re-grant the other's conversations. Use --shared-db for that.
+GRANT ALL ON ${db}.* TO ${member} WITH GRANT OPTION;`}
 
 -- Self-scoped ALTER USER: the member may change THEIR OWN password and no one else's.
 -- \`ON ${member}\` names exactly this user, so \`memhouse passwd\` needs no admin, and an
@@ -949,8 +980,8 @@ async function adminBootstrap(cfg, admin) {
   // schema-build proof against a throwaway MEMHOUSE_HOME so host.json lands there and is
   // discarded — the invitee mints their real identity on their own first ship.
   const proofEnv = admin.quiet
-    ? { MEMHOUSE_HOME: fs.mkdtempSync(path.join(require('os').tmpdir(), 'mh-invite-')), MEMHOUSE_NO_RECORD: '1' }
-    : {};
+    ? { MEMHOUSE_HOME: fs.mkdtempSync(path.join(require('os').tmpdir(), 'mh-invite-')), MEMHOUSE_NO_RECORD: '1', MEMHOUSE_PROVISION_PROOF: '1' }
+    : { MEMHOUSE_PROVISION_PROOF: '1' };
   if (run(SHIP_JS, ['--ensure-schema'], memberCfg, proofEnv) !== 0) {
     console.log(bad(`'${admin.member}' could not create the rooms in '${cfg.db}' — nothing written to disk`));
     return null;
@@ -1094,7 +1125,7 @@ async function cmdInstall({ interactive }) {
     const member = resolveMemberHandle();
     if (!member) return 1;
     const password = flags['member-password'] || generatePassword();
-    console.log(memberSql(cfg.db, member, password));
+    console.log(memberSql(cfg.db, member, password, cfg.prefix || ''));
     console.log(`-- Then, once that has run:`);
     // Only echo a URL that was actually STATED. --print-sql is the path where the house is
     // typically someone else's, run by someone else, and cfg.url falls back to
@@ -3416,9 +3447,10 @@ async function cmdInvite() {
   if (flags['print-sql'] === true) {
     const password = flags['member-password'] && flags['member-password'] !== true
       ? String(flags['member-password']) : generatePassword();
-    console.log(`-- memhouse: give '${name}' an account and their own house on this ClickHouse.`);
-    console.log(`-- Run as a user with ACCESS MANAGEMENT (a stock 'default' will do).`);
-    console.log(memberSql(db, name, password));
+    // memberSql prints its own header naming the house and the credential it needs; a
+    // second one above it said the same thing twice, and in a shared house said the wrong
+    // thing ("their own house" — they get rooms in a shared one).
+    console.log(memberSql(db, name, password, prefix || ''));
     console.log('-- Then send them these four lines — they are a credential, so use a channel');
     console.log('-- you trust (croc, a password manager), not chat:');
     console.log(`--   MEMHOUSE_URL='${url}'`);
@@ -3937,6 +3969,59 @@ async function cmdUninstall() {
       // carries FINAL and join_use_nulls itself, so the note is provenance, not a warning.
       if (!JSON_OUT) console.log(`-- memhouse rollup for '${r.member}' — self-contained (FINAL + join_use_nulls).`);
       console.log(r.sessions_v);
+      break;
+    }
+    case 'members': {
+      // "Who is in this database, and what can each of them reach?" Before shared houses a
+      // database had exactly one member and the question did not exist; this layout creates
+      // it, and an operator had no supported way to answer — they had to hand-write SQL
+      // against system.grants. Found in a drill.
+      const cfg = requireConfig(resolveConfig(), 'members');
+      const db = flags.db && flags.db !== true ? String(flags.db) : cfg.db;
+      const au = flags['admin-user'] && flags['admin-user'] !== true ? String(flags['admin-user']) : null;
+      const ap = flags['admin-password'] && flags['admin-password'] !== true ? String(flags['admin-password']) : '';
+      // Reading ANOTHER account's grants needs privilege; without it ClickHouse simply
+      // returns fewer rows. Say so rather than presenting a short list as the whole truth.
+      const who = au ? { ...cfg, user: au, password: ap } : cfg;
+      let rows = [];
+      try {
+        rows = await chRows(who,
+          `SELECT user_name AS u, max(table IS NULL) AS db_wide,
+                  arrayStringConcat(arraySort(groupUniqArray(table)), ', ') AS tables
+             FROM system.grants
+            WHERE database = ${sqlStr(db)} AND user_name IS NOT NULL
+            GROUP BY user_name ORDER BY user_name`, { database: '' });
+      } catch (e) {
+        console.log(bad(`could not read the grant table: ${e.message}`));
+        console.log('  Pass an admin credential:  memhouse members --admin-user <a> --admin-password <p>');
+        process.exitCode = 1; break;
+      }
+      if (JSON_OUT) {
+        console.log(JSON.stringify({ database: db, members: rows.map((r) => ({
+          name: r.u, scope: Number(r.db_wide) === 1 ? 'database' : 'rooms',
+          rooms: Number(r.db_wide) === 1 ? null : String(r.tables || '').split(', ').filter(Boolean),
+        })) }, null, 2));
+        break;
+      }
+      if (!rows.length) {
+        console.log(ok(`no member holds a grant on '${db}'`));
+        console.log(`  Either it is empty, or this credential cannot see other accounts' grants.`);
+        console.log('  With an admin:  memhouse members --db ' + db + ' --admin-user <a> --admin-password <p>');
+        break;
+      }
+      const owners = rows.filter((r) => Number(r.db_wide) === 1);
+      console.log(`  '${db}' — ${rows.length} member(s):`);
+      for (const r of rows) {
+        if (Number(r.db_wide) === 1) console.log(`    ${String(r.u).padEnd(16)} the whole database`);
+        else console.log(`    ${String(r.u).padEnd(16)} ${String(r.tables || '(none)')}`);
+      }
+      if (owners.length && rows.length > 1) {
+        console.log('');
+        console.log(warn(`'${owners[0].u}' holds the WHOLE database while others hold rooms in it —`));
+        console.log(`  they can read and re-grant every housemate's rows. memhouse does not create`);
+        console.log(`  this shape; something granted it by hand. Narrow it to their own rooms.`);
+      }
+      if (!au) console.log('  (run with --admin-user to be sure you are seeing every account)');
       break;
     }
     case 'rooms': {

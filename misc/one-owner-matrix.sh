@@ -78,6 +78,34 @@ r=$(curl -sS -u carol:x --data-binary "SELECT count() FROM mem.alice_messages FO
 case "$r" in ''|*[!0-9]*) bad "carol cannot read the room alice shared" "$r";; *) ok "carol reads alice's shared room";; esac
 
 echo
+echo "=== --print-sql must not print the shape the live path refuses ==="
+# The help routes non-admins here: "Not an admin? --print-sql gives the statements to hand
+# to whoever is." It used to ignore --shared-db entirely and emit unprefixed shared rooms
+# plus GRANT ALL ON db.* WITH GRANT OPTION — the leaking configuration, handed to the one
+# person who could not check it, at exit 0. A drill caught it; nothing else did.
+out=$(cd "$WORK" && $CLI invite psql --shared-db mem --url "$URL" --admin-user "$ADM" --admin-password "$APW" --member-password 'x' --print-sql 2>&1)
+printf '%s' "$out" | grep -qE "GRANT ALL ON mem\.\*" && bad "LEAK: --print-sql emits a database-wide grant in a shared house" || ok "no database-wide grant in the printed SQL"
+printf '%s' "$out" | grep -q "CREATE TABLE IF NOT EXISTS mem.psql_messages" && ok "  printed rooms carry the member's prefix" || bad "  printed rooms are unprefixed" "$(printf '%s' "$out" | grep -m1 'CREATE TABLE')"
+printf '%s' "$out" | grep -q "GRANT SELECT, INSERT, ALTER, OPTIMIZE ON mem.psql_messages" && ok "  and the grants are per-room" || bad "  grants are not per-room"
+# The printed SQL is only worth anything if it RUNS and yields the same isolation.
+# Split on ';' but KEEP the newlines inside each statement: the schema template carries
+# inline `-- ...` comments, and collapsing a statement onto one line makes the first of
+# them comment out everything after it. That is a bug in the test, not the product, and it
+# cost one confusing red before it was spotted.
+i=0
+while [ $i -lt 40 ]; do
+  st=$(printf '%s\n' "$out" | awk -v n=$i 'BEGIN{RS=";"} { if (++c == n+1) { print $0 } }')
+  [ -z "$(printf '%s' "$st" | tr -d ' \t\n')" ] && { i=$((i+1)); continue; }
+  curl -sS --data-binary "$st" "$URL/?allow_experimental_full_text_index=1" >/dev/null 2>&1
+  i=$((i+1))
+done
+r=$(curl -sS -u psql:x --data-binary "SELECT count() FROM mem.psql_messages FORMAT TSV" "$URL/" 2>&1 | head -1)
+case "$r" in ''|*[!0-9]*) bad "the printed SQL did not produce a working member" "$r";; *) ok "  the printed SQL runs and the member works";; esac
+r=$(curl -sS -u psql:x --data-binary "SELECT count() FROM mem.alice_messages" "$URL/" 2>&1 | head -1)
+printf '%s' "$r" | grep -q "ACCESS_DENIED\|Not enough privileges" && ok "  and isolates exactly like the live path" || bad "  LEAK: DBA-run setup can read a housemate" "$r"
+A "DROP USER IF EXISTS psql" >/dev/null
+
+echo
 echo "=== cleanup ==="
 reset_all
 echo "  $pass passed, $fail failed"

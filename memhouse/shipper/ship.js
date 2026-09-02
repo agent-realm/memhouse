@@ -462,7 +462,13 @@ async function ensureSchema(client) {
     // could CREATE TABLE here could add tables beside every housemate's. Saying "you do
     // not hold these rights" and then "schema ensured" about the same statements reads as
     // a contradiction on every routine ship, which is how often a member sees it.
-    if (TABLE_PREFIX) {
+    if (process.env.MEMHOUSE_PROVISION_PROOF === '1') {
+      // The operator created these rooms seconds ago and is now watching invite verify
+      // them AS the new member, who has no CREATE right on them by design. "5 rooms
+      // already exist" reads as a name collision with an existing member on a database
+      // that was empty a moment earlier — it was, and it sent one operator to
+      // system.tables to find out what had gone wrong. Nothing had.
+    } else if (TABLE_PREFIX) {
       console.error(`[memhouse] ${denied} room(s) already exist and are not yours to create — as designed; your rooms were made for you.`);
     } else {
       console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);

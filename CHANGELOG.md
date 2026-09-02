@@ -6,6 +6,33 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **`invite --print-sql` printed the configuration the live path refuses.** It ignored
+  `--shared-db` and `--table-prefix` entirely and emitted unprefixed shared rooms plus
+  `GRANT ALL ON db.* TO <member> WITH GRANT OPTION` — the shape that lets any member read
+  a housemate's rows and grant them to an outsider. The help routes non-admins to exactly
+  this path ("Not an admin? `--print-sql` gives the statements to hand to whoever is"), so
+  the one person who could not check the result was handed the leak, confidently, at exit
+  0. It now honours the prefix, emits per-room grants and no database-wide grant, and the
+  matrix RUNS the printed SQL and asserts it isolates identically to the live path.
+
+  Found by a drill — an agent given an admin credential, a database, and two colleagues to
+  set up, which is the only instrument that reads the output instead of the code.
+
+- **`memhouse members`** — who is in a house, and what each of them reaches. Before shared
+  houses a database had exactly one member and the question did not exist; this layout
+  creates it, and the operator had no supported way to answer it. Warns when one account
+  holds the whole database while others hold rooms in it — memhouse cannot create that
+  shape, but a hand-written `GRANT` can.
+
+- Help fixes the same drill turned up: the `--shared-db` block had been spliced through the
+  middle of the sentence "write the env **file their install needs**", and four lines
+  describing `install` were hanging under `passwd`.
+
+- `invite` no longer prints "5 room(s) already exist and are not yours to create" while
+  verifying a member it provisioned seconds earlier. It reads as a name collision on a
+  database that was empty a moment ago, and sent one operator to `system.tables` to find
+  out what had gone wrong. Nothing had.
+
 - **Two members can no longer share one database with a grant each — it leaked.** Until
   now `invite bob --db alices-house --adopt` put both in one database with `ALL ON db.*`
   apiece, and the README taught it as the way to run a team. Measured on a real server:
