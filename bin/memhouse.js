@@ -850,7 +850,9 @@ async function adminBootstrap(cfg, admin) {
     const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN (${names})`, { database: '' });
     if (Number(seen[0]?.n) !== 3) { console.log(bad(`'${admin.member}' cannot see the three rooms — nothing written`)); return null; }
   } catch (e) { console.log(bad(`'${admin.member}' could not connect after provisioning: ${e.message}`)); return null; }
-  console.log(ok(`verified as '${admin.member}' — admin credential discarded, not stored`));
+  // Whether the admin credential is kept is the CALLER's business: an operator's own
+  // install keeps it in the env file beside the member's; an invitee's file never carries it.
+  console.log(ok(`verified as '${admin.member}' with the member credential`));
   return memberCfg;
 }
 
