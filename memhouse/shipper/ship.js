@@ -62,7 +62,7 @@ const selfUpdate = require('../self-update');
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
   resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN, createStatement,
-  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal } = require('../house/house');
+  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
 // house_events would otherwise roll out to nobody.
@@ -438,19 +438,23 @@ async function ensureSchema(client) {
   //     the loser can get TABLE_ALREADY_EXISTS or a metadata-file collision. The table
   //     exists either way, which is the outcome this function wants.
   let denied = 0;
-  // The text-index grammar changed between 25.8 and 26.x and neither side parses the
-  // other. The template carries the current grammar; a server that refuses it on grammar
-  // alone gets the same statement in the older one. Feature-detected per statement rather
-  // than by version arithmetic: the cut-over release is not documented, and a wrong guess
-  // fails exactly the way this fixes.
+  // The text-index grammar changed at 25.10 and neither side parses the other (measured:
+  // 25.8/25.9 take the quoted form, 25.10+ the function form). Pick by the server's own
+  // version, then keep one fallback: if the chosen form is refused on grammar alone —
+  // never on privilege — send the other. A wrong guess costs a round-trip, not the install.
+  const version = await serverVersion(client);
+  const dialect = textIndexDialectFor(version);
+  if (dialect === 'legacy') console.error(`[memhouse] ClickHouse ${version}: text indexes in the pre-25.10 grammar`);
   const create = (q) => client.command({ query: q, clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 } });
-  for (const q of stmts) {
+  for (const modern of stmts) {
+    const legacy = legacyTextIndexDialect(modern);
+    const [first, second] = dialect === 'legacy' ? [legacy, modern] : [modern, legacy];
     try {
-      try { await create(q); }
+      try { await create(first); }
       catch (e) {
         const m = e && e.message ? e.message : String(e);
-        if (!(/TYPE text\(/.test(q) && isTextIndexGrammarRefusal(m))) throw e;
-        await create(legacyTextIndexDialect(q));
+        if (!(first !== second && isTextIndexGrammarRefusal(m))) throw e;
+        await create(second);
       }
     } catch (e) {
       const m = e && e.message ? e.message : String(e);
@@ -648,6 +652,13 @@ async function recordHouseState(client, rooms, host) {
  * Trips only when the member's rooms are ABSENT and the plain ones PRESENT; a house holding
  * both is mid-conversion and is left alone.
  */
+async function serverVersion(client) {
+  try {
+    const rs = await client.query({ query: 'SELECT version() AS v', format: 'JSONEachRow' });
+    return String(((await rs.json())[0] || {}).v || '');
+  } catch { return ''; }
+}
+
 async function assertNotLegacyLayout(client, rooms) {
   const rs = await client.query({
     query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ('messages', '${rooms.physical.messages}')`,

@@ -397,13 +397,26 @@ function legacyTextIndexDialect(sql) {
     .replace(/TYPE text\(tokenizer = splitByNonAlpha\)/g, "TYPE text(tokenizer = 'default')");
 }
 
+/**
+ * Which text-index grammar a server speaks, from `SELECT version()`. Measured on real
+ * builds: 25.8 and 25.9 want the quoted-name form, 25.10 onwards the function form, and
+ * each rejects the other. Anything unparseable is treated as current; the shipper still
+ * falls back on a grammar refusal, so a wrong guess costs one round-trip, not the install.
+ */
+function textIndexDialectFor(version) {
+  const m = /^(\d+)\.(\d+)/.exec(String(version || '').trim());
+  if (!m) return 'modern';
+  const major = Number(m[1]); const minor = Number(m[2]);
+  return (major < 25 || (major === 25 && minor < 10)) ? 'legacy' : 'modern';
+}
+
 /** True when a server's refusal is the grammar, not a privilege or a real mistake. */
 function isTextIndexGrammarRefusal(message) {
   return /Expected literal|supports only 'default'|Unknown tokenizer/.test(String(message || ''));
 }
 
 module.exports = {
-  physicalRoom, roomPattern, legacyTextIndexDialect, isTextIndexGrammarRefusal,
+  physicalRoom, roomPattern, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor,
   ROOM_TYPES, META_TYPES, SCHEMA_VERSION, SUPPORTED_SCHEMAS, MIN_WRITER_SCHEMA,
   MIGRATIONS, ROOM_KEYS, keyProblem,
   READ_SETTINGS, MEMBER_PIN,

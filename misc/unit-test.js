@@ -1093,5 +1093,11 @@ test('only a grammar refusal triggers the legacy dialect', () => {
   assert.ok(!rooms.isTextIndexGrammarRefusal('Table already exists'));
 });
 
+test('the grammar is chosen by version: 25.9 and below legacy, 25.10 and up current', () => {
+  for (const [v, want] of [['25.8.28.1', 'legacy'], ['25.9.7.56', 'legacy'], ['24.3.1', 'legacy'], ['25.10.7.6', 'modern'], ['25.11.9.34', 'modern'], ['26.8.2.7', 'modern'], ['', 'modern'], ['nonsense', 'modern']]) {
+    assert.strictEqual(rooms.textIndexDialectFor(v), want, `version '${v}'`);
+  }
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
