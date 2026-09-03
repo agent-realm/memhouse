@@ -1273,16 +1273,18 @@ async function finishInvite(cfg) {
  * Kept to one screen; each line is a thing to DO, not a feature list.
  */
 function printGettingStarted(cfg) {
+  // Every line must be runnable as typed. An install under MEMHOUSE_HOME is addressed
+  // through that variable — bare `memhouse start` would start the default home's daemons.
+  const mh = process.env.MEMHOUSE_HOME ? `MEMHOUSE_HOME=${process.env.MEMHOUSE_HOME.replace(os.homedir(), '~')} memhouse` : 'memhouse';
   console.log('');
   console.log('  Your house is live. From here:');
-  console.log('     memhouse start                  dashboard + shipper loop (background daemons)');
+  console.log(`     ${mh} start                  dashboard + shipper loop (background daemons)`);
   console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
-  console.log('     memhouse service install        or: ship at login, no terminal needed');
-  console.log('     memhouse plugins install claude give your agents /mem:house, /mem:recall,');
-  console.log('                                     /mem:recall, /mem:access, /mem:sql,');
-  console.log('                                     /mem:house');
-  console.log('     memhouse search <terms>         find a past conversation right now');
-  console.log('     memhouse doctor                 every line a check mark = healthy');
+  console.log(`     ${mh} service install        or: ship at login, no terminal needed`);
+  console.log(`     ${mh} plugins install claude give your agents /mem:house, /mem:recall,`);
+  console.log('                                     /mem:sql, /mem:access, /mem:admin');
+  console.log(`     ${mh} search <terms>         find a past conversation right now`);
+  console.log(`     ${mh} doctor                 every line a check mark = healthy`);
   console.log('  The house keeps shipping as you work; nothing else to do.');
 }
 
