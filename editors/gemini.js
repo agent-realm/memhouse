@@ -1,8 +1,9 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
-const GEMINI_DIR = path.join(os.homedir(), '.gemini');
+const GEMINI_DIR = scope.root('gemini-cli', path.join(os.homedir(), '.gemini'));
 const TMP_DIR = path.join(GEMINI_DIR, 'tmp');
 const PROJECTS_JSON = path.join(GEMINI_DIR, 'projects.json');
 

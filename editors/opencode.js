@@ -1,4 +1,5 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 const { openReadOnly, textOf } = require('./sqlite');
@@ -6,7 +7,7 @@ const adapterErrors = require('./adapter-errors');
 
 // OpenCode stores data in XDG-style paths across all platforms
 function getOpenCodeStoragePath() {
-  return path.join(os.homedir(), '.local', 'share', 'opencode', 'storage');
+  return scope.root('opencode', path.join(os.homedir(), '.local', 'share', 'opencode', 'storage'));
 }
 
 const STORAGE_DIR = getOpenCodeStoragePath();

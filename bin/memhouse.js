@@ -490,12 +490,14 @@ async function cmdDiscover() {
   { const c = resolveConfig(); if (c.editors && !process.env.MEMHOUSE_EDITORS) process.env.MEMHOUSE_EDITORS = c.editors;
     if (c.claudeRoots && !process.env.MEMHOUSE_CLAUDE_ROOTS) process.env.MEMHOUSE_CLAUDE_ROOTS = c.claudeRoots; }
   out.scope = require(path.join(REPO_ROOT, 'editors', 'scope')).describe();
+  out.watched = [];
   process.stdout.write(JSON_OUT ? '' : `Scanning editors (reading local session stores)… scope: ${out.scope}\n`);
   try {
     const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
     const counts = {};
     for (const c of getAllChats()) counts[c.source] = (counts[c.source] || 0) + 1;
     out.editors = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([source, sessions]) => ({ source, sessions }));
+    out.watched = require(path.join(REPO_ROOT, 'editors', 'scope')).watching();
     out.adapterErrors = getAdapterErrors();
   } catch (e) { out.editorsError = e.message; }
 
@@ -523,6 +525,13 @@ async function cmdDiscover() {
   console.log('\nEditors with sessions on this machine:');
   if (out.editors.length === 0) console.log(warn('none found' + (out.editorsError ? ` (${out.editorsError})` : '')));
   for (const e of out.editors) console.log(ok(`${e.source.padEnd(16)} ${e.sessions} session${e.sessions === 1 ? '' : 's'}`));
+  // Where each adapter looked, and the variable that moves it. This is the list a person
+  // reads before deciding what to ship from a machine that keeps several stores.
+  console.log('\nWatched directories (override with the variable shown, in the env file):');
+  for (const w of out.watched) {
+    const where = w.error ? w.error : (w.roots.length ? w.roots.map((r) => r.replace(os.homedir(), '~')).join(', ') : '(nothing found)');
+    console.log(`  ${w.error ? '•' : ' '} ${w.name.padEnd(18)} ${where}${w.key ? `   [${w.key}]` : '   [built-in]'}`);
+  }
   printAdapterErrors(out.adapterErrors);
   console.log('\nClickHouse endpoints:');
   for (const p of out.clickhouse) {

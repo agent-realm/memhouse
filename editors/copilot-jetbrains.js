@@ -1,8 +1,9 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
-const JB_DIR = path.join(os.homedir(), '.copilot', 'jb');
+const JB_DIR = scope.root('copilot-jetbrains', path.join(os.homedir(), '.copilot', 'jb'));
 
 // ============================================================
 // Adapter interface

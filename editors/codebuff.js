@@ -1,4 +1,5 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
@@ -29,6 +30,7 @@ function getProjectRoots() {
   }
   return roots;
 }
+scope.fixed('codebuff', getProjectRoots().map((r) => r.projectsDir));
 
 function safeReadJson(filePath) {
   try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch { return null; }

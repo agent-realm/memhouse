@@ -1,8 +1,9 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
-const COMMANDCODE_DIR = path.join(os.homedir(), '.commandcode');
+const COMMANDCODE_DIR = scope.root('commandcode', path.join(os.homedir(), '.commandcode'));
 const PROJECTS_DIR = path.join(COMMANDCODE_DIR, 'projects');
 
 // ============================================================

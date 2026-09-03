@@ -1,11 +1,12 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
 const { openReadOnly, textOf } = require('./sqlite');
 const adapterErrors = require('./adapter-errors');
 
-const GOOSE_DIR = path.join(os.homedir(), '.local', 'share', 'goose', 'sessions');
+const GOOSE_DIR = scope.root('goose', path.join(os.homedir(), '.local', 'share', 'goose', 'sessions'));
 const DB_PATH = path.join(GOOSE_DIR, 'sessions.db');
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'goose', 'config.yaml');
 

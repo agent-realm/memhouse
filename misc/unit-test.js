@@ -1122,5 +1122,18 @@ test('the scope reads back as one line', () => {
   assert.strictEqual(scope.describe({ MEMHOUSE_EDITORS: 'claude', MEMHOUSE_CLAUDE_ROOTS: '~/.claude-playbooks/kommander-chaos' }), 'editors: claude; claude roots: ~/.claude-playbooks/kommander-chaos');
 });
 
+test('every adapter has one override variable, named from its adapter name', () => {
+  assert.strictEqual(scope.keyFor('codex'), 'MEMHOUSE_CODEX_ROOTS');
+  assert.strictEqual(scope.keyFor('gemini-cli'), 'MEMHOUSE_GEMINI_CLI_ROOTS');
+  assert.strictEqual(scope.keyFor('claude'), 'MEMHOUSE_CLAUDE_ROOTS');
+  const isDir = (p) => p === '/real';
+  assert.deepStrictEqual(scope.selectRoot('/dflt', '', { isDir }), { root: '/dflt', error: null });
+  assert.deepStrictEqual(scope.selectRoot('/dflt', '/real', { isDir }), { root: '/real', error: null });
+  assert.match(scope.selectRoot('/dflt', '/nope', { isDir }).error, /not a directory/);
+  assert.match(scope.selectRoot('/dflt', '/real,/real', { isDir }).error, /one directory, 2 given/);
+  // A refused override must not fall back to the default — that would ship the wrong store.
+  assert.strictEqual(scope.selectRoot('/dflt', '/nope', { isDir }).root, null);
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

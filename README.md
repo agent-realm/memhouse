@@ -119,19 +119,35 @@ commands that read or write memory refuse and say so rather than guessing
 
 ## Which sessions ship
 
-Everything on the machine, by default: every adapter, and every Claude Code instance
-(`~/.claude` and each `~/.claude-playbooks/<name>`). Two lines in the env file narrow it:
+Everything on the machine, by default: every adapter, from wherever that editor keeps its
+sessions. `memhouse discover` prints what each adapter is watching and the variable that
+moves it:
+
+```
+Watched directories (override with the variable shown, in the env file):
+    claude       ~/.claude, ~/.claude-playbooks/kommander, …   [MEMHOUSE_CLAUDE_ROOTS]
+    codex        ~/.codex                                      [MEMHOUSE_CODEX_ROOTS]
+    gemini-cli   ~/.gemini                                     [MEMHOUSE_GEMINI_CLI_ROOTS]
+    cursor       ~/Library/Application Support/Cursor/User, …  [built-in]
+```
+
+Two kinds of line in the env file narrow it, or `--editors` / `--claude-roots` at install:
 
 ```
 MEMHOUSE_EDITORS='claude'
 MEMHOUSE_CLAUDE_ROOTS='~/.claude-playbooks/kommander-chaos'
 ```
 
-Or at install: `--editors claude --claude-roots ~/.claude-playbooks/kommander-chaos`. The
-first names adapters (`memhouse discover` lists them); the second replaces the Claude
-adapter's discovery with exactly those directories. `memhouse discover` prints the scope
-it will ship and the counts under it. A name that does not exist, or a directory that is
-not a Claude Code config dir, is refused rather than shipping nothing behind a typo.
+`MEMHOUSE_EDITORS` names the adapters to run. `MEMHOUSE_<EDITOR>_ROOTS` replaces one
+adapter's location: the adapter's name upper-cased, dashes to underscores. Claude is the
+one adapter with many roots (every Claude Code config directory), so its list may hold
+several; every other adapter has one store, so one path. Adapters marked `[built-in]`
+resolve a platform app-data directory and cannot be moved yet.
+
+An adapter name or a directory that does not exist is refused and reported against that
+adapter, never shipped from the default instead: a typo that quietly shipped nothing would
+look like a working install with an empty house, and one that quietly shipped the wrong
+store would be worse.
 
 ## Going back into a session
 

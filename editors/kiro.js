@@ -1,4 +1,5 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 const { getAppDataPath } = require('./base');
@@ -9,9 +10,9 @@ const { getAppDataPath } = require('./base');
 
 const name = 'kiro';
 
-const KIRO_AGENT_DIR = path.join(
+const KIRO_AGENT_DIR = scope.root('kiro', path.join(
   getAppDataPath('Kiro'), 'User', 'globalStorage', 'kiro.kiroagent'
-);
+));
 const WORKSPACE_SESSIONS_DIR = path.join(KIRO_AGENT_DIR, 'workspace-sessions');
 
 function getChats() {

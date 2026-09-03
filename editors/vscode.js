@@ -1,4 +1,5 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 const { getAppDataPath } = require('./base');
@@ -14,6 +15,7 @@ const VARIANTS = [
     appSupport: getAppDataPath('Code - Insiders'),
   },
 ];
+scope.fixed('vscode', VARIANTS.map((v) => v.appSupport));
 
 // ============================================================
 // JSONL reconstruction: kind:0 = init, kind:1 = patch at key path

@@ -1,5 +1,6 @@
 const { execSync, execFileSync } = require('child_process');
 const fs = require('fs');
+const scope = require('./scope');
 const path = require('path');
 const os = require('os');
 const { openReadOnly, textOf } = require('./sqlite');
@@ -10,6 +11,7 @@ const HOME = os.homedir();
 const ANTIGRAVITY_USER_DIR = path.join(getAppDataPath('Antigravity'), 'User');
 const ANTIGRAVITY_GLOBAL_STORAGE_DB = path.join(ANTIGRAVITY_USER_DIR, 'globalStorage', 'state.vscdb');
 const ANTIGRAVITY_BRAIN_DIR = path.join(HOME, '.gemini', 'antigravity', 'brain');
+scope.fixed('antigravity', [ANTIGRAVITY_USER_DIR, ANTIGRAVITY_BRAIN_DIR]);
 const OFFLINE_TRAJECTORY_SUMMARIES_KEYS = [
   'antigravityUnifiedStateSync.trajectorySummaries',
   'unifiedStateSync.trajectorySummaries',

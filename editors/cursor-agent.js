@@ -1,8 +1,9 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
-const CURSOR_PROJECTS_DIR = path.join(os.homedir(), '.cursor', 'projects');
+const CURSOR_PROJECTS_DIR = scope.root('cursor-agent', path.join(os.homedir(), '.cursor', 'projects'));
 
 // ============================================================
 // Adapter interface
