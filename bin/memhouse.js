@@ -102,6 +102,9 @@ function resolveConfig() {
     // nothing here invents one.
     adminUser: pick('admin-user', 'MEMHOUSE_ADMIN_USER', ''),
     adminPassword: pick('admin-password', 'MEMHOUSE_ADMIN_PASSWORD', ''),
+    // What this install ships — editors/scope.js. Empty means everything on the machine.
+    editors: pick('editors', 'MEMHOUSE_EDITORS', ''),
+    claudeRoots: pick('claude-roots', 'MEMHOUSE_CLAUDE_ROOTS', ''),
     // Did anything actually SAY which house this is, or are the values above just the
     // defaults? The defaults are not neutral — localhost:8123 as memhouse_root is a real
     // house on a lot of machines, usually the pilot's own. An agent whose config went
@@ -146,6 +149,9 @@ function childEnv(cfg, override = {}) {
     ...(cfg._quietDenied ? { MEMHOUSE_QUIET_DENIED: '1' } : {}),
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
+    // Always set, even when empty: a child must ship THIS install's scope, never one
+    // inherited from whatever shell started it.
+    MEMHOUSE_EDITORS: cfg.editors || '', MEMHOUSE_CLAUDE_ROOTS: cfg.claudeRoots || '',
       // environment would write into another member's rooms.
     ...override,
   };
@@ -163,6 +169,11 @@ function writeEnvFile(cfg) {
     `MEMHOUSE_PASSWORD=${sq(cfg.password)}`,
     `MEMHOUSE_DB=${sq(cfg.db)}`,
     `MEMHOUSE_PORT=${sq(cfg.port)}`,
+    ...(cfg.editors || cfg.claudeRoots ? [
+      '# What this install ships. Empty or absent means everything on this machine.',
+      ...(cfg.editors ? [`MEMHOUSE_EDITORS=${sq(cfg.editors)}`] : []),
+      ...(cfg.claudeRoots ? [`MEMHOUSE_CLAUDE_ROOTS=${sq(cfg.claudeRoots)}`] : []),
+    ] : []),
     ...(cfg.adminUser ? [
       '# The admin credential for this house — present because this machine administers it',
       '# (deploy --local, or an operator install). invite/members use it; nothing else does.',
@@ -473,7 +484,13 @@ function printAdapterErrors(errors) {
 
 async function cmdDiscover() {
   const out = { editors: [], clickhouse: [], config: null, memoryHouse: false };
-  process.stdout.write(JSON_OUT ? '' : 'Scanning editors (reading local session stores)…\n');
+  // The adapters read the scope from the environment; discover runs them in-process, so
+  // the configured scope has to be put there first or it would report a wider machine
+  // than the shipper will ship.
+  { const c = resolveConfig(); if (c.editors && !process.env.MEMHOUSE_EDITORS) process.env.MEMHOUSE_EDITORS = c.editors;
+    if (c.claudeRoots && !process.env.MEMHOUSE_CLAUDE_ROOTS) process.env.MEMHOUSE_CLAUDE_ROOTS = c.claudeRoots; }
+  out.scope = require(path.join(REPO_ROOT, 'editors', 'scope')).describe();
+  process.stdout.write(JSON_OUT ? '' : `Scanning editors (reading local session stores)… scope: ${out.scope}\n`);
   try {
     const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
     const counts = {};

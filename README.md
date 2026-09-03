@@ -117,6 +117,22 @@ Config resolves: flags → `MEMHOUSE_*` env → `$MEMHOUSE_HOME/env` (default
 commands that read or write memory refuse and say so rather than guessing
 `localhost:8123`, which on a lot of machines is a real house belonging to someone else.
 
+## Which sessions ship
+
+Everything on the machine, by default: every adapter, and every Claude Code instance
+(`~/.claude` and each `~/.claude-playbooks/<name>`). Two lines in the env file narrow it:
+
+```
+MEMHOUSE_EDITORS='claude'
+MEMHOUSE_CLAUDE_ROOTS='~/.claude-playbooks/kommander-chaos'
+```
+
+Or at install: `--editors claude --claude-roots ~/.claude-playbooks/kommander-chaos`. The
+first names adapters (`memhouse discover` lists them); the second replaces the Claude
+adapter's discovery with exactly those directories. `memhouse discover` prints the scope
+it will ship and the counts under it. A name that does not exist, or a directory that is
+not a Claude Code config dir, is refused rather than shipping nothing behind a typo.
+
 ## Going back into a session
 
 `search` finds the conversation; `resume` hands you back into it.

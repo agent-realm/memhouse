@@ -6,6 +6,14 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **Choose which sessions ship.** `MEMHOUSE_EDITORS` names the adapters to run and
+  `MEMHOUSE_CLAUDE_ROOTS` the Claude Code config directories to read, both in the env file
+  or as `--editors` / `--claude-roots` at install. A machine with several Claude Code
+  instances can ship one of them into a team house and leave the rest alone.
+  `memhouse discover` reports the scope and the counts under it. An adapter name or a
+  directory that does not exist is refused loudly — a typo that shipped nothing would
+  look like a working install with an empty house.
+
 - **One layout.** Every member's rooms are named for them — `mem.polat_messages`,
   `mem.alice_messages` — and one grant covers them: `GRANT … ON mem.<name>_* TO <name>
   WITH GRANT OPTION`. A wildcard on the member's own name, verified on 25.11 and 26.7: it

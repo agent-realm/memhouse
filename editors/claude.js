@@ -36,7 +36,9 @@ function discoverClaudeRoots() {
     seen.add(rp);
     roots.push(d);
   }
-  return roots;
+  // MEMHOUSE_CLAUDE_ROOTS replaces discovery with an explicit list — one Claude Code
+  // instance out of several on a machine. Each path is checked the same way as above.
+  return require('./scope').selectClaudeRoots(roots, process.env.MEMHOUSE_CLAUDE_ROOTS);
 }
 
 // ============================================================

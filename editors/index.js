@@ -15,6 +15,7 @@ const goose = require('./goose');
 const kiro = require('./kiro');
 const codebuff = require('./codebuff');
 const adapterErrorSink = require('./adapter-errors');
+const scope = require('./scope');
 
 const editors = [cursor, devin, antigravity, claude, vscode, zed, opencode, codex, gemini, copilot, copilotJetbrains, cursorAgent, commandcode, goose, kiro, codebuff];
 
@@ -47,7 +48,9 @@ function getAllChats() {
   const chats = [];
   adapterErrors = [];
   adapterErrorSink.reset();
-  for (const editor of editors) {
+  // MEMHOUSE_EDITORS narrows which adapters run; an unknown name throws rather than
+  // shipping nothing (or everything) behind a typo. See scope.js.
+  for (const editor of scope.selectEditors(editors, process.env.MEMHOUSE_EDITORS)) {
     try {
       const editorChats = editor.getChats();
       chats.push(...editorChats);

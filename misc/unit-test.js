@@ -1099,5 +1099,28 @@ test('the grammar is chosen by version: 25.9 and below legacy, 25.10 and up curr
   }
 });
 
+// ── scope: which sessions ship ─────────────────────────────────────────────────────────
+const scope = require('../editors/scope');
+test('an empty scope is everything; a named scope is exactly those, in order; a typo throws', () => {
+  const eds = [{ name: 'claude' }, { name: 'codex' }, { name: 'cursor' }];
+  assert.deepStrictEqual(scope.selectEditors(eds, ''), eds);
+  assert.deepStrictEqual(scope.selectEditors(eds, ' codex , claude ').map((e) => e.name), ['codex', 'claude']);
+  assert.throws(() => scope.selectEditors(eds, 'claude,cluade'), /cluade.*Known: claude, codex, cursor/s);
+});
+
+test('claude roots: explicit list replaces discovery and every path must be a real config dir', () => {
+  const fsx = { exists: (p) => p.endsWith('/one/history.jsonl'), isDir: (p) => ['/one', '/two', '/two/projects', '/plain'].includes(p) };
+  assert.deepStrictEqual(scope.selectClaudeRoots(['/a', '/b'], '', fsx), ['/a', '/b']);
+  assert.deepStrictEqual(scope.selectClaudeRoots(['/a', '/b'], '/one,/two', fsx), ['/one', '/two']);
+  assert.throws(() => scope.selectClaudeRoots(['/a'], '/plain', fsx), /not a Claude Code config dir/);
+  assert.throws(() => scope.selectClaudeRoots(['/a'], '/missing', fsx), /not a directory/);
+  assert.ok(scope.expandHome('~/.claude-playbooks/x').startsWith(require('os').homedir()));
+});
+
+test('the scope reads back as one line', () => {
+  assert.strictEqual(scope.describe({}), 'everything this machine has');
+  assert.strictEqual(scope.describe({ MEMHOUSE_EDITORS: 'claude', MEMHOUSE_CLAUDE_ROOTS: '~/.claude-playbooks/kommander-chaos' }), 'editors: claude; claude roots: ~/.claude-playbooks/kommander-chaos');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
