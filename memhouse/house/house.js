@@ -381,8 +381,29 @@ async function resolveRooms(client) {
   return roomNames(await currentUser(client));
 }
 
+/**
+ * The text-index DDL for servers before the tokenizer grammar changed. 25.8 spells a
+ * tokenizer as a quoted name with options — `text(tokenizer = 'ngram', ngram_size = 3)`,
+ * `text(tokenizer = 'default')` — and rejects the function form with "Expected literal";
+ * 26.x spells it as a function — `ngrams(3)`, `splitByNonAlpha` — and rejects the quoted
+ * names as "Unknown tokenizer". Neither parses the other. The template carries the
+ * current grammar; this rewrites a statement to the older one when a server refuses it.
+ * `default` in the old grammar is the non-alphanumeric splitter, which is what
+ * `splitByNonAlpha` names in the new one, so the indexes built are the same.
+ */
+function legacyTextIndexDialect(sql) {
+  return sql
+    .replace(/TYPE text\(tokenizer = ngrams\((\d+)\)\)/g, "TYPE text(tokenizer = 'ngram', ngram_size = $1)")
+    .replace(/TYPE text\(tokenizer = splitByNonAlpha\)/g, "TYPE text(tokenizer = 'default')");
+}
+
+/** True when a server's refusal is the grammar, not a privilege or a real mistake. */
+function isTextIndexGrammarRefusal(message) {
+  return /Expected literal|supports only 'default'|Unknown tokenizer/.test(String(message || ''));
+}
+
 module.exports = {
-  physicalRoom, roomPattern,
+  physicalRoom, roomPattern, legacyTextIndexDialect, isTextIndexGrammarRefusal,
   ROOM_TYPES, META_TYPES, SCHEMA_VERSION, SUPPORTED_SCHEMAS, MIN_WRITER_SCHEMA,
   MIGRATIONS, ROOM_KEYS, keyProblem,
   READ_SETTINGS, MEMBER_PIN,

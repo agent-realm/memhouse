@@ -62,8 +62,7 @@ const selfUpdate = require('../self-update');
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
   resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN, createStatement,
-  SUPPORTED_SCHEMAS, keyProblem,
-} = require('../house/house');
+  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
 // house_events would otherwise roll out to nobody.
@@ -439,16 +438,20 @@ async function ensureSchema(client) {
   //     the loser can get TABLE_ALREADY_EXISTS or a metadata-file collision. The table
   //     exists either way, which is the outcome this function wants.
   let denied = 0;
+  // The text-index grammar changed between 25.8 and 26.x and neither side parses the
+  // other. The template carries the current grammar; a server that refuses it on grammar
+  // alone gets the same statement in the older one. Feature-detected per statement rather
+  // than by version arithmetic: the cut-over release is not documented, and a wrong guess
+  // fails exactly the way this fixes.
+  const create = (q) => client.command({ query: q, clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 } });
   for (const q of stmts) {
     try {
-      await client.command({
-        query: q,
-        // allow_experimental_full_text_index: on 25.x the messages text indexes
-        // are gated behind this flag (SUPPORT_IS_DISABLED without it); 26.x+
-        // accepts it as a no-op. Query-scoped, so no server config or admin
-        // rights are needed. Verified on 25.11 and 26.7.
-        clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
-      });
+      try { await create(q); }
+      catch (e) {
+        const m = e && e.message ? e.message : String(e);
+        if (!(/TYPE text\(/.test(q) && isTextIndexGrammarRefusal(m))) throw e;
+        await create(legacyTextIndexDialect(q));
+      }
     } catch (e) {
       const m = e && e.message ? e.message : String(e);
       if (/Not enough privileges|ACCESS_DENIED/i.test(m)) { denied++; continue; }

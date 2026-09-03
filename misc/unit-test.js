@@ -1071,5 +1071,27 @@ test('a name that would break the pattern is refused before it reaches SQL', () 
   assert.throws(() => provision.plan({ db: 'system', member: 'alice', password: 'x' }), /system|reserved/i);
 });
 
+// ── the text-index grammar changed between 25.8 and 26.x, and neither side parses the other ──
+test('the legacy dialect rewrites exactly the two index clauses and nothing else', () => {
+  const tpl = fs.readFileSync(path.join(__dirname, '..', 'memhouse', 'house', 'schema.sql.tpl'), 'utf8');
+  const modern = rooms.createStatement(tpl, 'messages', 'alice_messages');
+  const legacy = rooms.legacyTextIndexDialect(modern);
+  assert.ok(modern.includes("tokenizer = ngrams(3)") && modern.includes('tokenizer = splitByNonAlpha'), 'template carries the current grammar');
+  assert.ok(legacy.includes("tokenizer = 'ngram', ngram_size = 3"), 'ngram clause rewritten');
+  assert.ok(legacy.includes("tokenizer = 'default'"), 'word clause rewritten');
+  assert.ok(!/ngrams\(|splitByNonAlpha/.test(legacy), 'no modern grammar left');
+  // Everything else byte-identical: same columns, same engine, same key.
+  const strip = (q) => q.replace(/^\s*INDEX .*$/gm, 'INDEX …');
+  assert.strictEqual(strip(legacy), strip(modern));
+  assert.strictEqual(rooms.legacyTextIndexDialect(rooms.createStatement(tpl, 'sessions', 'alice_sessions')), rooms.createStatement(tpl, 'sessions', 'alice_sessions'), 'a room without text indexes is untouched');
+});
+
+test('only a grammar refusal triggers the legacy dialect', () => {
+  assert.ok(rooms.isTextIndexGrammarRefusal('Code: 80. DB::Exception: Expected literal. (INCORRECT_QUERY)'));
+  assert.ok(rooms.isTextIndexGrammarRefusal("Text index argument 'tokenizer' supports only 'default', 'ngram'"));
+  assert.ok(!rooms.isTextIndexGrammarRefusal('Not enough privileges. To execute this query'), 'a privilege refusal must stay a privilege refusal');
+  assert.ok(!rooms.isTextIndexGrammarRefusal('Table already exists'));
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
