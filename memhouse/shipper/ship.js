@@ -65,7 +65,7 @@ const {
   SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
-// house_events would otherwise roll out to nobody.
+// events would otherwise roll out to nobody.
 const ALL_TABLES = [...ROOM_TYPES, ...META_TYPES];
 
 const BATCH_ROWS = 2000;   // insert batch ceiling by ROW COUNT
@@ -526,7 +526,7 @@ async function ensureSchema(client) {
   // There used to be a second, hardcoded `ADD COLUMN … origin` here, from when the healer
   // above could only add that one column. It is redundant now that the generic loop reads
   // the template correctly — and it would have been actively wrong once this loop covered
-  // house_meta and house_events, which have no origin and want none.
+  // meta and events, which have no origin and want none.
 
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
@@ -557,7 +557,7 @@ async function ensureSchema(client) {
  * Keep the house's record of itself current: which schema generation it is at, and which
  * memhouse version is writing into it.
  *
- * Written only when something CHANGED. A row per pass would turn house_events into a
+ * Written only when something CHANGED. A row per pass would turn events into a
  * heartbeat log — under `--loop` at the default interval that is 288 rows a day per
  * machine, and the one question the table exists to answer ("when did this house move,
  * and who moved it") would be buried in noise.
@@ -571,7 +571,7 @@ async function recordHouseState(client, rooms, host) {
   const writer = `${rooms.user}@${host}`;
   try {
     const rs = await client.query({
-      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', {ck:String}, {cs:String})`,
+      query: `SELECT key, value FROM ${rooms.meta} FINAL WHERE key IN ('schema_version', {ck:String}, {cs:String})`,
       // Keyed per member AND host. Keyed by member alone, two machines of one member
       // overwrote each other's entry on every pass, so the fleet view could only ever
       // show the machine that shipped last — the exact machine that needs no attention.
@@ -611,15 +611,15 @@ async function recordHouseState(client, rooms, host) {
     }
     // The heartbeat, EVERY pass — the fleet view's health column. Latest-wins on the key,
     // so it is one live row per writer however often it fires; version/schema above stay
-    // change-only so house_events remains a record of moves, not a pulse trace.
+    // change-only so events remains a record of moves, not a pulse trace.
     metas.push({ key: `last_ship:${writer}`, value: new Date().toISOString(), host });
     await client.insert({
-      table: rooms.house_meta_raw, values: metas, format: 'JSONEachRow',
+      table: rooms.meta_raw, values: metas, format: 'JSONEachRow',
       clickhouse_settings: { async_insert: 0 },
     });
     if (events.length) {
       await client.insert({
-        table: rooms.house_events_raw, values: events, format: 'JSONEachRow',
+        table: rooms.events_raw, values: events, format: 'JSONEachRow',
         clickhouse_settings: { async_insert: 0 },
       });
     }
@@ -632,8 +632,8 @@ async function recordHouseState(client, rooms, host) {
  *
  * Distinct from assertRoomKeys, which inspects key SHAPES — a future generation could be
  * a data transform the keys do not show. This reads what the house says about itself:
- * house_meta['schema_version'] (what generation the rooms are at) and
- * house_meta['min_writer_schema'] (the floor `memhouse migrate` sets under writers).
+ * meta['schema_version'] (what generation the rooms are at) and
+ * meta['min_writer_schema'] (the floor `memhouse migrate` sets under writers).
  * Too new -> the fix is on THIS machine: memhouse update. Below the floor -> same.
  * (A house OLDER than this release is not an error here — the room checks catch it and
  * name `memhouse migrate`; this guard must not fire on a pre-0.10 house that has no
@@ -666,7 +666,10 @@ async function assertNotLegacyLayout(client, rooms) {
   });
   const names = new Set((await rs.json()).map((r) => r.name));
   if (names.has(rooms.physical.messages) || !names.has('messages')) return;
-  const moves = [...ROOM_TYPES, ...META_TYPES].map((t) => `RENAME TABLE ${t} TO ${rooms.physical[t]};`).join('\n     ');
+  // The plain rooms of a pre-one-layout house: the transcript rooms by type name, and the
+  // two bookkeeping rooms under the names they had then.
+  const legacyName = { meta: 'house_meta', events: 'house_events' };
+  const moves = [...ROOM_TYPES, ...META_TYPES].map((t) => `RENAME TABLE ${legacyName[t] || t} TO ${rooms.physical[t]};`).join('\n     ');
   throw new Error(
     'this house holds plain rooms (messages, sessions, tool_calls) — the layout before rooms were named for their member.\n'
     + `  Shipping now would create empty ${rooms.pattern} rooms beside them and write there, hiding every past session.\n`
@@ -678,13 +681,13 @@ async function assertWriterSupported(client, rooms) {
   let have;
   try {
     const rs = await client.query({
-      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', 'min_writer_schema')`,
+      query: `SELECT key, value FROM ${rooms.meta} FINAL WHERE key IN ('schema_version', 'min_writer_schema')`,
       format: 'JSONEachRow',
     });
     have = new Map((await rs.json()).map((r) => [r.key, toInt(r.value)]));
   } catch (e) {
     // ONLY a missing table means a pre-0.10 house (the room checks own that case). Any
-    // other failure — an ACCESS_DENIED on house_meta, a timeout — used to fall through
+    // other failure — an ACCESS_DENIED on meta, a timeout — used to fall through
     // here too, and a writer that merely could not READ the record was treated as if the
     // record did not exist: on a newer-schema house whose key shapes happen to match,
     // that bypassed the whole compatibility guard. Not being able to check is a reason

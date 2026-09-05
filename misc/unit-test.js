@@ -1018,7 +1018,7 @@ test('policy names are predictable, so revoke finds every room', () => {
 test('physicalRoom refuses to name a room without a member', () => {
   assert.throws(() => rooms.physicalRoom('messages'), /a member/, 'there is no unprefixed room any more');
   assert.throws(() => rooms.physicalRoom('messages', ''), /a member/);
-  assert.strictEqual(rooms.physicalRoom('house_meta', 'bob'), 'bob_house_meta');
+  assert.strictEqual(rooms.physicalRoom('meta', 'bob'), 'bob_meta');
 });
 
 test('the epoch subquery reads the member\'s room, and tool_calls takes its epoch from MESSAGES', () => {

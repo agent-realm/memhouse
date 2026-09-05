@@ -48,7 +48,11 @@ const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
  * them, the shipper's guards do not require them, and a member who cannot create them
  * still ships normally.
  */
-const META_TYPES = ['house_meta', 'house_events'];
+// `<member>_meta` / `<member>_events` since the one-layout: every row in them is about ONE
+// member (their schema version, their machines, their last ship, their shares), so the old
+// `house_` prefix named the wrong unit. A pre-one-layout house still has `house_meta` /
+// `house_events`; the shipper's legacy guard names the rename.
+const META_TYPES = ['meta', 'events'];
 
 /**
  * What generation of the schema a house is at. Bumped only when existing rooms have to be
@@ -85,7 +89,7 @@ const SUPPORTED_SCHEMAS = [2];
 
 /**
  * The floor a house may set under its writers, recorded by `memhouse migrate` in
- * house_meta['min_writer_schema']. Today it equals SCHEMA_VERSION; a future
+ * meta['min_writer_schema']. Today it equals SCHEMA_VERSION; a future
  * back-compatible generation can hold it one step lower for a grace window.
  */
 const MIN_WRITER_SCHEMA = 2;

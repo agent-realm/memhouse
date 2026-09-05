@@ -1501,7 +1501,7 @@ async function fleetState(cfg) {
     let houseSchema = 0;
     try {
       for (const r of await chRows(cfg,
-        `SELECT key, value FROM ${physicalRoom('house_meta', cfg.user)} FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'`)) {
+        `SELECT key, value FROM ${physicalRoom('meta', cfg.user)} FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'`)) {
         if (r.key === 'schema_version') { houseSchema = Number(r.value) || 0; continue; }
         const cut = r.key.indexOf(':');
         const kind = r.key.slice(0, cut); const who = r.key.slice(cut + 1);
@@ -1749,16 +1749,16 @@ async function cmdDoctor() {
     // that still work and a `<room>__migrating` nobody would notice; the events table is
     // the only place that shows it, so doctor reads it rather than the pilot.
     try {
-      const meta = new Map((await chRows(cfg, `SELECT key, value FROM ${physicalRoom('house_meta', cfg.user)} FINAL`))
+      const meta = new Map((await chRows(cfg, `SELECT key, value FROM ${physicalRoom('meta', cfg.user)} FINAL`))
         .map((m) => [m.key, String(m.value)]));
       const at = meta.get('schema_version');
       const last = (await chRows(cfg,
         `SELECT id, argMax(status, event_at) AS status, formatDateTime(max(event_at), '%Y-%m-%d %H:%i') AS at
-         FROM ${physicalRoom('house_events', cfg.user)} WHERE kind = 'migration' GROUP BY id ORDER BY max(event_at) DESC LIMIT 1`))[0];
+         FROM ${physicalRoom('events', cfg.user)} WHERE kind = 'migration' GROUP BY id ORDER BY max(event_at) DESC LIMIT 1`))[0];
       const stuck = last && last.status !== 'applied';
       // The ROOMS are the truth; this table is the paperwork. A house whose keys are
       // already current but whose record is missing — a fresh install by an older client,
-      // or a member with no rights on house_meta — is not un-migrated, and telling it to
+      // or a member with no rights on meta — is not un-migrated, and telling it to
       // run migrate-rooms sends the pilot to rebuild rooms that are already correct.
       const recorded = at === String(SCHEMA_VERSION);
       add(!stuck && (recorded || keysCorrect),
@@ -2514,7 +2514,7 @@ async function cmdReset() {
 // ── the house's record of itself ────────────────────────────────────────────────
 const sqlStr = (s) => `'${String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 
-/** Append one row to house_events. Never fatal: paperwork must not stop a migration. */
+/** Append one row to events. Never fatal: paperwork must not stop a migration. */
 async function houseEvent(cfg, e) {
   const cols = ['kind', 'id', 'status', 'from_version', 'to_version', 'host', 'rows_before', 'rows_after', 'detail'];
   // Numeric columns render as 0 when absent, NEVER as ''. An event without rows_after —
@@ -2528,14 +2528,14 @@ async function houseEvent(cfg, e) {
     ? String(Number(e[c]) || 0)
     : sqlStr(e[c] || '')));
   try {
-    await ch(cfg, `INSERT INTO ${physicalRoom('house_events', cfg.user)} (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
+    await ch(cfg, `INSERT INTO ${physicalRoom('events', cfg.user)} (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
       { settings: { async_insert: 0 } });
   } catch { /* an unwritable log is not a reason to abandon a rebuild */ }
 }
 
 async function houseMeta(cfg, key, value) {
   try {
-    await ch(cfg, `INSERT INTO ${physicalRoom('house_meta', cfg.user)} (key, value) VALUES (${sqlStr(key)}, ${sqlStr(value)})`,
+    await ch(cfg, `INSERT INTO ${physicalRoom('meta', cfg.user)} (key, value) VALUES (${sqlStr(key)}, ${sqlStr(value)})`,
       { settings: { async_insert: 0 } });
   } catch { /* same */ }
 }
@@ -2581,7 +2581,7 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   // record (schema 3 -> 2) — defeating the writer guard for every old shipper whose key
   // shapes happen to match. An older memhouse cannot migrate a newer house, only say so.
   try {
-    const rec = await q.rows(`SELECT value FROM ${physicalRoom('house_meta', cfg.user)} FINAL WHERE key = 'schema_version'`);
+    const rec = await q.rows(`SELECT value FROM ${physicalRoom('meta', cfg.user)} FINAL WHERE key = 'schema_version'`);
     const recorded = rec.length ? Number(rec[0].value) || 0 : 0;
     if (recorded > SCHEMA_VERSION) {
       console.log(bad(`this house is at schema ${recorded}; this memhouse knows migrations up to ${SCHEMA_VERSION}.`));
@@ -2679,7 +2679,7 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
       await mig.runMigration(q, ctx, item, { ledger, ui });
     } catch (e) {
       console.log(bad(`${item.migration.id}: ${e.message}`));
-      console.log('  what completed stands (house_events per room says which); what failed was not swapped.');
+      console.log('  what completed stands (events per room says which); what failed was not swapped.');
       console.log(`  a partial copy may sit in <room>__migrating — inspect before dropping. Re-run when fixed:`);
       console.log('     memhouse migrate');
       return 1;
@@ -2768,7 +2768,7 @@ async function cmdRelocate() {
   try { srcMember = (await chRows(src, 'SELECT currentUser() AS u', { database: '' }))[0]?.u; }
   catch (e) { console.log(bad(`source not reachable: ${netReason(e)}`)); return 1; }
   try {
-    const rec = await chRows(src, `SELECT value FROM ${physicalRoom('house_meta', src.user)} FINAL WHERE key = 'schema_version'`, { database: src.db });
+    const rec = await chRows(src, `SELECT value FROM ${physicalRoom('meta', src.user)} FINAL WHERE key = 'schema_version'`, { database: src.db });
     const v = rec.length ? Number(rec[0].value) || 0 : 0;
     if (v !== SCHEMA_VERSION) {
       console.log(bad(`source house is at schema ${v || 'pre-record'}; this memhouse is ${SCHEMA_VERSION}.`));
@@ -2776,7 +2776,7 @@ async function cmdRelocate() {
       return 1;
     }
   } catch {
-    console.log(bad('source house has no house_meta — migrate it first:  memhouse migrate'));
+    console.log(bad('source house has no meta — migrate it first:  memhouse migrate'));
     return 1;
   }
   const base = {};
@@ -2848,8 +2848,8 @@ async function cmdRelocate() {
       const cols = rel.copyColumns(destCols, srcCols);
       if (!cols.length) { console.log(warn(`${t}: no shared columns — skipped`)); continue; }
       const list = cols.map(bq).join(', ');
-      // house_meta carries only durable facts; the per-host heartbeats regenerate.
-      const where = t === 'house_meta'
+      // meta carries only durable facts; the per-host heartbeats regenerate.
+      const where = t === 'meta'
         ? " WHERE key IN ('schema_version','min_writer_schema','house_id') OR key LIKE 'share:%'" : '';
       const copySql = `INSERT INTO ${bq(t)} (${list}) SELECT ${list} FROM ${nat.fn}(${sq(nat.addr)}, ${sq(src.db)}, ${sq(t)}, ${sq(src.user)}, ${sq(src.password)})${where}`
         + ' SETTINGS insert_allow_materialized_columns = 1, allow_experimental_full_text_index = 1';
@@ -3189,7 +3189,7 @@ async function shareList(cfg, share) {
   const db = cfg.db;
   let recorded = [];
   try {
-    recorded = await chRows(cfg, `SELECT substring(key, 7) AS user, value AS state FROM ${physicalRoom('house_meta', cfg.user)} FINAL WHERE key LIKE 'share:%' ORDER BY key`, { database: db });
+    recorded = await chRows(cfg, `SELECT substring(key, 7) AS user, value AS state FROM ${physicalRoom('meta', cfg.user)} FINAL WHERE key LIKE 'share:%' ORDER BY key`, { database: db });
   } catch { /* unreadable record */ }
   let policies = [];
   try {

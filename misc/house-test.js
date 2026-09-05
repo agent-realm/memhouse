@@ -358,7 +358,7 @@ async function main() {
 
   // ── the house's record of itself ──────────────────────────────────────────────
   await test('the house records its schema generation and who ships into it, once', async () => {
-    const meta = new Map((await raw('SELECT key, value FROM house_meta FINAL')).map((r) => [r.key, r.value]));
+    const meta = new Map((await raw('SELECT key, value FROM meta FINAL')).map((r) => [r.key, r.value]));
     assert.strictEqual(meta.get('schema_version'), '2', 'the house does not know its schema generation');
     // Keyed per member@host — keyed by member alone, two machines of one member clobber
     // each other's entry and the fleet view only ever shows the machine that shipped last.
@@ -366,12 +366,12 @@ async function main() {
     assert.ok(vKey, `no client_version recorded for ${USER}@<host>`);
     assert.strictEqual(meta.get(vKey), require(path.join(ROOT, 'package.json')).version);
 
-    const before = (await raw('SELECT count() AS n FROM house_events'))[0].n;
+    const before = (await raw('SELECT count() AS n FROM events'))[0].n;
     assert.ok(Number(before) >= 2, `expected a schema and a version event, got ${before}`);
     // Written only on CHANGE. A row per pass would make this a heartbeat log — 288 a day
     // per machine under --loop — and bury the one question it exists to answer.
     await ship.runShip(client);
-    const after = (await raw('SELECT count() AS n FROM house_events'))[0].n;
+    const after = (await raw('SELECT count() AS n FROM events'))[0].n;
     assert.strictEqual(Number(after), Number(before), 'an unchanged pass wrote another event');
   });
 
@@ -417,7 +417,7 @@ async function main() {
     // Self-contained: give the pass something to ship and settle, whatever ran before.
     fixture.chats = [chat('guard-1', ['g1', 'g2'])];
     await ship.runShip(client);
-    const meta = new Map((await raw("SELECT key, value FROM house_meta FINAL")).map((r) => [r.key, String(r.value)]));
+    const meta = new Map((await raw("SELECT key, value FROM meta FINAL")).map((r) => [r.key, String(r.value)]));
     const writerKeys = [...meta.keys()].filter((k) => k.startsWith('client_schema:'));
     assert.ok(writerKeys.length >= 1, 'no client_schema recorded for any writer');
     assert.ok(writerKeys.every((k) => k.includes('@')), `writer keys must be member@host: ${writerKeys}`);
@@ -425,14 +425,14 @@ async function main() {
     assert.ok([...meta.keys()].some((k) => k.startsWith('last_ship:')), 'no heartbeat recorded');
 
     await client.insert({
-      table: 'house_meta', values: [{ key: 'schema_version', value: '99' }],
+      table: 'meta', values: [{ key: 'schema_version', value: '99' }],
       format: 'JSONEachRow', clickhouse_settings: { async_insert: 0 },
     });
     await assert.rejects(() => ship.runShip(client), /schema 99.*supports 2/s,
       'a shipper wrote into a house recorded as newer than anything it understands');
     // Restore: latest-wins on the key.
     await client.insert({
-      table: 'house_meta', values: [{ key: 'schema_version', value: '2' }],
+      table: 'meta', values: [{ key: 'schema_version', value: '2' }],
       format: 'JSONEachRow', clickhouse_settings: { async_insert: 0 },
     });
     const r = await ship.runShip(client);
@@ -486,7 +486,7 @@ async function main() {
     // Nothing deleted: the old room is still there, under a name that says what it is.
     const keptRows = await exec("SELECT count() FROM messages_pre_epoch");
     assert.strictEqual(keptRows, '3');
-    const ev = await exec("SELECT status FROM house_events WHERE kind = 'migration' AND id = '0100-epoch-key' ORDER BY event_at DESC LIMIT 1");
+    const ev = await exec("SELECT status FROM events WHERE kind = 'migration' AND id = '0100-epoch-key' ORDER BY event_at DESC LIMIT 1");
     assert.strictEqual(ev, 'applied');
     // And it is idempotent: a second run finds nothing to do rather than rebuilding again.
     const again = execFileSync(process.execPath,

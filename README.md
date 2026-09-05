@@ -299,7 +299,7 @@ count its messages twice.
 The shipper verifies the sorting keys before it writes and refuses if they are wrong, so
 an old house cannot be corrupted by a new shipper. `memhouse migrate-rooms` rebuilds it:
 copy, atomic swap, and the old room kept as `<room>_pre_epoch` for you to drop. The house
-records the move in `house_events`, and `memhouse doctor` reads it back.
+records the move in `events`, and `memhouse doctor` reads it back.
 
 ## Upgrading
 

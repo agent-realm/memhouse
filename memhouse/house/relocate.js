@@ -12,8 +12,8 @@
 // not insertable even with insert_allow_materialized_columns.
 const DERIVED = ['text_ngram', 'text_word'];
 
-// house_meta keys that are DURABLE facts of the house — worth carrying to the new host.
-// Everything else in house_meta is a per-host heartbeat (client_version, client_schema,
+// meta keys that are DURABLE facts of the house — worth carrying to the new host.
+// Everything else in meta is a per-host heartbeat (client_version, client_schema,
 // last_ship:<writer>) that the new shipper rewrites for itself on its first run; carrying
 // a stale one would misreport which machine last shipped until that run lands.
 function isDurableMetaKey(key) {

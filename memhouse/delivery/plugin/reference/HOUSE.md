@@ -52,7 +52,7 @@ if [ -z "${MEMHOUSE_URL:-}" ] || [ -z "${MEMHOUSE_USER:-}" ]; then
 fi
 
 q() {  # read-only by construction; every read path should use this
-  sed -E "s/([[:space:](]|^)(FROM|JOIN)[[:space:]]+(sessions|messages|tool_calls|house_meta|house_events)([[:space:];,)]|\$)/\1\2 ${MEMHOUSE_USER}_\3\4/g" \
+  sed -E "s/([[:space:](]|^)(FROM|JOIN)[[:space:]]+(sessions|messages|tool_calls|meta|events)([[:space:];,)]|\$)/\1\2 ${MEMHOUSE_USER}_\3\4/g" \
   | curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
     --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&readonly=1"
 }

@@ -105,9 +105,9 @@ for writes and DDL.
 
 Two tables that are not rooms:
 
-- `house_meta` — house-wide key/value, latest-wins: `schema_version`, and the memhouse
+- `meta` — house-wide key/value, latest-wins: `schema_version`, and the memhouse
   version each member last shipped with.
-- `house_events` — append-only: migrations (`pending` → `applied` | `failed`), version
+- `events` — append-only: migrations (`pending` → `applied` | `failed`), version
   changes, schema observations, each with actor, host and row counts. Nothing is updated
   in place, so a migration that failed and was retried reads as exactly that.
 

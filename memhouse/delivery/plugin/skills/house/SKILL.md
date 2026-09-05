@@ -83,12 +83,12 @@ thin. Say what could not be seen rather than guessing.
 SHOW DATABASES
 -- who you have granted (memhouse's own record of it)
 SELECT substring(key, 7) AS user, value AS state
-FROM house_meta FINAL WHERE key LIKE 'share:%' ORDER BY key
+FROM meta FINAL WHERE key LIKE 'share:%' ORDER BY key
 -- everyone on the server (names only — every member holds SHOW USERS)
 SELECT name FROM system.users ORDER BY name
 ```
 
-That `house_meta` list is memhouse's own note-keeping, not ClickHouse's grant table —
+That `meta` list is memhouse's own note-keeping, not ClickHouse's grant table —
 a member cannot read `system.grants`. Present it as "what memhouse recorded", and say
 that a grant made by hand would not appear.
 

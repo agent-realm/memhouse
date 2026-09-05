@@ -6,6 +6,13 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **The bookkeeping rooms are `<member>_meta` and `<member>_events`.** They were
+  `<member>_house_meta` / `<member>_house_events`, a name from when the house was the unit
+  of ownership. Every row in them is about one member — their schema version, their
+  machines, their last ship, their shares — so the old prefix named the wrong unit. A
+  house from before the one-layout still holds `house_meta` / `house_events`, and the
+  shipper's legacy guard names that rename alongside the other three.
+
 - **Choose which sessions ship.** `MEMHOUSE_EDITORS` names the adapters to run, and
   `MEMHOUSE_<EDITOR>_ROOTS` moves one adapter's location — `MEMHOUSE_CLAUDE_ROOTS` for
   the Claude Code config directories, `MEMHOUSE_CODEX_ROOTS` for Codex's home, one per
