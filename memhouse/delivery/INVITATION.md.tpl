@@ -112,8 +112,8 @@ narrower than the one memhouse issues — ask {{INVITER}} to run `memhouse insta
 
 ## For an agent following this page
 
-You are installing memhouse for the person who handed you this file. Five rules, and each
-exists because an agent broke it once:
+You are installing memhouse for the person who handed you this file. Five rules; three of
+them exist because an agent broke them:
 
 1. **Never print `{{FILE}}` or any `MEMHOUSE_*` value.** No `cat`, no `echo $MEMHOUSE_PASSWORD`,
    no `set -x`. This very session will be shipped into the house; a password printed here is
