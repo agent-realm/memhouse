@@ -11,6 +11,16 @@ You received two things:
 | `{{FILE}}` | **your credential.** One-time: install consumes it and deletes it. Treat it like a password until then. |
 | this page | the steps. Nothing secret in here. |
 
+Do it yourself, or hand this page to your coding agent. From the directory holding both
+files:
+
+```
+claude "Read MEMHOUSE-INVITATION.md and follow it. Ask me before each step that changes this machine."
+```
+
+Any agent that can run shell commands works the same way; the rules it must keep are at
+the end of this page.
+
 ## 1. Install memhouse
 
 {{INSTALL}}
@@ -99,3 +109,22 @@ Every refusal says what to do next. The two you might meet: `EACCES` on install 
 `sudo`, and `needed rights this credential does not hold` means the grant on the server is
 narrower than the one memhouse issues — ask {{INVITER}} to run `memhouse install --print-sql
 --member {{NAME}}` and apply what it prints.
+
+## For an agent following this page
+
+You are installing memhouse for the person who handed you this file. Five rules, and each
+exists because an agent broke it once:
+
+1. **Never print `{{FILE}}` or any `MEMHOUSE_*` value.** No `cat`, no `echo $MEMHOUSE_PASSWORD`,
+   no `set -x`. This very session will be shipped into the house; a password printed here is
+   a password archived.
+2. **Run the commands as written, in order.** Do not substitute `CREATE USER`, `GRANT` or any
+   SQL of your own; there is nothing to fix on the server from this side.
+3. **Ask before `memhouse install --env`.** It rotates the credential, deletes `{{FILE}}`,
+   and starts shipping this machine's transcripts. The person decides when that happens.
+4. **A ✗ line is the end of that step, not an invitation to work around it.** Read the line
+   after it — every refusal names its remedy — do that or report it. `sudo` for `EACCES` is
+   the one you may apply yourself.
+5. **Report what `memhouse status` and `memhouse doctor` say**, verbatim, when you are done.
+   A green install is those two commands, not your summary of them.
+
