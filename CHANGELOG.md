@@ -6,6 +6,14 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **`invite` writes `MEMHOUSE-INVITATION.md` beside the credential.** The invitee gets two
+  files: the one-time `.env`, and a guide with nothing secret in it — install, join,
+  verify, what they own and who can see it, things to try, which sessions ship, and what
+  the two refusals they might meet mean. Rendered rather than linked because it names
+  their file, this house, and (until the build is on npm) the tarball to install. The
+  matrix asserts the guide exists, names their rooms, carries no password, and has no
+  unrendered placeholder.
+
 - **The bookkeeping rooms are `<member>_meta` and `<member>_events`.** They were
   `<member>_house_meta` / `<member>_house_events`, a name from when the house was the unit
   of ownership. Every row in them is about one member — their schema version, their

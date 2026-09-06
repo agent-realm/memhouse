@@ -3533,9 +3533,35 @@ async function cmdInvite() {
     return 1;
   }
   console.log(ok(`invite written: ${out}`));
-  console.log(`  hand it to ${name} over a channel you trust (croc, a password manager — not chat).`);
-  console.log(`  they run:   memhouse install --env ${path.basename(out)}`);
-  console.log(`  then they should rotate the password you now both know:  memhouse passwd`);
+  // The guide that travels with the credential. Rendered, not linked: it names THIS
+  // invitee's file, this house, and — until the build is published — the exact tarball
+  // to install, none of which a static page can carry. Nothing secret goes into it.
+  const prerelease = /-/.test(PKG.version);
+  const guide = path.join(path.dirname(out), 'MEMHOUSE-INVITATION.md');
+  try {
+    const tpl = fs.readFileSync(path.join(DELIVERY, 'INVITATION.md.tpl'), 'utf-8');
+    // A nightly stamps its own version into the filename, so the guide names the shape of
+    // the file, not a name it cannot know; the version check below matches on the base.
+    const base = PKG.version.split('-')[0];
+    const install = prerelease
+      ? `This house runs a pre-release build, so install the tarball you were sent rather than the\n`
+        + `published package. From the directory you saved it in:\n\n\`\`\`\nnpm install -g ./memhouse-*.tgz\n\`\`\``
+      : `\`\`\`\nnpm install -g memhouse@${PKG.version}\n\`\`\``;
+    fs.writeFileSync(guide, tpl
+      .replaceAll('{{NAME}}', name)
+      .replaceAll('{{FILE}}', path.basename(out))
+      .replaceAll('{{URL}}', url)
+      .replaceAll('{{DB}}', built.db)
+      .replaceAll('{{VERSION}}', prerelease ? `${base}-…` : PKG.version)
+      .replaceAll('{{INSTALL}}', install)
+      .replaceAll('{{INVITER}}', cfg.user || require('os').userInfo().username));
+    console.log(ok(`guide written:  ${guide}`));
+  } catch (e) { console.log(warn(`could not write the invitation guide: ${e.message}`)); }
+  console.log(`  send ${name} BOTH files over a channel you trust (croc, a password manager — not chat):`);
+  console.log(`     ${path.basename(out)}   their credential — one-time, install deletes it`);
+  console.log(`     MEMHOUSE-INVITATION.md  the steps, nothing secret`);
+  if (prerelease) console.log(`     and the tarball this build came from (memhouse nightly --out …) — ${PKG.version} is not on npm`);
+  console.log(`  they run:   memhouse install --env ${path.basename(out)}   (rotates the password to one only they know)`);
   console.log(`  once installed, they are a member — sharing works both ways: /mem:access ${name}`);
   return 0;
 }

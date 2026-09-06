@@ -34,6 +34,10 @@ out=$(inv alice --out "$WORK/alice.env")
 printf '%s' "$out" | grep -q "invite written" && ok "alice invited into the default house" || bad "invite alice" "$(printf '%s' "$out" | tail -3)"
 grep -q "MEMHOUSE_DB='mem'" "$WORK/alice.env" && ok "  the house is 'mem' — nothing was chosen" || bad "  db is not mem" "$(grep MEMHOUSE_DB "$WORK/alice.env")"
 grep -q "TABLE_PREFIX" "$WORK/alice.env" && bad "  the invite file still carries a prefix field" || ok "  the invite file carries no layout knob"
+[ -f "$WORK/MEMHOUSE-INVITATION.md" ] && ok "  the invitation guide was written beside it" || bad "  no MEMHOUSE-INVITATION.md beside the env file"
+grep -q "alice_messages" "$WORK/MEMHOUSE-INVITATION.md" 2>/dev/null && ok "  and names her rooms" || bad "  the guide does not name her rooms"
+grep -q "$(grep -o "MEMHOUSE_PASSWORD='[^']*'" "$WORK/alice.env" | sed "s/.*='//;s/'//")" "$WORK/MEMHOUSE-INVITATION.md" 2>/dev/null && bad "  LEAK: the password is in the guide" || ok "  and carries no secret"
+grep -q "{{" "$WORK/MEMHOUSE-INVITATION.md" 2>/dev/null && bad "  unrendered placeholder in the guide" || ok "  every placeholder rendered"
 out=$(inv bob --member-password bpw --out "$WORK/bob.env")
 printf '%s' "$out" | grep -q "invite written" && ok "bob invited beside her" || bad "invite bob" "$(printf '%s' "$out" | tail -2)"
 n=$(A "SELECT count() FROM system.grants WHERE user_name='alice' AND database='mem' AND table IS NULL FORMAT TSV" | tr -d '\n')
