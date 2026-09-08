@@ -162,6 +162,18 @@ build sits on no tag and is never auto-updated; `update --check` says so and nam
 way forward. An invite from a house on a channel carries it, so the invitee follows it
 too.
 
+## Instances
+
+An instance is a home: an env file naming a house, the daemons shipping to it, and the
+playbooks whose sessions it ships (`MEMHOUSE_CLAUDE_ROOTS`). A machine can run several,
+each under its own `MEMHOUSE_HOME`, on different channels. `plugins install claude` from an
+instance installs into exactly the playbooks that instance ships and **binds** them: it
+writes `MEMHOUSE_HOME` and `MEMHOUSE_BIN` into each playbook's `settings.json` `env`, which
+Claude Code applies to every session there. So the `/mem:*` skills in a bound playbook read
+that instance's house and run that instance's binary, whatever the shell they were started
+from had. `plugins list` shows the binding; `plugins remove` takes it out. Everything else
+in `settings.json` is left as it was.
+
 ## Going back into a session
 
 `search` finds the conversation; `resume` hands you back into it.

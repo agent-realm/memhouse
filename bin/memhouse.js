@@ -2417,7 +2417,19 @@ async function cmdPlugins() {
   const invocations = names.map((n) => `/mem:${n}`).join(', ');
   // --target overrides the discovery rather than joining it: given one, that is the only
   // directory touched.
-  const targets = flags.target ? [{ dir: flags.target, why: '--target' }] : claudeTargets();
+  // Targets: --target names one; otherwise an instance that ships specific playbooks
+  // (MEMHOUSE_CLAUDE_ROOTS) installs into exactly those — the plugin belongs where the
+  // sessions come from; failing both, every Claude config dir on the machine.
+  const binding = require(path.join(REPO_ROOT, 'memhouse', 'binding'));
+  const scope = require(path.join(REPO_ROOT, 'editors', 'scope'));
+  const icfg = resolveConfig();
+  const scoped = !flags.target && icfg.claudeRoots
+    ? scope.parseList(icfg.claudeRoots).map(scope.expandHome).map((d) => ({ dir: d, why: 'this instance ships it' }))
+    : null;
+  const targets = flags.target ? [{ dir: flags.target, why: '--target' }] : (scoped || claudeTargets());
+  // What the skills in a bound playbook run and read: this binary, this home.
+  const thisBin = (() => { try { return fs.realpathSync(process.argv[1]); } catch { return process.argv[1]; } })();
+  const boundLabel = (dir) => { const b = binding.boundTo(binding.readSettings(dir)); return b ? `bound to ${short(b.home)}` : 'unbound — sessions use whatever MEMHOUSE_HOME the shell has'; };
   // Whatever --target was given has to reappear in the advice, or pasting it installs
   // somewhere else than the directory just inspected.
   const self = `memhouse plugins install claude${flags.target ? ` --target ${flags.target}` : ''}`;
@@ -2427,7 +2439,7 @@ async function cmdPlugins() {
     if (!targets.length) { console.log(warn('no Claude Code config directory found')); return 0; }
     for (const t of targets) {
       console.log(isPluginInstalled(t.dir)
-        ? ok(`installed in ${short(t.dir)} (${t.why})`)
+        ? ok(`installed in ${short(t.dir)} (${t.why}) — ${boundLabel(t.dir)}`)
         : warn(`not installed in ${short(t.dir)} (${t.why})`));
     }
     if (!targets.some((t) => isPluginInstalled(t.dir))) console.log(`  install with: ${self}`);
@@ -2442,7 +2454,13 @@ async function cmdPlugins() {
     }
     const chosen = await chooseTargets(targets, 'Install');
     if (!chosen.length) { console.log(warn('nothing installed')); return 0; }
-    for (const t of chosen) console.log(ok(`installed ${names.length} skills into ${short(installPluginInto(t.dir))}`));
+    for (const t of chosen) {
+      console.log(ok(`installed ${names.length} skills into ${short(installPluginInto(t.dir))}`));
+      try {
+        binding.bind(t.dir, { home: HOME_DIR, bin: thisBin });
+        console.log(ok(`  bound: sessions under ${short(t.dir)} read ${short(HOME_DIR)} and run ${short(thisBin)}`));
+      } catch (e) { console.log(warn(`  not bound: ${e.message}`)); }
+    }
     console.log(`  loads as mem@skills-dir next session — invoke ${invocations}`);
     return 0;
   }
@@ -2458,6 +2476,8 @@ async function cmdPlugins() {
       // else's work.
       try { fs.rmdirSync(path.join(t.dir, 'skills')); } catch { /* not empty: leave it */ }
       console.log(ok(`removed ${short(path.join(t.dir, 'skills', 'mem'))}`));
+      try { if (binding.unbind(t.dir)) console.log(ok(`  unbound: MEMHOUSE_HOME/MEMHOUSE_BIN removed from ${short(path.join(t.dir, 'settings.json'))}`)); }
+      catch (e) { console.log(warn(`  could not unbind: ${e.message}`)); }
     }
     return 0;
   }

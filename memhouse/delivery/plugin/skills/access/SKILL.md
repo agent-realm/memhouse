@@ -26,7 +26,7 @@ This runs the `memhouse invite` CLI and nothing else. **Do not hand-run `CREATE 
 `GRANT` with an admin password substituted into a command** — that burns the credential
 into a transcript on disk. The CLI passes it to one process and never echoes it.
 
-1. **Check the binary:** `command -v memhouse`. Absent → tell the user to
+1. **Check the binary:** `command -v "${MEMHOUSE_BIN:-memhouse}"`. Absent → tell the user to
    `npm install -g memhouse`. There is no in-skill fallback, on purpose.
 
 2. **Gather only two things:** the invitee's **name** (validate `[A-Za-z][A-Za-z0-9_]*`;
