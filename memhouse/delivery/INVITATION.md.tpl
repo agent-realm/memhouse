@@ -8,7 +8,7 @@ You received two things:
 
 | file | what it is |
 |---|---|
-| `{{FILE}}` | **your credential.** One-time: install consumes it and deletes it. Treat it like a password until then. |
+| `{{FILE}}` | **your credential**, in this same folder. One-time: install consumes it and deletes it. Treat it like a password until then. |
 | this page | the steps. Nothing secret in here. |
 
 Do it yourself, or hand this page to your coding agent. From the directory holding both
@@ -20,6 +20,18 @@ claude "Read MEMHOUSE-INVITATION.md and follow it. Ask me before each step that 
 
 Any agent that can run shell commands works the same way; the rules it must keep are at
 the end of this page.
+
+## 0. Find your credential
+
+The install needs `{{FILE}}`, which was sent alongside this page. Confirm it is here first —
+run this from the same directory, and if it prints the filename you are ready:
+
+```
+ls invite-*.env
+```
+
+If it is missing, it did not travel with this page; get it from whoever invited you before
+going on. Do not print its contents — the last line of it is a password.
 
 ## 1. Install memhouse
 
@@ -117,6 +129,9 @@ narrower than the one memhouse issues — ask {{INVITER}} to run `memhouse insta
 You are installing memhouse for the person who handed you this file. Five rules; three of
 them exist because an agent broke them:
 
+0. **Your credential is `{{FILE}}` in the directory this page is in.** If `Read
+   MEMHOUSE-INVITATION.md` is all you were given, `ls invite-*.env` beside it is the file
+   the steps refer to; confirm it is there before step 1.
 1. **Never print `{{FILE}}` or any `MEMHOUSE_*` value.** No `cat`, no `echo $MEMHOUSE_PASSWORD`,
    no `set -x`. This very session will be shipped into the house; a password printed here is
    a password archived.
