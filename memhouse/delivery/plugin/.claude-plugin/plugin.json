@@ -1,7 +1,7 @@
 {
   "name": "mem",
   "description": "Conversation memory for AI agents over the memhouse typed ClickHouse store: recall past sessions and answer from them, run analytics, check the house, bring people in, and administer the server. Skills install as /mem:recall, /mem:sql, /mem:house, /mem:access, and /mem:admin.",
-  "version": "0.18.0-alpha.1",
+  "version": "0.18.0",
   "author": {
     "name": "Ramazan Polat"
   },

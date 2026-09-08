@@ -4,7 +4,12 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.0 — 2026-09-08
+
+Published on the `team` channel (`npm install -g memhouse@team`). `latest` stays 0.17.0:
+this release speaks one room layout, and a house from before it is refused with the renames
+that convert it rather than written into. Everything below is that layout and what it made
+possible.
 
 - **`memhouse update` follows the channel the install came from.** It used to install
   `memhouse@latest` unconditionally, which would have downgraded a house running a build
