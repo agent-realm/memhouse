@@ -30,11 +30,13 @@ On most Linux distros the global install needs `sudo`; if `npm` says `EACCES`, t
 
 ## 2. Join the house
 
-From the directory holding `{{FILE}}`:
+From the directory holding `{{FILE}}`, just run memhouse — it finds the invitation and asks:
 
 ```
-memhouse install --env {{FILE}}
+memhouse
 ```
+
+(or, without the question: `memhouse install --env {{FILE}}`)
 
 What that does, in order: connects to `{{URL}}` as `{{NAME}}`, **rotates your password to
 one only your machine knows**, creates your rooms, writes your config to `~/.memhouse/env`,

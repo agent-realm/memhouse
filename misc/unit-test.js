@@ -1187,5 +1187,20 @@ test('an instance is named by its home, or by MEMHOUSE_NAME', () => {
   assert.strictEqual(binding.instanceName('/Users/p/.memhouse-stage', 'santiment'), 'santiment');
 });
 
+// ── bare `memhouse` beside an invite file ────────────────────────────────────────────────
+const invitefile = require('../memhouse/invitefile');
+test('an invite file is recognised by name and read without its secret', () => {
+  const d = fs.mkdtempSync(path.join(require('os').tmpdir(), 'mh-inv-'));
+  fs.writeFileSync(path.join(d, 'invite-alice.env'), "MEMHOUSE_URL='http://h:1'\nMEMHOUSE_USER='alice'\nMEMHOUSE_PASSWORD='s3cret'\nMEMHOUSE_DB='mem'\nMEMHOUSE_INVITE='1'\nMEMHOUSE_CHANNEL='team'\n");
+  fs.writeFileSync(path.join(d, 'notes.env'), 'x=1'); fs.writeFileSync(path.join(d, 'invite-bad name.env'), 'x=1');
+  const found = invitefile.findInvites([d, '/nope']);
+  assert.deepStrictEqual(found.map((f) => path.basename(f.file)), ['invite-alice.env'], 'only invite-<name>.env, and a missing dir is skipped');
+  const desc = invitefile.describeInvite(fs.readFileSync(found[0].file, 'utf-8'));
+  assert.deepStrictEqual({ user: desc.user, url: desc.url, db: desc.db, channel: desc.channel, isInvite: desc.isInvite, complete: desc.complete }, { user: 'alice', url: 'http://h:1', db: 'mem', channel: 'team', isInvite: true, complete: true });
+  assert.ok(!JSON.stringify(desc).includes('s3cret'), 'the description never carries the password');
+  assert.deepStrictEqual(invitefile.describeInvite("MEMHOUSE_URL='x'").missing, ['MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB']);
+  fs.rmSync(d, { recursive: true });
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
