@@ -6,6 +6,14 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **`memhouse update` follows the channel the install came from.** It used to install
+  `memhouse@latest` unconditionally, which would have downgraded a house running a build
+  published under another dist-tag, and replaced a tarball install with whatever latest
+  was. Now the channel is pinned (`MEMHOUSE_CHANNEL`, or `--channel`, which writes it) or
+  inferred from the installed version's tag; a version on no tag gets no automatic update
+  and is told why. An invite from a house on a channel carries it into the invitee's env
+  file, and the invitation guide says `npm install -g memhouse@<channel>`.
+
 - **`invite` writes `MEMHOUSE-INVITATION.md` beside the credential.** The invitee gets two
   files: the one-time `.env`, and a guide with nothing secret in it — install, join,
   verify, what they own and who can see it, things to try, which sessions ship, and what

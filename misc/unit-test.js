@@ -1135,5 +1135,31 @@ test('every adapter has one override variable, named from its adapter name', () 
   assert.strictEqual(scope.selectRoot('/dflt', '/nope', { isDir }).root, null);
 });
 
+// ── update follows the channel it came from ─────────────────────────────────────────────
+const channel = require('../memhouse/channel');
+test('a build published under another tag is never downgraded to latest', () => {
+  const tags = { latest: '0.17.0', team: '0.18.0' };
+  const p = channel.pickChannel({ version: '0.18.0', tags });
+  assert.strictEqual(p.channel, 'team'); assert.strictEqual(p.target, '0.18.0');
+  const q = channel.pickChannel({ version: '0.17.0', tags });
+  assert.strictEqual(q.channel, 'latest'); assert.strictEqual(q.target, '0.17.0');
+});
+test('a pinned channel wins, and says so when the tag does not exist', () => {
+  const tags = { latest: '0.17.0', team: '0.18.0' };
+  assert.strictEqual(channel.pickChannel({ version: '0.17.0', pinned: 'team', tags }).channel, 'team');
+  const p = channel.pickChannel({ version: '0.18.0', pinned: 'nope', tags });
+  assert.strictEqual(p.channel, 'nope'); assert.strictEqual(p.target, null); assert.match(p.reason, /not a tag/);
+});
+test('a tarball or checkout build gets no automatic update', () => {
+  const p = channel.pickChannel({ version: '0.18.0-nightly.20260906T0307', tags: { latest: '0.17.0' } });
+  assert.strictEqual(p.channel, null); assert.match(p.reason, /tarball|checkout/);
+  const q = channel.pickChannel({ version: '0.18.0-alpha.1', tags: { latest: '0.17.0', team: '0.18.0-alpha.1' } });
+  assert.strictEqual(q.channel, 'team', 'a pre-release that IS a published tag follows it');
+});
+test('no registry answer: follow latest without a target, never invent one', () => {
+  const p = channel.pickChannel({ version: '0.17.0', tags: null });
+  assert.strictEqual(p.channel, 'latest'); assert.strictEqual(p.target, null); assert.match(p.reason, /did not answer/);
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

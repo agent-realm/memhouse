@@ -75,7 +75,8 @@ container engine, install one of the two.
 memhouse onboard | install | setup | discover | doctor | uninstall | reset
 memhouse ship [--full|--loop N] | search <terms> | stats | status
 memhouse resume <session-id>               print the command that reopens a session
-memhouse update [--check]                  upgrade, restart daemons, check the schema
+memhouse update [--check] [--channel TAG]  upgrade along the channel this install follows,
+                                           restart daemons, check the schema
 memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
@@ -148,6 +149,18 @@ An adapter name or a directory that does not exist is refused and reported again
 adapter, never shipped from the default instead: a typo that quietly shipped nothing would
 look like a working install with an empty house, and one that quietly shipped the wrong
 store would be worse.
+
+## Channels
+
+`memhouse update` follows the npm dist-tag the install came from, not `latest` by
+reflex. A house published under another tag — `npm publish --tag team`, so one team can
+run a newer layout without every other house being dragged along — installs with
+`npm install -g memhouse@team`, and `update` keeps it there. The channel is inferred from
+the installed version; pin it with `MEMHOUSE_CHANNEL='team'` in the env file or
+`memhouse update --channel team`, which writes the same line. A tarball or checkout
+build sits on no tag and is never auto-updated; `update --check` says so and names the
+way forward. An invite from a house on a channel carries it, so the invitee follows it
+too.
 
 ## Going back into a session
 

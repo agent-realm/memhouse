@@ -105,6 +105,9 @@ function resolveConfig() {
     // What this install ships — editors/scope.js. Empty means everything on the machine.
     editors: pick('editors', 'MEMHOUSE_EDITORS', ''),
     claudeRoots: pick('claude-roots', 'MEMHOUSE_CLAUDE_ROOTS', ''),
+    // The npm dist-tag `memhouse update` follows. Empty = inferred from the installed
+    // version (memhouse/channel.js). Set for a house on a build that is not `latest`.
+    channel: pick('channel', 'MEMHOUSE_CHANNEL', ''),
     // Did anything actually SAY which house this is, or are the values above just the
     // defaults? The defaults are not neutral — localhost:8123 as memhouse_root is a real
     // house on a lot of machines, usually the pilot's own. An agent whose config went
@@ -173,6 +176,10 @@ function writeEnvFile(cfg) {
       '# What this install ships. Empty or absent means everything on this machine.',
       ...(cfg.editors ? [`MEMHOUSE_EDITORS=${sq(cfg.editors)}`] : []),
       ...(cfg.claudeRoots ? [`MEMHOUSE_CLAUDE_ROOTS=${sq(cfg.claudeRoots)}`] : []),
+    ] : []),
+    ...(cfg.channel ? [
+      '# The npm channel `memhouse update` follows (a dist-tag). Absent = latest.',
+      `MEMHOUSE_CHANNEL=${sq(cfg.channel)}`,
     ] : []),
     ...(cfg.adminUser ? [
       '# The admin credential for this house — present because this machine administers it',
@@ -2077,18 +2084,33 @@ function installKind() {
 // Each of those has cost a real machine real sessions. This command owns all three.
 async function cmdUpdate() {
   const { kind, root } = installKind();
-  const latest = await (async () => {
-    try {
-      const res = await fetch('https://registry.npmjs.org/memhouse/latest', { signal: AbortSignal.timeout(8000) });
-      return res.ok ? (await res.json()).version : null;
-    } catch { return null; }
-  })();
-
-  if (JSON_OUT && flags.check) return console.log(JSON.stringify({ kind, root, current: PKG.version, latest }, null, 2));
+  const chan = require(path.join(REPO_ROOT, 'memhouse', 'channel'));
+  const cfg0 = resolveConfig();
+  // --channel pins for this run AND every later one: the point of pinning is that the next
+  // person to type `memhouse update` does not have to remember it.
+  if (flags.channel && flags.channel !== true && String(flags.channel) !== cfg0.channel) {
+    writeEnvFile({ ...cfg0, channel: String(flags.channel) });
+    console.log(ok(`channel pinned in ${short(ENV_FILE)}: ${flags.channel}`));
+  }
+  const pinned = flags.channel && flags.channel !== true ? String(flags.channel) : (cfg0.channel || null);
+  const tags = await chan.fetchTags();
+  const pick = chan.pickChannel({ version: PKG.version, pinned, tags });
+  const latest = pick.target;
+  if (JSON_OUT && flags.check) return console.log(JSON.stringify({ kind, root, current: PKG.version, channel: pick.channel, target: pick.target, reason: pick.reason, tags }, null, 2));
   console.log(`  installed  ${PKG.version}  (${kind}: ${root})`);
-  console.log(`  latest     ${latest || 'unknown — the registry did not answer'}`);
+  console.log(`  channel    ${pick.channel || '—'}  (${pick.reason})`);
+  console.log(`  target     ${pick.target || (tags ? 'nothing to install' : 'unknown — the registry did not answer')}`);
   if (latest && latest === PKG.version && kind !== 'checkout') console.log(ok('already current'));
   if (flags.check) return 0;
+  if (!pick.channel && kind !== 'checkout') {
+    console.log(warn('no automatic update for this install'));
+    console.log(`  ${pick.reason}`);
+    return 1;
+  }
+  if (pick.channel && !pick.target && kind !== 'checkout') {
+    console.log(bad(`channel '${pick.channel}' has no version on the registry — nothing to install, nothing changed`));
+    return 1;
+  }
 
   if (kind === 'npx') {
     console.log(warn('nothing to update — npx resolves the registry on every run'));
@@ -2097,7 +2119,7 @@ async function cmdUpdate() {
   }
   if (kind === 'local-dep') {
     console.log(warn('this is a project dependency, not a global install'));
-    console.log(`  upgrade it where it lives: npm install memhouse@latest`);
+    console.log(`  upgrade it where it lives: npm install memhouse@${pick.channel || 'latest'}`);
     return 1;
   }
 
@@ -2135,7 +2157,7 @@ async function cmdUpdate() {
     // long as SQLite was a native module: npm never remembered it, and an upgrade without
     // it left the binding unbuilt and the five SQLite-backed adapters reading zero
     // sessions on every pass afterwards. There is no binding to build now.
-    const r = spawnSync('npm', ['install', '-g', 'memhouse@latest'], { stdio: 'inherit' });
+    const r = spawnSync('npm', ['install', '-g', `memhouse@${pick.channel}`], { stdio: 'inherit' });
     if (r.status !== 0) {
       console.log(bad('npm install failed — nothing was restarted, the running version is unchanged'));
       console.log('  if it was EACCES: ls -ld "$(npm prefix -g)" — root-owned needs sudo, yours needs a chown');
@@ -3510,6 +3532,7 @@ async function cmdInvite() {
     `MEMHOUSE_USER=${sq(built.user)}`,
     `MEMHOUSE_PASSWORD=${sq(built.password)}`,
     `MEMHOUSE_DB=${sq(built.db)}`,
+    ...(cfg.channel ? [`MEMHOUSE_CHANNEL=${sq(cfg.channel)}`] : []),
     '# This credential was issued by an invitation (no admin access here); memhouse offers',
     '# to rotate it on install so the inviter no longer knows it.',
     'MEMHOUSE_INVITE=1',
@@ -3543,10 +3566,14 @@ async function cmdInvite() {
     // A nightly stamps its own version into the filename, so the guide names the shape of
     // the file, not a name it cannot know; the version check below matches on the base.
     const base = PKG.version.split('-')[0];
-    const install = prerelease
-      ? `This house runs a pre-release build, so install the tarball you were sent rather than the\n`
-        + `published package. From the directory you saved it in:\n\n\`\`\`\nnpm install -g ./memhouse-*.tgz\n\`\`\``
-      : `\`\`\`\nnpm install -g memhouse@${PKG.version}\n\`\`\``;
+    // A house on a published channel installs by tag; a pre-release on no channel is a
+    // tarball. `memhouse update` on the invitee's machine follows the same channel.
+    const install = cfg.channel
+      ? `\`\`\`\nnpm install -g memhouse@${cfg.channel}\n\`\`\`\n\nThis house follows the \`${cfg.channel}\` channel; \`memhouse update\` keeps following it.`
+      : prerelease
+        ? `This house runs a pre-release build, so install the tarball you were sent rather than the\n`
+          + `published package. From the directory you saved it in:\n\n\`\`\`\nnpm install -g ./memhouse-*.tgz\n\`\`\``
+        : `\`\`\`\nnpm install -g memhouse@${PKG.version}\n\`\`\``;
     fs.writeFileSync(guide, tpl
       .replaceAll('{{NAME}}', name)
       .replaceAll('{{FILE}}', path.basename(out))
@@ -3560,7 +3587,7 @@ async function cmdInvite() {
   console.log(`  send ${name} BOTH files over a channel you trust (croc, a password manager — not chat):`);
   console.log(`     ${path.basename(out)}   their credential — one-time, install deletes it`);
   console.log(`     MEMHOUSE-INVITATION.md  the steps, nothing secret`);
-  if (prerelease) console.log(`     and the tarball this build came from (memhouse nightly --out …) — ${PKG.version} is not on npm`);
+  if (prerelease && !cfg.channel) console.log(`     and the tarball this build came from (memhouse nightly --out …) — ${PKG.version} is not on npm`);
   console.log(`  they run:   memhouse install --env ${path.basename(out)}   (rotates the password to one only they know)`);
   console.log(`  once installed, they are a member — sharing works both ways: /mem:access ${name}`);
   return 0;
