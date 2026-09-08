@@ -3356,6 +3356,53 @@ async function cmdWhoami() {
   return 0;
 }
 
+/**
+ * Bare `memhouse` with an invite file nearby: offer to process it. Returns null when there
+ * is nothing to offer (caller prints help), else the exit code of the install it ran or
+ * declined. Never touches the file's password: what it shows is the user, the house and
+ * the server, which the guide beside the file shows too.
+ */
+async function offerInvite() {
+  const inv = require(path.join(REPO_ROOT, 'memhouse', 'invitefile'));
+  // The current directory only. The guide says "from the directory holding the file", and
+  // reaching into ~/Downloads surfaced unrelated invitations from other houses — and could
+  // auto-join the wrong one under --yes. If they are somewhere else, they name the file.
+  const found = inv.findInvites([process.cwd()]);
+  if (!found.length) return null;
+  const described = found.map((f) => ({ ...f, ...inv.describeInvite((() => { try { return fs.readFileSync(f.file, 'utf-8'); } catch { return ''; } })()) }));
+  const usable = described.filter((d) => d.complete);
+  if (!usable.length) {
+    console.log(warn(`found ${found.length === 1 ? short(found[0].file) : `${found.length} invite files`} — not a complete invite (missing ${described[0].missing.join(', ')})`));
+    return null;
+  }
+  const cfg = resolveConfig();
+  const interactive = process.stdin.isTTY && flags.yes !== true;
+  console.log(ok(`found an invitation: ${short(usable[0].file)}${usable.length > 1 ? ` (and ${usable.length - 1} more)` : ''}`));
+  let pick = usable[0];
+  if (usable.length > 1) {
+    usable.forEach((d, i) => console.log(`  ${i + 1}) ${short(d.file)}   join ${d.url} as '${d.user}'`));
+    if (!interactive) { console.log('  several invitations here — name one:  memhouse install --env <file>'); return 1; }
+    const a = (await ask('Which one? (number, or n)', '1')).trim().toLowerCase();
+    const n = Number(a);
+    if (!Number.isInteger(n) || n < 1 || n > usable.length) { console.log('  nothing done.'); return 1; }
+    pick = usable[n - 1];
+  }
+  console.log(`  it joins ${pick.url}, house '${pick.db}', as member '${pick.user}'${pick.channel ? `, channel ${pick.channel}` : ''}.`);
+  if (cfg.stated && cfg.user) {
+    console.log(warn(`this machine already ships to ${cfg.url} as '${cfg.user}' — joining REPLACES that (the old config is kept as env.pre-install).`));
+  }
+  console.log('  Joining rotates the password to one only this machine knows, deletes the file, and starts shipping.');
+  if (!interactive) {
+    if (flags.yes === true) { flags.env = pick.file; flags.force = cfg.stated && cfg.user ? true : flags.force; return cmdInstall({ interactive: false }); }
+    console.log(`  Join with:  memhouse install --env ${path.basename(pick.file)}     (or: memhouse --yes)`);
+    return 0;
+  }
+  const a = (await ask(cfg.stated && cfg.user ? 'Replace the current house and join? (yes/no)' : 'Join now? (Y/n)', cfg.stated && cfg.user ? 'no' : 'Y')).trim().toLowerCase();
+  if (!(a === 'y' || a === 'yes' || (a === '' && !(cfg.stated && cfg.user)))) { console.log('  nothing done. Later:  memhouse install --env ' + path.basename(pick.file)); return 0; }
+  flags.env = pick.file; if (cfg.stated && cfg.user) flags.force = true;
+  return cmdInstall({ interactive: false });
+}
+
 async function cmdInvite() {
   const name = positional[0];
   if (!name) { console.log('usage: memhouse invite <name> --url <house-url> [--admin-user … [--admin-password …]] [--db <house>] [--out <file>] [--adopt] [--print-sql]'); return 2; }
@@ -3827,7 +3874,15 @@ async function cmdUninstall() {
   const cfg = resolveConfig();
 
   switch (cmd) {
-    case null: case 'help': console.log(HELP); break;
+    case null: {
+      // Bare `memhouse`. If an invite file is where the user is standing — or in their
+      // downloads — the likeliest reason they typed this is that they were handed it. Ask.
+      // Otherwise, the help screen as before. Nothing happens without a yes.
+      const code = await offerInvite();
+      if (code === null) console.log(HELP); else process.exitCode = code;
+      break;
+    }
+    case 'help': console.log(HELP); break;
     // `--version` and `-v` land here as flags, not as the `version` verb, so they used to
     // fall through to HELP: forty lines of help and exit 0 is not what --version means.
     case 'version': console.log(PKG.version); break;

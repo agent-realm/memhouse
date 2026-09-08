@@ -155,8 +155,35 @@ else
   esac
 fi
 
+# ── bare `memhouse` beside an invite file offers to process it ────────────────────────
+# The invitee's own path: an invite-<name>.env in the current directory, and bare memhouse.
+D="$WORK/inbox"; mkdir -p "$D"
+( cd "$D" && $CLI invite im_bare --url "$URL" --allow-local --admin-user "$ADM" --admin-password "$ADMPW" --out "$D/invite-im_bare.env" >/dev/null 2>&1 )
+if [ ! -f "$D/invite-im_bare.env" ]; then
+  bad "could not stage an invite file for the bare-memhouse case"
+else
+  H="$WORK/bare-home"; mkdir -p "$H"
+  # non-TTY, no --yes: it must OFFER and change nothing.
+  out=$( cd "$D" && MEMHOUSE_HOME="$H" $CLI </dev/null 2>&1 || true )
+  case "$out" in *"found an invitation"*) ok "bare memhouse offers the nearby invite" ;; *) bad "bare memhouse did not offer the invite" "$(printf '%s' "$out" | head -2)" ;; esac
+  case "$out" in *im_bare*) ok "  and names the member it would join as" ;; *) bad "  did not name the member" ;; esac
+  [ -f "$D/invite-im_bare.env" ] && ok "  the offer alone changes nothing (file kept)" || bad "  the file was consumed without a yes"
+  [ -f "$H/env" ] && bad "  it joined without a yes" || ok "  and nothing was installed"
+  case "$out" in *"$ADMPW"*|*PASSWORD*) bad "  LEAK: a secret appeared in the offer" ;; *) ok "  the offer prints no secret" ;; esac
+  # --yes: it must join and consume the file.
+  out=$( cd "$D" && MEMHOUSE_HOME="$H" $CLI --yes </dev/null 2>&1 || true )
+  case "$out" in *installed*) ok "memhouse --yes joins from the nearby invite" ;; *) bad "memhouse --yes did not join" "$(printf '%s' "$out" | grep -i '✗\|error' | head -1)" ;; esac
+  [ -f "$D/invite-im_bare.env" ] && bad "  the spent invite file was not removed" || ok "  the spent invite file is gone"
+  grep -q "MEMHOUSE_USER='im_bare'" "$H/env" 2>/dev/null && ok "  installed as the invited member" || bad "  env not written as im_bare"
+  ( cd "$D" && MEMHOUSE_HOME="$H" $CLI stop >/dev/null 2>&1 || true )
+  # no invite present: bare memhouse falls back to help, not an offer.
+  E="$WORK/empty"; mkdir -p "$E"    # a clean dir — earlier cases dropped invite files in $WORK
+  out=$( cd "$E" && MEMHOUSE_HOME="$WORK/nohome" $CLI </dev/null 2>&1 || true )
+  case "$out" in *"agent conversation memory"*) ok "bare memhouse with no invite prints help" ;; *) bad "bare memhouse without an invite did not print help" "$(printf '%s' "$out" | head -2)" ;; esac
+fi
+
 # ── cleanup ────────────────────────────────────────────────────────────────────────
-for u in im_member im_target im_made im_occupy; do
+for u in im_member im_target im_made im_occupy im_bare; do
   q "DROP USER IF EXISTS $u" >/dev/null 2>&1 || true
   q "DROP DATABASE IF EXISTS $u SYNC" >/dev/null 2>&1 || true
 done

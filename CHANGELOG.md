@@ -6,6 +6,13 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **Bare `memhouse` beside an invite offers to process it.** With an `invite-<name>.env` in
+  the current directory, `memhouse` with no command reads what it promises — house, member,
+  server, without the password — and asks whether to join, instead of printing help. `--yes`
+  joins unattended; a house already configured is only replaced on an explicit yes. It
+  scans the current directory only, never `~/Downloads`, so invitations to other houses do
+  not surface or auto-join by accident. With no invite present, the help screen as before.
+
 - **A playbook is bound to the instance that installed its plugin.** `plugins install
   claude` from an instance that ships specific playbooks installs into exactly those, and
   stamps `MEMHOUSE_HOME` and `MEMHOUSE_BIN` into each playbook's `settings.json` `env`, so
