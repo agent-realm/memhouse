@@ -4,6 +4,16 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **A playbook is bound to the instance that installed its plugin.** `plugins install
+  claude` from an instance that ships specific playbooks installs into exactly those, and
+  stamps `MEMHOUSE_HOME` and `MEMHOUSE_BIN` into each playbook's `settings.json` `env`, so
+  every session under it reads that instance's house and runs that instance's binary
+  rather than whatever the shell inherited. The skills say so in their reference and use
+  `${MEMHOUSE_BIN:-memhouse}`. `plugins list` shows the binding, `plugins remove` removes
+  it, and nothing else in `settings.json` is touched.
+
 ## 0.18.0 — 2026-09-08
 
 Published on the `team` channel (`npm install -g memhouse@team`). `latest` stays 0.17.0:

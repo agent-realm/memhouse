@@ -32,6 +32,22 @@ stop:
 > `memhouse deploy --local` stands one up bound to loopback. Someone invited you?
 > `memhouse install --env invite-<you>.env`.
 
+## First: which memhouse this is
+
+Before anything else, run and show verbatim:
+
+```
+"${MEMHOUSE_BIN:-memhouse}" instance
+```
+
+One screen: the instance's name and home, the binary and channel, the house (server,
+database, member, whether an admin credential is present), the five rooms with row counts,
+what this machine ships, the host identity, the daemons, and which playbooks are bound to
+this instance. A machine can run several instances on different channels; this is how the
+user tells them apart, and how you know which house every answer below comes from. If the
+instance shown is not the one the user meant, stop and say so — the fix is launching
+under the right playbook, not overriding variables.
+
 ## The report
 
 Lead with the one-line verdict — *working and current*, *working but stale*, or *not

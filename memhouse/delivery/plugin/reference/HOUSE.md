@@ -36,6 +36,13 @@ rows, and *you* read them.
 memhouse ships back into the house — the archive is insert-only, so a leaked credential
 cannot be withdrawn.
 
+**Which memhouse.** `plugins install` stamps two variables into this config directory's
+`settings.json`, so every session here carries them: `MEMHOUSE_HOME` is the instance whose
+house these skills read, and `MEMHOUSE_BIN` is that instance's binary. **Every `memhouse …`
+command in these skills means `"${MEMHOUSE_BIN:-memhouse}"`.** A machine can run two
+instances on two channels; the bare name would be whichever the shell found first. Do not
+override either variable.
+
 Credentials resolve **flags > exported `MEMHOUSE_*` > `$MEMHOUSE_HOME/env`** (default
 `~/.memhouse/env`) — the same order the CLI uses. The dance below snapshots the
 environment first, because sourcing the file would otherwise clobber an already-exported

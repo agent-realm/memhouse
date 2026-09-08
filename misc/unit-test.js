@@ -1161,5 +1161,31 @@ test('no registry answer: follow latest without a target, never invent one', () 
   assert.strictEqual(p.channel, 'latest'); assert.strictEqual(p.target, null); assert.match(p.reason, /did not answer/);
 });
 
+// ── a playbook is bound to the instance that installed its plugin ────────────────────────
+const binding = require('../memhouse/binding');
+test('binding stamps two env keys and leaves everything else in settings.json alone', () => {
+  const before = { hooks: { SessionStart: [{ command: 'x' }] }, env: { FOO: 'bar' }, permissions: { allow: ['Bash'] } };
+  const after = binding.bindSettings(before, { home: '/h', bin: '/b' });
+  assert.deepStrictEqual(after.hooks, before.hooks); assert.deepStrictEqual(after.permissions, before.permissions);
+  assert.deepStrictEqual(after.env, { FOO: 'bar', MEMHOUSE_HOME: '/h', MEMHOUSE_BIN: '/b' });
+  assert.deepStrictEqual(binding.boundTo(after), { home: '/h', bin: '/b' });
+  assert.strictEqual(binding.boundTo(before), null);
+  assert.strictEqual(binding.bindSettings(null, { home: '/h', bin: '/b' }).env.MEMHOUSE_HOME, '/h', 'no settings.json yet is fine');
+});
+test('unbinding removes only the two keys, and an emptied env block goes with them', () => {
+  const bound = binding.bindSettings({ env: { FOO: 'bar' } }, { home: '/h', bin: '/b' });
+  assert.deepStrictEqual(binding.unbindSettings(bound).env, { FOO: 'bar' });
+  assert.ok(!('env' in binding.unbindSettings(binding.bindSettings({}, { home: '/h', bin: '/b' }))));
+  assert.deepStrictEqual(binding.unbindSettings({ hooks: {} }), { hooks: {} }, 'unbinding an unbound file is a no-op');
+});
+
+test('an instance is named by its home, or by MEMHOUSE_NAME', () => {
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse'), 'default');
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse-stage'), 'stage');
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse-team/'), 'team');
+  assert.strictEqual(binding.instanceName('/Users/p/alice-sandbox/memhouse'), 'memhouse');
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse-stage', 'santiment'), 'santiment');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
