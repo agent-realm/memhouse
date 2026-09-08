@@ -84,13 +84,13 @@ into a transcript on disk. The CLI passes it to one process and never echoes it.
 5. **Say whether the house was fresh** — `SELECT count() FROM <db>.messages` reads 0 for a
    new one. Second line of defence behind step 3's refusal.
 
-6. **Write the message the user will send.** They are handing over a file plus an
-   explanation; compose it rather than making them. Cover: what memhouse is in a sentence
-   or two; that the attached file IS a password (do not forward, do not paste in chat);
-   `npm install -g memhouse` (Node 24+) then `memhouse install --env invite-<name>.env`;
-   that install offers to change the password to one only they know and then deletes the
-   file, so they should say yes; `memhouse onboard` to start shipping and `memhouse status`
-   to check; and that their house is theirs alone unless they run `/mem:access share`.
+6. **Write the message the user will send.** `invite` wrote TWO files beside each other:
+   `invite-<name>.env` (the credential, one-time) and `MEMHOUSE-INVITATION.md` (the steps,
+   nothing secret — install, verify, what they own, things to try). The guide does the
+   explaining, so the message is short: what memhouse is in a sentence; that the `.env` IS a
+   password (do not forward, do not paste in chat); open `MEMHOUSE-INVITATION.md` and follow
+   it. If `memhouse --version` shows a pre-release (a `-` in it), the invitee also needs the
+   tarball this build came from (`memhouse nightly --out …`); the guide says so and names it.
 
    If they are REPLACING an existing credential, add `memhouse ship --full` — a plain
    incremental pass skips sessions the new house has no record of, so their history would
@@ -105,7 +105,7 @@ for this** — partial sharing has four ways to go wrong quietly, and the comman
 each one:
 
 ```
-memhouse share <user>                          the whole house
+memhouse share <user>                          everything you own
 memhouse share <user> --only project=memhouse  just one project
 memhouse share <user> --only session=<id>      just one conversation
 memhouse share --list                          who can read it, and how much

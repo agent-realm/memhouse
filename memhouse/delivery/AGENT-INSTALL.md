@@ -87,7 +87,7 @@ no longer exists, so anything named here is a single editor's own store (locked 
 running editor, corrupt, or on a schema this parser does not know).
 
 `stats` should show one row per source (claude-code, codex, gemini-cli, …) with
-non-zero sessions/messages. Or verify by SQL — the rooms are plain shared tables
+non-zero sessions/messages. Or verify by SQL — the rooms are the ones `memhouse rooms` names
 (`sessions`, `messages`, `tool_calls`) and the session rollup is a saved query rather
 than an object, so `memhouse sessions-query` prints it (it also applies the
 current-parse filter that any hand-written read of `messages` needs — the shipper

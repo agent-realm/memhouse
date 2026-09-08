@@ -11,9 +11,11 @@ editor files/DBs → editors/*.js → memhouse/shipper/ship.js → ClickHouse ro
    or a running language server. This is the layer worth contributing to.
 2. **Shipper** (`memhouse/shipper/ship.js`) — runs the adapters, normalizes to typed rows,
    and writes them into the caller's own rooms. No LLM, no server component.
-3. **Rooms** (`memhouse/per-member/`) — `sessions_<member>`, `messages_<member>`,
-   `tool_calls_<member>` in the `mem` database. See
-   [`memhouse/per-member/SCHEMA.md`](memhouse/per-member/SCHEMA.md); there is no local
+3. **Rooms** (`memhouse/house/`) — `sessions`, `messages`, `tool_calls`, in a house of
+   the member's own (`alice.messages`) or as their own rooms in a shared one
+   (`mem.alice_messages`). `house/schema.sql.tpl` is the schema and
+   [`house/HOUSE.md`](memhouse/house/HOUSE.md) explains the layout; `roomNames()` in
+   `house/house.js` is the only place a table name is produced. There is no local
    SQLite cache.
 4. **Server + SPA** (`memhouse/server/`, `ui/`) — the dashboard.
 
@@ -191,9 +193,10 @@ Reads from `~/.local/share/opencode/opencode.db`:
 ## Where the data goes
 
 There is no local cache database. Rows land in ClickHouse, one set of rooms per member —
-`sessions_<member>`, `messages_<member>`, `tool_calls_<member>` — with the column list,
-sort keys and the `origin` guarantees in
-[`memhouse/per-member/SCHEMA.md`](memhouse/per-member/SCHEMA.md).
+`sessions`, `messages`, `tool_calls`, carrying the member's prefix in a shared house
+(`alice_messages`) and plain in a house of their own. The column list, sort keys and the
+`origin`/`epoch` guarantees are in [`house/HOUSE.md`](memhouse/house/HOUSE.md) and
+`house/schema.sql.tpl`.
 
 Two properties to respect when touching the write path:
 

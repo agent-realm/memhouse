@@ -9,9 +9,12 @@ something durable was keeping it.
 memhouse is that something. It reads the session transcripts your editors already
 write to disk — **17 of them**: Claude Code, Codex, Cursor, Zed, Copilot, Gemini
 CLI and the rest — parses them locally, and ships typed rows into a ClickHouse
-**you own**. Nothing is proxied, intercepted, or sent to anyone's cloud. Then you
-can search every past session, see what it cost, resume the conversation that
-solved this before, and let an agent query its own history.
+**you choose**: a container on this laptop, a box you run, your company's cluster,
+or ClickHouse Cloud. memhouse runs no service of its own — there is no memhouse
+cloud to sign up for and nothing is proxied through anyone — so the account is
+yours and the data is wherever you decided to put it. Then you can search every
+past session, see what it cost, resume the conversation that solved this before,
+and let an agent query its own history.
 
 And every row says where it came from, in a way no client can fake: `user_id` is
 stamped **by the server** (`MATERIALIZED currentUser()`, async inserts pinned off
@@ -72,19 +75,26 @@ container engine, install one of the two.
 memhouse onboard | install | setup | discover | doctor | uninstall | reset
 memhouse ship [--full|--loop N] | search <terms> | stats | status
 memhouse resume <session-id>               print the command that reopens a session
-memhouse update [--check]                  upgrade, restart daemons, check the schema
+memhouse update [--check] [--channel TAG]  upgrade along the channel this install follows,
+                                           restart daemons, check the schema
 memhouse start | stop                      dashboard + shipper as daemons
 memhouse service install | uninstall       survive a reboot
 memhouse deploy --local | --down           stand up (or remove) a local house
 memhouse invite <name>                     mint a member + house, hand them one env file
+memhouse members [--db X]                  who is in a house, and what each can reach
+memhouse whoami [--admin]                  which credential is in play, and what it may do
+memhouse rooms                             what your rooms are actually called
+memhouse share <user> [--only …|--revoke|--list]
+                                           let a housemate read yours, in whole or in part
+memhouse sessions-query                    print the session rollup SQL
 memhouse passwd                            rotate this member's password
 memhouse migrate | migrate-rooms [--dry-run] [--yes]
                                            run whatever this house still needs
 memhouse relocate --to <url>               copy this house to a new ClickHouse, then repoint
 memhouse nightly [--out DIR]               build an installable tarball from this checkout
-memhouse plugins install claude            9 skills — ask, hello, invite, search,
-                                           sessions, share, sql, status, users — into
-                                           every Claude Code config dir found
+memhouse plugins install claude            5 skills — house, recall, sql, access,
+                                           admin — into every Claude Code config
+                                           dir found
 memhouse prompt                            memory snippet for an agent's system prompt
 memhouse prompt --install                  an install prompt, rendered for this machine
 ```
@@ -107,6 +117,50 @@ Config resolves: flags → `MEMHOUSE_*` env → `$MEMHOUSE_HOME/env` (default
 `~/.memhouse/env`). There is no house-shaped default: with nothing configured, the
 commands that read or write memory refuse and say so rather than guessing
 `localhost:8123`, which on a lot of machines is a real house belonging to someone else.
+
+## Which sessions ship
+
+Everything on the machine, by default: every adapter, from wherever that editor keeps its
+sessions. `memhouse discover` prints what each adapter is watching and the variable that
+moves it:
+
+```
+Watched directories (override with the variable shown, in the env file):
+    claude       ~/.claude, ~/.claude-playbooks/kommander, …   [MEMHOUSE_CLAUDE_ROOTS]
+    codex        ~/.codex                                      [MEMHOUSE_CODEX_ROOTS]
+    gemini-cli   ~/.gemini                                     [MEMHOUSE_GEMINI_CLI_ROOTS]
+    cursor       ~/Library/Application Support/Cursor/User, …  [built-in]
+```
+
+Two kinds of line in the env file narrow it, or `--editors` / `--claude-roots` at install:
+
+```
+MEMHOUSE_EDITORS='claude'
+MEMHOUSE_CLAUDE_ROOTS='~/.claude-playbooks/kommander-chaos'
+```
+
+`MEMHOUSE_EDITORS` names the adapters to run. `MEMHOUSE_<EDITOR>_ROOTS` replaces one
+adapter's location: the adapter's name upper-cased, dashes to underscores. Claude is the
+one adapter with many roots (every Claude Code config directory), so its list may hold
+several; every other adapter has one store, so one path. Adapters marked `[built-in]`
+resolve a platform app-data directory and cannot be moved yet.
+
+An adapter name or a directory that does not exist is refused and reported against that
+adapter, never shipped from the default instead: a typo that quietly shipped nothing would
+look like a working install with an empty house, and one that quietly shipped the wrong
+store would be worse.
+
+## Channels
+
+`memhouse update` follows the npm dist-tag the install came from, not `latest` by
+reflex. A house published under another tag — `npm publish --tag team`, so one team can
+run a newer layout without every other house being dragged along — installs with
+`npm install -g memhouse@team`, and `update` keeps it there. The channel is inferred from
+the installed version; pin it with `MEMHOUSE_CHANNEL='team'` in the env file or
+`memhouse update --channel team`, which writes the same line. A tarball or checkout
+build sits on no tag and is never auto-updated; `update --check` says so and names the
+way forward. An invite from a house on a channel carries it, so the invitee follows it
+too.
 
 ## Going back into a session
 
@@ -184,30 +238,43 @@ immediate.
 
 ## How your memory is stored
 
-**A house is a database; its rooms are three shared tables.** `sessions`, `messages`
-and `tool_calls` live in whatever database you point at — your own name by default
-(`polat.messages`), a team's (`team_a.messages`), even `default`. Everyone in the
-house writes into the same tables with their own credential, and every row says where
-it came from: `user_id`, stamped by the server (`MATERIALIZED currentUser()`, with
-async inserts pinned off so the stamp cannot be skipped), and `host`, the machine's
-install fingerprint.
+**A house is a database; its rooms are tables.** `sessions`, `messages` and `tool_calls`
+hold your turns. Every row says where it came from: `user_id`, stamped by the server
+(`MATERIALIZED currentUser()`, with async inserts pinned off so the stamp cannot be
+skipped), and `host`, the machine's install fingerprint. `WHERE user_id = 'alice'` is one
+person; `WHERE host = '…'` is one machine. Neither is forgeable from the client.
 
-`WHERE user_id = 'alice'` is one person. `WHERE host = '…'` is one machine. No filter
-is the whole house — which is exactly what a team dashboard wants.
+**Your rooms are named for you, and one grant covers them.** Every member of a house holds
+`GRANT … ON mem.<name>_* TO <name>`: their own rooms, present and future, and nothing else
+in the database. That is the whole access model, and it is the same on a laptop, a team's
+server, or a kernel:
 
-Sharing is not a feature bolted on top; it IS the house. A team makes a database,
-grants each person `ALL` on it, and their shippers all write into the same rooms:
+| | rooms | the member holds |
+|---|---|---|
+| alone on your laptop | `mem.polat_*` | one grant on `mem.polat_*` |
+| a team on one server | `mem.polat_*`, `mem.alice_*`, … | each their own |
+
+A colleague can read their isolation back with `SHOW GRANTS` in one line, which is the
+property this rests on. There is no row policy to trust and no database-wide grant to
+worry about: `ALL ON mem.*` would cover rooms created later, which is how two people in one
+database once became a leak, so memhouse never issues it — not to a member, not to you.
+
+Standalone is a team of one. `memhouse deploy --local` creates the house with an admin
+credential (`memhouse_root`) and a member named after your OS user, keeps both in the env
+file, and ships as the member. Inviting a colleague later is `memhouse invite <name>`; the
+admin credential is already there.
+
+Reading across everyone is a `UNION ALL` over the rooms you hold:
 
 ```sql
-CREATE DATABASE team_a;
-CREATE USER alice IDENTIFIED BY '…';
-GRANT ALL ON team_a.* TO alice;    -- repeat per housemate
+SELECT user_id, count() FROM mem.polat_messages GROUP BY user_id
+UNION ALL
+SELECT user_id, count() FROM mem.alice_messages GROUP BY user_id
 ```
 
-`ALL` on your own house reaches nothing outside it — the database is the boundary,
-which is also why joining a ClickHouse someone else runs (a kernel's, a team's) needs
-no negotiation beyond a database and a credential. Housemates are collaborators;
-groups that should not see each other get separate houses.
+An operator with an admin credential reads every room; a member reads the ones they own
+plus whatever was shared with them, and naming a room they do not hold is an error rather
+than a silent omission.
 
 ### The house never destroys what it cannot rebuild
 
@@ -245,7 +312,7 @@ count its messages twice.
 The shipper verifies the sorting keys before it writes and refuses if they are wrong, so
 an old house cannot be corrupted by a new shipper. `memhouse migrate-rooms` rebuilds it:
 copy, atomic swap, and the old room kept as `<room>_pre_epoch` for you to drop. The house
-records the move in `house_events`, and `memhouse doctor` reads it back.
+records the move in `events`, and `memhouse doctor` reads it back.
 
 ## Upgrading
 
@@ -341,10 +408,9 @@ and are not part of `npm test`.
 | `agency/` | the earlier agentlytics-agency wrap — prior art, not how memhouse works |
 | `TERMINOLOGY.md` | the constellation terminology canon |
 
-Deeper reading: `memhouse/DESIGN.md` (the four bets),
-`memhouse/per-member/INSTALL.md` (the three install paths and every refusal),
-`memhouse/per-member/SCHEMA.md`, `memhouse/delivery/kernel-install.md`,
-`memhouse/COMPETITION.md`.
+Deeper reading: `memhouse/DESIGN.md` (the bets, and why the room layout has moved three
+times), `memhouse/house/HOUSE.md` (the layout and the schema), `SECURITY.md` (what
+holds, and what does not), `memhouse/delivery/kernel-install.md`, `memhouse/COMPETITION.md`.
 
 Deferred designs (captured, not yet built): `docs/design/host-repoint-reconciliation.md`
 — what should happen when the shipper is repointed at a new, empty host (house identity,

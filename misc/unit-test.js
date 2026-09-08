@@ -32,11 +32,13 @@ function test(name, fn) {
 }
 
 // ── the house's rooms ───────────────────────────────────────────────────────────
-test('rooms are plain shared tables — the database is the boundary', () => {
+test('rooms are named for the member — one layout, one grant pattern', () => {
   const r = rooms.roomNames('alice');
-  assert.strictEqual(r.sessions_raw, 'sessions');
-  assert.strictEqual(r.messages_raw, 'messages');
-  assert.strictEqual(r.tool_calls_raw, 'tool_calls');
+  assert.strictEqual(r.sessions_raw, 'alice_sessions');
+  assert.strictEqual(r.messages_raw, 'alice_messages');
+  assert.strictEqual(r.tool_calls_raw, 'alice_tool_calls');
+  assert.strictEqual(r.pattern, 'alice_*', 'the grant is scoped to this pattern and nothing else');
+  assert.throws(() => rooms.roomNames(''), /member is required/, 'a room without a member is not a thing');
   // The identity still travels with the names: writers BIND it (the shipper's inserts and
   // its epoch bookkeeping), and readers scope by it. Losing it here silently un-scopes
   // every consumer.
@@ -67,14 +69,14 @@ test('the transcript rooms read as the CURRENT parse, and only the raw name is t
   assert.match(r.tool_calls, /SELECT \*, user_id/);
   // sessions is one metadata row per session by construction; there is nothing to filter,
   // and its epoch column is for people only.
-  assert.strictEqual(r.sessions, 'sessions');
+  assert.strictEqual(r.sessions, 'alice_sessions');
 });
 
 test('the session rollup is a QUERY, not a fourth object', () => {
   const r = rooms.roomNames('alice');
   // SQL text, substituted into the same `FROM ... AS c` position a view name would hold.
   assert.ok(r.sessions_v.startsWith('('), 'the rollup must be a subquery');
-  assert.ok(r.sessions_v.includes('FROM sessions AS s'), r.sessions_v);
+  assert.ok(r.sessions_v.includes('FROM alice_sessions AS s'), r.sessions_v);
   assert.ok(r.sessions_v.includes('AS m ON m.session_id'), 'the LEFT JOIN must survive');
   // Shared tables make this the load-bearing line: two housemates' rows must never merge,
   // even on a colliding session_id.
@@ -90,12 +92,12 @@ test('the rollup is self-contained — it needs nothing from the caller', () => 
   const v = rooms.roomNames('alice').sessions_v;
   assert.match(v, /SETTINGS join_use_nulls = 1/, 'rollup must carry join_use_nulls itself');
   // Alias BEFORE final: `FROM t FINAL AS s` is a syntax error, `FROM t AS s FINAL` is not.
-  assert.match(v, /FROM sessions AS s FINAL/, 'sessions must be read FINAL');
+  assert.match(v, /FROM alice_sessions AS s FINAL/, 'sessions must be read FINAL');
   // The messages side carries its FINAL INSIDE the current-parse subquery instead —
   // `FROM (SELECT …) AS m FINAL` does not parse, and appending FINAL to whatever the room
   // resolved to is exactly the trap the raw/filtered split exists to remove.
   assert.match(v, /LEFT JOIN \(\s*\n\s*SELECT \*/, 'messages must join as the current-parse subquery');
-  assert.match(v, /FROM messages FINAL/, 'the current-parse subquery must read FINAL');
+  assert.match(v, /FROM alice_messages FINAL/, 'the current-parse subquery must read FINAL');
   // READ_SETTINGS still applies to DIRECT room reads, which carry no FINAL of their own.
   assert.strictEqual(rooms.READ_SETTINGS.join_use_nulls, 1);
   assert.strictEqual(rooms.READ_SETTINGS.final, 1);
@@ -1007,6 +1009,156 @@ test('policy names are predictable, so revoke finds every room', () => {
   assert.deepStrictEqual(names,
     ['mh_share_alice_sessions', 'mh_share_alice_messages', 'mh_share_alice_tool_calls']);
   assert.strictEqual(new Set(names).size, 3);
+});
+
+// ── one layout: every member's rooms carry their name, and one grant covers them ────────
+// The product rests on a colleague being able to read their isolation back with SHOW
+// GRANTS. That works only if there is exactly one shape of grant, and only if every
+// table name in the codebase comes from the same function — so both are asserted here.
+test('physicalRoom refuses to name a room without a member', () => {
+  assert.throws(() => rooms.physicalRoom('messages'), /a member/, 'there is no unprefixed room any more');
+  assert.throws(() => rooms.physicalRoom('messages', ''), /a member/);
+  assert.strictEqual(rooms.physicalRoom('meta', 'bob'), 'bob_meta');
+});
+
+test('the epoch subquery reads the member\'s room, and tool_calls takes its epoch from MESSAGES', () => {
+  const r = rooms.roomNames('alice');
+  const m = r.messages.replace(/\s+/g, ' ');
+  const t = r.tool_calls.replace(/\s+/g, ' ');
+  assert.ok(/FROM alice_messages FINAL/.test(m), 'the outer read must be the member\'s room');
+  assert.ok(!/FROM messages\b/.test(m), 'a bare `messages` would be someone else\'s layout');
+  assert.ok(/FROM alice_tool_calls FINAL/.test(t));
+  // A parse producing messages but no tool calls writes nothing into tool_calls at the new
+  // epoch; asked for its own max(epoch) that room would answer with the superseded one.
+  assert.ok(/FROM alice_messages WHERE origin/.test(t), 'epoch source must be the member\'s messages room');
+});
+
+const provision = require('../memhouse/provision');
+test('the provisioning plan is ONE grant on the member\'s pattern, and never the database', () => {
+  const steps = provision.plan({ db: 'mem', member: 'alice', password: 'pw' });
+  const sql = steps.map((s) => s.sql);
+  const grants = sql.filter((q) => q.startsWith('GRANT') && / ON mem\./.test(q));
+  assert.strictEqual(grants.length, 1, `exactly one grant inside the house, got: ${grants.join(' | ')}`);
+  assert.match(grants[0], /ON mem\.alice_\* TO alice WITH GRANT OPTION$/, 'scoped to alice_*, with grant option so she can share it');
+  assert.ok(!sql.some((q) => /ON mem\.\* /.test(q)), 'ALL ON db.* is dynamic — it covers rooms created later — and is what made two members in one database a leak');
+  // What the grant must carry, each for a reason the comments in provision.js give.
+  for (const priv of ['CREATE TABLE', 'DROP TABLE', 'CREATE ROW POLICY']) {
+    assert.ok(grants[0].includes(priv), `${priv} — without it the member cannot build/rebuild their rooms or scope a share`);
+  }
+  // The pin is required, not optional: an async insert stores user_id as the empty string.
+  const pin = steps.find((s) => /ADD SETTING/.test(s.sql));
+  assert.ok(pin && !pin.optional, 'async_insert pin must be a required step');
+  // A member that already exists: the plan omits CREATE USER and keeps everything else.
+  const again = provision.plan({ db: 'mem', member: 'alice' }).map((s) => s.sql);
+  assert.ok(!again.some((q) => q.startsWith('CREATE USER')));
+  assert.ok(again.some((q) => q.startsWith('GRANT') && /alice_\*/.test(q)));
+});
+
+test('the printed plan and the executed plan are the same statements', () => {
+  // --print-sql used to be a second description of provisioning and drifted from the first
+  // — it printed the leaking shape while the live path refused it. Now it renders the same
+  // array the live path executes, so this asserts the rendering carries every statement.
+  const steps = provision.plan({ db: 'mem', member: 'alice', password: "p'w" });
+  const text = provision.render(steps, { db: 'mem', member: 'alice' });
+  for (const s of steps) assert.ok(text.includes(`${s.sql};`), `rendered SQL must carry: ${s.sql.slice(0, 50)}`);
+  assert.ok(text.includes("IDENTIFIED BY 'p\\'w'"), 'the password must be escaped for SQL');
+  assert.ok(!/ON mem\.\* /.test(text));
+  assert.ok(/Do NOT widen it to/.test(text), 'the rendered plan must warn the DBA off the database-wide grant');
+});
+
+test('a name that would break the pattern is refused before it reaches SQL', () => {
+  assert.throws(() => provision.plan({ db: 'mem', member: 'al ice', password: 'x' }));
+  assert.throws(() => provision.plan({ db: 'system', member: 'alice', password: 'x' }), /system|reserved/i);
+});
+
+// ── the text-index grammar changed between 25.8 and 26.x, and neither side parses the other ──
+test('the legacy dialect rewrites exactly the two index clauses and nothing else', () => {
+  const tpl = fs.readFileSync(path.join(__dirname, '..', 'memhouse', 'house', 'schema.sql.tpl'), 'utf8');
+  const modern = rooms.createStatement(tpl, 'messages', 'alice_messages');
+  const legacy = rooms.legacyTextIndexDialect(modern);
+  assert.ok(modern.includes("tokenizer = ngrams(3)") && modern.includes('tokenizer = splitByNonAlpha'), 'template carries the current grammar');
+  assert.ok(legacy.includes("tokenizer = 'ngram', ngram_size = 3"), 'ngram clause rewritten');
+  assert.ok(legacy.includes("tokenizer = 'default'"), 'word clause rewritten');
+  assert.ok(!/ngrams\(|splitByNonAlpha/.test(legacy), 'no modern grammar left');
+  // Everything else byte-identical: same columns, same engine, same key.
+  const strip = (q) => q.replace(/^\s*INDEX .*$/gm, 'INDEX …');
+  assert.strictEqual(strip(legacy), strip(modern));
+  assert.strictEqual(rooms.legacyTextIndexDialect(rooms.createStatement(tpl, 'sessions', 'alice_sessions')), rooms.createStatement(tpl, 'sessions', 'alice_sessions'), 'a room without text indexes is untouched');
+});
+
+test('only a grammar refusal triggers the legacy dialect', () => {
+  assert.ok(rooms.isTextIndexGrammarRefusal('Code: 80. DB::Exception: Expected literal. (INCORRECT_QUERY)'));
+  assert.ok(rooms.isTextIndexGrammarRefusal("Text index argument 'tokenizer' supports only 'default', 'ngram'"));
+  assert.ok(!rooms.isTextIndexGrammarRefusal('Not enough privileges. To execute this query'), 'a privilege refusal must stay a privilege refusal');
+  assert.ok(!rooms.isTextIndexGrammarRefusal('Table already exists'));
+});
+
+test('the grammar is chosen by version: 25.9 and below legacy, 25.10 and up current', () => {
+  for (const [v, want] of [['25.8.28.1', 'legacy'], ['25.9.7.56', 'legacy'], ['24.3.1', 'legacy'], ['25.10.7.6', 'modern'], ['25.11.9.34', 'modern'], ['26.8.2.7', 'modern'], ['', 'modern'], ['nonsense', 'modern']]) {
+    assert.strictEqual(rooms.textIndexDialectFor(v), want, `version '${v}'`);
+  }
+});
+
+// ── scope: which sessions ship ─────────────────────────────────────────────────────────
+const scope = require('../editors/scope');
+test('an empty scope is everything; a named scope is exactly those, in order; a typo throws', () => {
+  const eds = [{ name: 'claude' }, { name: 'codex' }, { name: 'cursor' }];
+  assert.deepStrictEqual(scope.selectEditors(eds, ''), eds);
+  assert.deepStrictEqual(scope.selectEditors(eds, ' codex , claude ').map((e) => e.name), ['codex', 'claude']);
+  assert.throws(() => scope.selectEditors(eds, 'claude,cluade'), /cluade.*Known: claude, codex, cursor/s);
+});
+
+test('claude roots: explicit list replaces discovery and every path must be a real config dir', () => {
+  const fsx = { exists: (p) => p.endsWith('/one/history.jsonl'), isDir: (p) => ['/one', '/two', '/two/projects', '/plain'].includes(p) };
+  assert.deepStrictEqual(scope.selectClaudeRoots(['/a', '/b'], '', fsx), ['/a', '/b']);
+  assert.deepStrictEqual(scope.selectClaudeRoots(['/a', '/b'], '/one,/two', fsx), ['/one', '/two']);
+  assert.throws(() => scope.selectClaudeRoots(['/a'], '/plain', fsx), /not a Claude Code config dir/);
+  assert.throws(() => scope.selectClaudeRoots(['/a'], '/missing', fsx), /not a directory/);
+  assert.ok(scope.expandHome('~/.claude-playbooks/x').startsWith(require('os').homedir()));
+});
+
+test('the scope reads back as one line', () => {
+  assert.strictEqual(scope.describe({}), 'everything this machine has');
+  assert.strictEqual(scope.describe({ MEMHOUSE_EDITORS: 'claude', MEMHOUSE_CLAUDE_ROOTS: '~/.claude-playbooks/kommander-chaos' }), 'editors: claude; claude roots: ~/.claude-playbooks/kommander-chaos');
+});
+
+test('every adapter has one override variable, named from its adapter name', () => {
+  assert.strictEqual(scope.keyFor('codex'), 'MEMHOUSE_CODEX_ROOTS');
+  assert.strictEqual(scope.keyFor('gemini-cli'), 'MEMHOUSE_GEMINI_CLI_ROOTS');
+  assert.strictEqual(scope.keyFor('claude'), 'MEMHOUSE_CLAUDE_ROOTS');
+  const isDir = (p) => p === '/real';
+  assert.deepStrictEqual(scope.selectRoot('/dflt', '', { isDir }), { root: '/dflt', error: null });
+  assert.deepStrictEqual(scope.selectRoot('/dflt', '/real', { isDir }), { root: '/real', error: null });
+  assert.match(scope.selectRoot('/dflt', '/nope', { isDir }).error, /not a directory/);
+  assert.match(scope.selectRoot('/dflt', '/real,/real', { isDir }).error, /one directory, 2 given/);
+  // A refused override must not fall back to the default — that would ship the wrong store.
+  assert.strictEqual(scope.selectRoot('/dflt', '/nope', { isDir }).root, null);
+});
+
+// ── update follows the channel it came from ─────────────────────────────────────────────
+const channel = require('../memhouse/channel');
+test('a build published under another tag is never downgraded to latest', () => {
+  const tags = { latest: '0.17.0', team: '0.18.0' };
+  const p = channel.pickChannel({ version: '0.18.0', tags });
+  assert.strictEqual(p.channel, 'team'); assert.strictEqual(p.target, '0.18.0');
+  const q = channel.pickChannel({ version: '0.17.0', tags });
+  assert.strictEqual(q.channel, 'latest'); assert.strictEqual(q.target, '0.17.0');
+});
+test('a pinned channel wins, and says so when the tag does not exist', () => {
+  const tags = { latest: '0.17.0', team: '0.18.0' };
+  assert.strictEqual(channel.pickChannel({ version: '0.17.0', pinned: 'team', tags }).channel, 'team');
+  const p = channel.pickChannel({ version: '0.18.0', pinned: 'nope', tags });
+  assert.strictEqual(p.channel, 'nope'); assert.strictEqual(p.target, null); assert.match(p.reason, /not a tag/);
+});
+test('a tarball or checkout build gets no automatic update', () => {
+  const p = channel.pickChannel({ version: '0.18.0-nightly.20260906T0307', tags: { latest: '0.17.0' } });
+  assert.strictEqual(p.channel, null); assert.match(p.reason, /tarball|checkout/);
+  const q = channel.pickChannel({ version: '0.18.0-alpha.1', tags: { latest: '0.17.0', team: '0.18.0-alpha.1' } });
+  assert.strictEqual(q.channel, 'team', 'a pre-release that IS a published tag follows it');
+});
+test('no registry answer: follow latest without a target, never invent one', () => {
+  const p = channel.pickChannel({ version: '0.17.0', tags: null });
+  assert.strictEqual(p.channel, 'latest'); assert.strictEqual(p.target, null); assert.match(p.reason, /did not answer/);
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);

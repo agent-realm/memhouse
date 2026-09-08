@@ -1,5 +1,6 @@
 const { openReadOnly, textOf, bytesOf } = require('./sqlite');
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 const { getAppDataPath } = require('./base');
@@ -10,6 +11,7 @@ const CURSOR_CHATS_DIR = path.join(HOME, '.cursor', 'chats');
 const CURSOR_USER_DIR = path.join(getAppDataPath('Cursor'), 'User');
 const WORKSPACE_STORAGE_DIR = path.join(CURSOR_USER_DIR, 'workspaceStorage');
 const GLOBAL_STORAGE_DB = path.join(CURSOR_USER_DIR, 'globalStorage', 'state.vscdb');
+scope.fixed('cursor', [CURSOR_USER_DIR, CURSOR_CHATS_DIR]);
 
 // ============================================================
 // Source 1: ~/.cursor/chats/<hash>/<chatId>/store.db (agent KV)

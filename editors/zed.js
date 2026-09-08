@@ -1,4 +1,5 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
@@ -21,7 +22,7 @@ function getZedDataPath() {
   }
 }
 
-const THREADS_DB = path.join(getZedDataPath(), 'threads', 'threads.db');
+const THREADS_DB = path.join(scope.root('zed', getZedDataPath()), 'threads', 'threads.db');
 
 // ============================================================
 // Decompress zstd blob via CLI (with cross-platform support)

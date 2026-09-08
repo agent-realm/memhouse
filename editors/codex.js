@@ -1,4 +1,5 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
@@ -33,11 +34,13 @@ function getMessages(chat) {
   return parseSessionMessages(filePath);
 }
 
-function getCodexHome() {
+function getCodexHomeDefault() {
   return process.env.CODEX_HOME && process.env.CODEX_HOME.trim()
     ? path.resolve(process.env.CODEX_HOME.trim())
     : DEFAULT_CODEX_HOME;
 }
+// CODEX_HOME is Codex's own variable; MEMHOUSE_CODEX_ROOTS is memhouse's, and wins.
+function getCodexHome() { return scope.root('codex', getCodexHomeDefault()); }
 
 function getSessionsDir() {
   return path.join(getCodexHome(), SESSION_SUBDIR);

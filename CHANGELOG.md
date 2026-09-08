@@ -4,6 +4,199 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`memhouse update` follows the channel the install came from.** It used to install
+  `memhouse@latest` unconditionally, which would have downgraded a house running a build
+  published under another dist-tag, and replaced a tarball install with whatever latest
+  was. Now the channel is pinned (`MEMHOUSE_CHANNEL`, or `--channel`, which writes it) or
+  inferred from the installed version's tag; a version on no tag gets no automatic update
+  and is told why. An invite from a house on a channel carries it into the invitee's env
+  file, and the invitation guide says `npm install -g memhouse@<channel>`.
+
+- **`invite` writes `MEMHOUSE-INVITATION.md` beside the credential.** The invitee gets two
+  files: the one-time `.env`, and a guide with nothing secret in it — install, join,
+  verify, what they own and who can see it, things to try, which sessions ship, and what
+  the two refusals they might meet mean. Rendered rather than linked because it names
+  their file, this house, and (until the build is on npm) the tarball to install. The
+  matrix asserts the guide exists, names their rooms, carries no password, and has no
+  unrendered placeholder.
+
+- **The bookkeeping rooms are `<member>_meta` and `<member>_events`.** They were
+  `<member>_house_meta` / `<member>_house_events`, a name from when the house was the unit
+  of ownership. Every row in them is about one member — their schema version, their
+  machines, their last ship, their shares — so the old prefix named the wrong unit. A
+  house from before the one-layout still holds `house_meta` / `house_events`, and the
+  shipper's legacy guard names that rename alongside the other three.
+
+- **Choose which sessions ship.** `MEMHOUSE_EDITORS` names the adapters to run, and
+  `MEMHOUSE_<EDITOR>_ROOTS` moves one adapter's location — `MEMHOUSE_CLAUDE_ROOTS` for
+  the Claude Code config directories, `MEMHOUSE_CODEX_ROOTS` for Codex's home, one per
+  adapter, named from the adapter. A machine with several Claude Code instances can ship
+  one of them into a team house and leave the rest alone. `memhouse discover` prints what
+  every adapter is watching and the variable that changes it. A name or directory that
+  does not exist is refused against that adapter, never shipped from the default instead.
+
+- **One layout.** Every member's rooms are named for them — `mem.polat_messages`,
+  `mem.alice_messages` — and one grant covers them: `GRANT … ON mem.<name>_* TO <name>
+  WITH GRANT OPTION`. A wildcard on the member's own name, verified on 25.11 and 26.7: it
+  lets the member create and rebuild their own rooms and share them, and reaches nothing
+  else — not a housemate's rooms to read, list, drop or re-grant. Nobody is granted the
+  database. A house with one member is a house of one, not a different kind of house.
+
+  This replaces the two layouts of the previous unreleased work (a house per member with
+  `ALL ON db.*`, and a prefixed variant beside it) together with everything that existed
+  to keep them apart: the one-owner invariant, the fencing step, `--shared-db`,
+  `--table-prefix`, `MEMHOUSE_TABLE_PREFIX`, the operator creating rooms at invite, and a
+  layout branch in eight code sites and nine documents. The database name is `mem` unless
+  somebody has a reason; `--db` remains for that reason.
+
+- **One provisioning plan.** `memhouse/provision.js` is the only description of what a
+  member is granted. The live path executes it, `--print-sql` renders it, the unit tests
+  assert on it. Three copies of this used to exist and had drifted — the printed one
+  handed a non-admin the configuration the live path refused.
+
+- **Standalone is a team of one.** `deploy --local` creates the container with an admin
+  credential (`memhouse_root`) and a member named after your OS user, keeps both in
+  `~/.memhouse/env`, and ships as the member. `invite`, `members` and `whoami --admin`
+  use the admin credential from the file, so a house you deployed needs no `--admin-*`
+  flags. A volume from before this release was initialised with the member as superuser
+  and is reused as it is.
+
+- **Houses from before this layout are refused, loudly.** A shipper that finds plain rooms
+  (`messages`, not `<name>_messages`) stops and prints the five `RENAME TABLE` statements
+  that move them across — instant, nothing copied — rather than creating an empty second
+  set beside them and hiding every past session. Conversion of an existing house is a
+  rename plus one grant swap; `doctor --fix` for that is the next change, not this one.
+
+- `memhouse members` reads wildcard grants on servers without the `is_wildcard` column
+  (25.11, the default local tag).
+
+- **Bringing a housemate into a house you already own now works, and moves nothing.** A
+  member alone in their own database holds `ALL ON polat.*`. That grant is **dynamic** —
+  it covers rooms created later — so a housemate's rooms would be readable *and
+  droppable* by the owner the moment they existed (both measured). `invite` used to
+  refuse and point at a migration command that did not exist.
+
+  It now **fences** the sitting owner instead: a `REVOKE` plus one `GRANT` per room they
+  already have. Their rooms keep their names, their data does not move, there is no
+  rename, no copy, no re-ship and no downtime — and an admin credential still reads the
+  whole house, which is what an operator has.
+
+  The order is REVOKE-then-GRANT, which is the opposite of what looks safe and the only
+  one that works: `REVOKE ALL ON db.*` covers every table beneath it, so per-room grants
+  issued first are wiped by it. Doing it the intuitive way locked a member out of their
+  own memory — caught on a real server, now a test.
+
+- Reading across members is `UNION ALL` over the rooms you hold, not a `merge()` pattern.
+  The anchored pattern the README carried (`'^.*_messages$'`) silently dropped the house
+  owner's own rooms, which are unprefixed — the one person most likely to run a team
+  query saw everyone's memory except their own.
+
+- **`share --only project=x` granted every project, then failed to scope.** The worst
+  defect in this branch, and it was reachable by any member of a shared house. `share`
+  granted `SELECT` on all rooms first and built the row-policy filters second; the
+  prefixed layout never granted the row-policy rights (`ALL ON db.*` carries them, an
+  explicit per-table list does not), so the scoping step could not succeed at all. A
+  member asking to share ONE project handed over ALL of them, and `share --list` then
+  reported "nobody has been granted a read" — the bookkeeping write happens after the step
+  that failed.
+
+  Now the filters are built BEFORE anything is granted, a failure drops what it built and
+  grants nothing, and members hold `CREATE/ALTER/DROP/SHOW ROW POLICY` on their own rooms.
+  The matrix asserts both halves — that a scoped share exposes only the named project, and
+  that a scoping failure leaves the grantee with exactly what they had before.
+
+  Found in a drill: an agent asked to open one project to a colleague, which no matrix
+  did because every matrix shares whole rooms.
+
+- **`invite --print-sql` printed the configuration the live path refuses.** It ignored
+  `--shared-db` and `--table-prefix` entirely and emitted unprefixed shared rooms plus
+  `GRANT ALL ON db.* TO <member> WITH GRANT OPTION` — the shape that lets any member read
+  a housemate's rows and grant them to an outsider. The help routes non-admins to exactly
+  this path ("Not an admin? `--print-sql` gives the statements to hand to whoever is"), so
+  the one person who could not check the result was handed the leak, confidently, at exit
+  0. It now honours the prefix, emits per-room grants and no database-wide grant, and the
+  matrix RUNS the printed SQL and asserts it isolates identically to the live path.
+
+  Found by a drill — an agent given an admin credential, a database, and two colleagues to
+  set up, which is the only instrument that reads the output instead of the code.
+
+- **`memhouse members`** — who is in a house, and what each of them reaches. Before shared
+  houses a database had exactly one member and the question did not exist; this layout
+  creates it, and the operator had no supported way to answer it. Warns when one account
+  holds the whole database while others hold rooms in it — memhouse cannot create that
+  shape, but a hand-written `GRANT` can.
+
+- Help fixes the same drill turned up: the `--shared-db` block had been spliced through the
+  middle of the sentence "write the env **file their install needs**", and four lines
+  describing `install` were hanging under `passwd`.
+
+- `invite` no longer prints "5 room(s) already exist and are not yours to create" while
+  verifying a member it provisioned seconds earlier. It reads as a name collision on a
+  database that was empty a moment ago, and sent one operator to `system.tables` to find
+  out what had gone wrong. Nothing had.
+
+- **Two members can no longer share one database with a grant each — it leaked.** Until
+  now `invite bob --db alices-house --adopt` put both in one database with `ALL ON db.*`
+  apiece, and the README taught it as the way to run a team. Measured on a real server:
+  alice runs `GRANT SELECT ON team.* TO carol` and carol reads **bob's** messages. No
+  admin involved, nothing written to any log, bob never told.
+
+  `invite` now enforces one invariant: **a database is one member's house, or it holds
+  per-member rooms — never both, and never two database-wide owners.** `--adopt` does not
+  override it; that flag now means what it was needed for, taking over your *own* house
+  with a new credential. Inviting a second member into an occupied database points at
+  `--shared-db` instead.
+
+  A team dashboard does not need the removed shape. `merge(mem, '^.*_messages$')` reads
+  every room in one query and is filtered by grant: the operator sees all of them, a
+  member sees only their own from the identical query, and a member who joins tomorrow
+  stays invisible until someone grants their room. Aggregate visibility became opt-in.
+
+- **`memhouse invite --shared-db <db>` — one database, a room set per member.** Until now
+  a member meant a database: `alice.messages`. On a ClickHouse where that is not wanted,
+  `--shared-db mem` puts everyone in one database under their own names —
+  `mem.alice_messages`, `mem.bob_messages` — and grants each member only their own three
+  rooms, one statement per table because ClickHouse rejects `ON db.a, db.b` outright
+  ("Syntax error … Expected access type").
+
+  It exists for a reason that is social rather than technical: **a grant is something a
+  colleague can verify and a row policy is not.** Alice runs `SHOW GRANTS FOR alice`, sees
+  her three tables, and `SHOW TABLES FROM mem` does not even list the rooms she was not
+  granted — measured, she cannot read, drop, or enumerate a housemate's rooms, and cannot
+  create tables beside them. Nothing has to be taken on trust.
+
+  The **operator** creates the rooms, during `invite`, while an admin credential is in
+  hand. If the member created them she would need `CREATE TABLE` on the whole database —
+  enough to add tables beside everyone else's, which is the blast radius this layout
+  removes. `CREATE TABLE IF NOT EXISTS` is checked against the grant *before* existence,
+  so `ensure-schema` skips what it may not do and continues, which it already knew how to.
+
+  Members hold `WITH GRANT OPTION` on their own rooms and nothing else, so `memhouse share`
+  still works without an operator and still cannot reach a housemate's rows. Sharing,
+  revoking and the `--only` row policies all target the member's own rooms.
+
+  `MEMHOUSE_TABLE_PREFIX` carries it, written by `invite` into the env file, so the
+  invitee picks nothing. Empty means the layout memhouse has always had — verified byte
+  for byte against the previous resolution.
+
+- **`memhouse rooms`** — what your rooms are actually called. Boring in your own house
+  (`messages`); the only way to know in a shared one (`mem.alice_messages`). It resolves
+  through the same function the shipper writes with, so it cannot drift from the server.
+
+- **The `/mem:*` skills work in a shared house.** They write `FROM messages` bare in some
+  fourteen places, which names nothing in a house holding `alice_messages`. Rather than
+  teach fourteen query sites about prefixes, the `q()` helper in `reference/HOUSE.md` —
+  the single connection every skill routes through — now rewrites room names after
+  `FROM`/`JOIN`. A needle like `LIKE '%messages%'` is untouched, and `FROM yigit_messages`
+  is left alone so a shared room still reads.
+
+  Written with `[[:space:]]` classes, not `\b`: **BSD `sed` does not support `\b`**, and
+  the first version matched nothing on macOS. `misc/prefix-skill-recipe.sh` extracts
+  `q()` from the reference and runs it against both layouts — the doc is executable
+  because it is load-bearing.
+
 ## 0.17.0 — 2026-08-25
 
 - **`memhouse share` — partial sharing, by row policy.** A share used to be all or

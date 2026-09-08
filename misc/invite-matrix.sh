@@ -29,6 +29,8 @@ CLI="node $(cd "$(dirname "$0")/.." && pwd)/bin/memhouse.js"
 # rest meaningless.
 unset MEMHOUSE_URL MEMHOUSE_USER MEMHOUSE_PASSWORD MEMHOUSE_DB MEMHOUSE_PORT
 WORK=$(mktemp -d)
+# Never read this machine's real ~/.memhouse — a test once took its database name from it.
+export MEMHOUSE_HOME="$WORK/nohome"; mkdir -p "$MEMHOUSE_HOME"
 trap 'rm -rf "$WORK"' EXIT
 
 pass=0; fail=0
@@ -80,7 +82,7 @@ printf '%s' "$w" | grep -qi "$(printf 'mpw')" \
 # ── --print-sql is the member's way out: offline, no credential ─────────────────────
 sql=$($CLI invite im_target --url "$URL" --allow-local --print-sql 2>&1 || true)
 n=$(printf '%s' "$sql" | grep -cE '^(CREATE|GRANT|ALTER)' || true)
-[ "$n" -ge 10 ] && ok "--print-sql emits the statements ($n)" || bad "--print-sql emitted $n statements" "$sql"
+[ "$n" -ge 6 ] && ok "--print-sql emits the plan ($n statements)" || bad "--print-sql emitted $n statements" "$sql"
 printf '%s' "$sql" | grep -q "MEMHOUSE_PASSWORD=" \
   && ok "--print-sql carries the handoff credential" || bad "--print-sql omitted the handoff lines"
 
@@ -124,21 +126,32 @@ esac
 export MEMHOUSE_HOME="$WORK/seed"; mkdir -p "$MEMHOUSE_HOME"
 $CLI install --url "$URL" --user im_member --password mpw --db im_member \
   --yes --no-ship >/dev/null 2>&1 || true
-q "INSERT INTO im_member.messages (session_id, seq, source, host, ts, role, text, line_hash) VALUES ('s',0,'x','h',now(),'user','hi',1)" >/dev/null 2>&1 || true
-seeded=$(q "SELECT count() FROM im_member.messages" 2>/dev/null || echo 0)
+q "INSERT INTO im_member.im_member_messages (session_id, seq, source, host, ts, role, text, line_hash) VALUES ('s',0,'x','h',now(),'user','hi',1)" >/dev/null 2>&1 || true
+seeded=$(q "SELECT count() FROM im_member.im_member_messages" 2>/dev/null || echo 0)
 export MEMHOUSE_HOME="$WORK/admin"
 if [ "${seeded:-0}" = "0" ]; then
   bad "could not seed an occupied house" "rooms missing or insert refused"
 else
-  out=$(cd "$WORK" && $CLI invite im_occupy --url "$URL" --allow-local --db im_member 2>&1 || true)
+  # ONE layout: a second member in the same database is the ordinary case — they get rooms
+  # named for them and a grant on exactly those. What is refused is re-using a NAME whose
+  # rooms already hold messages (below). The invariant this used to assert — "a database has
+  # one owner or per-member rooms" — is now a tautology: nobody is ever granted the database.
+  out=$(cd "$WORK" && $CLI invite im_occupy --url "$URL" --allow-local --db im_member --member-password opw 2>&1 || true)
   case "$out" in
-    *"already exists and holds"*) ok "an occupied house is refused" ;;
+    *"invite written"*) ok "a second member joins the same house" ;;
+    *) bad "a second member was refused" "$(printf '%s' "$out" | grep '✗' | head -2)" ;;
+  esac
+  r=$(curl -sS -u im_occupy:opw --data-binary "SELECT count() FROM im_member.im_member_messages" "$URL/" 2>&1 | head -1)
+  case "$r" in *ACCESS_DENIED*|*"Not enough privileges"*) ok "  and cannot read the first member's rooms" ;; *) bad "  LEAK: second member reads the first's rooms" "$r" ;; esac
+  out=$(cd "$WORK" && $CLI invite im_member --url "$URL" --allow-local --db im_member 2>&1 || true)
+  case "$out" in
+    *"already exists and holds"*) ok "re-inviting the owner warns the house holds messages" ;;
     *) bad "an occupied house was not refused" "$(printf '%s' "$out" | head -3)" ;;
   esac
-  out=$(cd "$WORK" && $CLI invite im_occupy --url "$URL" --allow-local --db im_member --adopt 2>&1 || true)
+  out=$(cd "$WORK" && $CLI invite im_member --url "$URL" --allow-local --db im_member --adopt 2>&1 || true)
   case "$out" in
-    *"adopting existing house"*) ok "--adopt overrides, loudly" ;;
-    *) bad "--adopt did not override" "$(printf '%s' "$out" | head -3)" ;;
+    *"adopting existing house"*) ok "--adopt takes over one's own house, loudly" ;;
+    *) bad "--adopt did not allow a takeover" "$(printf '%s' "$out" | head -3)" ;;
   esac
 fi
 

@@ -8,13 +8,20 @@ or wrong everywhere.
 
 ## What this is
 
-A **house** is a ClickHouse **database**. Its **rooms** are three shared tables:
-`sessions`, `messages`, `tool_calls`. Everyone granted on the database writes into the
-same tables; the server stamps who. There is no per-user table and no cloud — the
-database *is* the boundary, and a house's grants reach nothing outside it.
+A **house** is a ClickHouse **database** — on the user's machine, their server, or a
+hosted ClickHouse; memhouse runs no service of its own. Its **rooms** are tables —
+`sessions`, `messages`, `tool_calls` — and the server stamps who wrote every row. A
+house's grants reach nothing outside it.
 
-A **member** owns one house. An **administrator** owns the ClickHouse. `memhouse whoami`
-says which you are holding.
+Every member's rooms are named for them — `mem.alice_messages`, `mem.alice_sessions`,
+`mem.alice_tool_calls` — and one grant covers exactly those: `ON mem.alice_*`. Housemates
+keep their own rooms beside yours and cannot read them, list them, or grant them onward;
+you cannot read theirs. `SHOW GRANTS` shows you the one line you hold. **A bare
+`FROM messages` names nothing you have** — the `q()` below prefixes room names with your
+member name for you, and `memhouse rooms` prints what yours are called.
+
+An **operator** owns the ClickHouse itself; an **admin credential** is what proves it.
+`memhouse whoami` says which you are holding.
 
 Rows arrive from a **shipper** that parses local transcripts from 17 editors. It only
 ever inserts. Nothing in memhouse runs an LLM over your data — these skills retrieve
@@ -45,7 +52,8 @@ if [ -z "${MEMHOUSE_URL:-}" ] || [ -z "${MEMHOUSE_USER:-}" ]; then
 fi
 
 q() {  # read-only by construction; every read path should use this
-  curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
+  sed -E "s/([[:space:](]|^)(FROM|JOIN)[[:space:]]+(sessions|messages|tool_calls|meta|events)([[:space:];,)]|\$)/\1\2 ${MEMHOUSE_USER}_\3\4/g" \
+  | curl -sS --fail-with-body --user "$MEMHOUSE_USER:${MEMHOUSE_PASSWORD:-}" \
     --data-binary @- "$MEMHOUSE_URL/?database=${MEMHOUSE_DB:-$MEMHOUSE_USER}&readonly=1"
 }
 q <<'SQL'
@@ -56,11 +64,22 @@ SQL
 `readonly=1` is a ClickHouse-side setting: even a mis-generated `DROP` is refused by the
 server, not by discipline.
 
-**Reading someone else's house.** A share is a read-only `GRANT SELECT` on their
-database. `SHOW DATABASES` lists what your credential may read; anything that is not
-`system`, `information_schema`, `default` or your own `$MEMHOUSE_DB` was shared with you.
-To read it, change `database=` in the URL and leave the table names bare. Say whose house
-an answer came from.
+**The `sed` is what makes every query below work in both layouts** — write room names
+bare and it supplies the prefix when there is one. It rewrites only after `FROM`/`JOIN`,
+so a needle like `LIKE '%messages%'` is untouched, and `FROM yigit_messages` is left
+alone — the room name must follow whitespace, and there is none inside `yigit_messages`.
+With no prefix set it expands to nothing and the query passes through verbatim.
+
+It is spelled with `[[:space:]]` classes rather than `\b` because **BSD `sed` does not
+support `\b`**: on macOS the `\b` form matched nothing and sent the query through
+unprefixed. That fails loudly as `UNKNOWN_TABLE` rather than quietly reading wrong rows,
+which is the right way round — but it fails.
+
+**Reading a housemate's memory.** A share is `GRANT SELECT ON mem.<them>_*` — their
+rooms, not the database. `SHOW TABLES` lists exactly what you may read: your own rooms plus
+any shared with you. Name a housemate's rooms in full (`FROM yigit_messages`); the `q()`
+rewrite leaves an already-prefixed name alone, since applying yours would point at the
+wrong rooms. Say whose memory an answer came from.
 
 ---
 

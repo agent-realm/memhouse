@@ -39,8 +39,8 @@
 //   the old table until the rename; a late-writes pass copies anything newer than the
 //   snapshot, and ReplacingMergeTree makes that idempotent.
 //
-//   EVERYTHING IS RECORDED. One house_events pending row before work, applied/failed
-//   after, per object; schema_version in house_meta only after a migration completes.
+//   EVERYTHING IS RECORDED. One events pending row before work, applied/failed
+//   after, per object; schema_version in meta only after a migration completes.
 
 const fs = require('fs');
 const path = require('path');
@@ -59,7 +59,7 @@ const { ROOM_TYPES, keyProblem, createStatement } = require('./house');
  *   toVersion  the SCHEMA_VERSION a house is at once this has run
  *   detect(q, ctx)        -> what still needs doing (any truthy non-empty value), or
  *                            null/[] when the house is already past this migration.
- *                            THE ROOMS ARE THE TRUTH, never house_meta: a hand-migrated
+ *                            THE ROOMS ARE THE TRUTH, never meta: a hand-migrated
  *                            house has no record, and a restored backup can carry a
  *                            record newer than its tables.
  *   plan(found)           -> lines of human text for the confirm prompt
@@ -81,7 +81,7 @@ function listMigrations() {
   const seen = new Set();
   let lastVersion = 0;
   for (const m of out) {
-    // The id is spliced into SQL (house_events predicates) and into kept-table suffixes.
+    // The id is spliced into SQL (events predicates) and into kept-table suffixes.
     // It is repo-controlled, but "repo-controlled" is one compromised dependency away
     // from "attacker-controlled" — validate like any other identifier.
     if (!/^[a-z0-9][a-z0-9-]*$/.test(m.id)) throw new Error(`migration id '${m.id}' must match [a-z0-9-]+`);
@@ -116,7 +116,7 @@ async function detectPending(q, ctx, { component = null } = {}) {
  * Refuse when another actor's run is unfinished. An `applied` newer than the last
  * `pending` means done; a dangling `pending` means someone is (or was) mid-copy, and two
  * concurrent rebuilds of one room end with one of them renaming the other's work.
- * Best-effort: a house without house_events cannot answer, and that is not a reason to
+ * Best-effort: a house without events cannot answer, and that is not a reason to
  * block the migration that will create it.
  */
 async function unfinishedBy(q, ctx, migrationId) {
@@ -124,7 +124,8 @@ async function unfinishedBy(q, ctx, migrationId) {
     const rows = await q.rows(
       `SELECT argMax(status, event_at) AS status, argMax(actor, event_at) AS actor,
               formatDateTime(max(event_at), '%Y-%m-%d %H:%i') AS at
-       FROM house_events WHERE kind = 'migration' AND id = '${migrationId}'`);
+       FROM ${(ctx.rooms && ctx.rooms.physical && ctx.rooms.physical.events) || 'events'}
+       WHERE kind = 'migration' AND id = '${migrationId}'`);
     const r = rows[0];
     if (r && r.status === 'pending' && r.actor && r.actor !== ctx.member) return r;
   } catch { /* no events table yet */ }

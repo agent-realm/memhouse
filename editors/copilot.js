@@ -1,8 +1,9 @@
 const path = require('path');
+const scope = require('./scope');
 const fs = require('fs');
 const os = require('os');
 
-const COPILOT_DIR = path.join(os.homedir(), '.copilot');
+const COPILOT_DIR = scope.root('copilot-cli', path.join(os.homedir(), '.copilot'));
 const SESSION_STATE_DIR = path.join(COPILOT_DIR, 'session-state');
 
 // ============================================================

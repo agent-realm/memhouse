@@ -43,7 +43,8 @@ already exist.
 - If a command fails, read what it printed before retrying. memhouse's failures name the
   cause and usually name the fix — it is not a generic tool that fails generically.
 - The house's rooms are three PLAIN, SHARED tables — `sessions`, `messages`,
-  `tool_calls` — in the connection's database. No suffixes, no per-member tables.
+  `tool_calls` — in the connection's database, carrying your own prefix if this is a
+  shared house (`alice_messages`). `memhouse rooms` prints what yours are called.
   Direct reads of `messages`/`tool_calls` must filter to the current parse (the shipper
   retains superseded parses under an `epoch` column); the installed skills carry the
   filter, so prefer them for queries.

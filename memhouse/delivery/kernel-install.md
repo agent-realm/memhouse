@@ -80,8 +80,10 @@ user so the stamp cannot be skipped). Her machines are told apart by `host`.
 **A house is shared by its housemates.** The tables are common; `user_id` and `host` say
 who wrote what, and `WHERE user_id = 'alice'` is one person. The boundary is the
 DATABASE: a member of `mem` holds nothing on any other database, so two agencies on one
-kernel ClickHouse cannot read each other. The model is collaborative — housemates trust
-each other with the house; a separate house is the isolation mechanism.
+kernel ClickHouse cannot read each other. WITHIN a house, members hold their own rooms
+and nothing else — housemates are isolated from each other by grant, not by trust, and
+each can verify it with `SHOW GRANTS`. A separate house remains the boundary between
+groups that should not know of each other at all.
 
 Row policies are still the only way to share a *subset* of rows, which is owner-mediated
 and documented in `SHARING.md` — they are not how isolation works.

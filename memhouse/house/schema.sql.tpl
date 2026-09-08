@@ -154,10 +154,10 @@ ORDER BY (session_id, user_id, origin, epoch, idx);
 -- authoritative and always current, and a mirror of them would be a second truth that
 -- goes stale. What is recorded is what those cannot say: intent, sequence, outcome.
 
-CREATE TABLE IF NOT EXISTS house_meta
+CREATE TABLE IF NOT EXISTS meta
 (
     -- House-wide keys only ('schema_version', 'house_created_at'). Anything per-member
-    -- or per-machine belongs in house_events, which is append-only — this room is
+    -- or per-machine belongs in events, which is append-only — this room is
     -- latest-wins, so two members writing one key would overwrite each other.
     key String,
     value String,
@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS house_meta
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (key);
 
-CREATE TABLE IF NOT EXISTS house_events
+CREATE TABLE IF NOT EXISTS events
 (
     event_at DateTime64(3, 'UTC') DEFAULT now64(3),
     -- 'migration' — a room rebuild, one row per transition (pending → applied|failed)

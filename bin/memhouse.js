@@ -24,7 +24,7 @@ const SERVER_JS = path.join(REPO_ROOT, 'memhouse', 'server', 'server.js');
 const DELIVERY = path.join(REPO_ROOT, 'memhouse', 'delivery');
 const PKG = require(path.join(REPO_ROOT, 'package.json'));
 const {
-  roomNames, ROOM_TYPES, MEMBER_PIN, installCommand, keyProblem,
+  roomNames, physicalRoom, ROOM_TYPES, MEMBER_PIN, installCommand, keyProblem,
   SCHEMA_VERSION, MIN_WRITER_SCHEMA, MIGRATIONS, META_TYPES, createStatement,
 } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
@@ -92,8 +92,22 @@ function resolveConfig() {
     // The house defaults to the USER'S OWN NAME (`polat` ships into `polat.messages`),
     // because a house is a database and the natural first house is your own. Any name
     // works — user 'alice' with house 'default' is a supported pairing.
-    db: pick('db', 'MEMHOUSE_DB', pick('user', 'MEMHOUSE_USER', 'memhouse_root')),
+    // ONE house name unless somebody has a reason. The member's rooms are named for them
+    // inside it, so nothing about the database has to be chosen at install time.
+    db: pick('db', 'MEMHOUSE_DB', 'mem'),
     port: pick('port', 'MEMHOUSE_PORT', '4640'),
+    // The admin credential, when this install keeps one beside its member credential — a
+    // `deploy --local` house is administered by the same person who ships into it, so
+    // invite/members need no --admin-* flags. Absent on an invited member's machine, and
+    // nothing here invents one.
+    adminUser: pick('admin-user', 'MEMHOUSE_ADMIN_USER', ''),
+    adminPassword: pick('admin-password', 'MEMHOUSE_ADMIN_PASSWORD', ''),
+    // What this install ships — editors/scope.js. Empty means everything on the machine.
+    editors: pick('editors', 'MEMHOUSE_EDITORS', ''),
+    claudeRoots: pick('claude-roots', 'MEMHOUSE_CLAUDE_ROOTS', ''),
+    // The npm dist-tag `memhouse update` follows. Empty = inferred from the installed
+    // version (memhouse/channel.js). Set for a house on a build that is not `latest`.
+    channel: pick('channel', 'MEMHOUSE_CHANNEL', ''),
     // Did anything actually SAY which house this is, or are the values above just the
     // defaults? The defaults are not neutral — localhost:8123 as memhouse_root is a real
     // house on a lot of machines, usually the pilot's own. An agent whose config went
@@ -138,6 +152,10 @@ function childEnv(cfg, override = {}) {
     ...(cfg._quietDenied ? { MEMHOUSE_QUIET_DENIED: '1' } : {}),
     MEMHOUSE_URL: cfg.url, MEMHOUSE_USER: cfg.user, MEMHOUSE_PASSWORD: cfg.password,
     MEMHOUSE_DB: cfg.db, MEMHOUSE_PORT: String(cfg.port), MEMHOUSE_HOME: HOME_DIR,
+    // Always set, even when empty: a child must ship THIS install's scope, never one
+    // inherited from whatever shell started it.
+    MEMHOUSE_EDITORS: cfg.editors || '', MEMHOUSE_CLAUDE_ROOTS: cfg.claudeRoots || '',
+      // environment would write into another member's rooms.
     ...override,
   };
 }
@@ -154,6 +172,21 @@ function writeEnvFile(cfg) {
     `MEMHOUSE_PASSWORD=${sq(cfg.password)}`,
     `MEMHOUSE_DB=${sq(cfg.db)}`,
     `MEMHOUSE_PORT=${sq(cfg.port)}`,
+    ...(cfg.editors || cfg.claudeRoots ? [
+      '# What this install ships. Empty or absent means everything on this machine.',
+      ...(cfg.editors ? [`MEMHOUSE_EDITORS=${sq(cfg.editors)}`] : []),
+      ...(cfg.claudeRoots ? [`MEMHOUSE_CLAUDE_ROOTS=${sq(cfg.claudeRoots)}`] : []),
+    ] : []),
+    ...(cfg.channel ? [
+      '# The npm channel `memhouse update` follows (a dist-tag). Absent = latest.',
+      `MEMHOUSE_CHANNEL=${sq(cfg.channel)}`,
+    ] : []),
+    ...(cfg.adminUser ? [
+      '# The admin credential for this house — present because this machine administers it',
+      '# (deploy --local, or an operator install). invite/members use it; nothing else does.',
+      `MEMHOUSE_ADMIN_USER=${sq(cfg.adminUser)}`,
+      `MEMHOUSE_ADMIN_PASSWORD=${sq(cfg.adminPassword || '')}`,
+    ] : []),
     '',
   ].join('\n');
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
@@ -253,14 +286,20 @@ function shipperHealth() {
 // Room routing for the CLI's own queries. The shipper and dashboard resolve rooms through
 // @clickhouse/client; the CLI speaks raw HTTP, so it asks the same question over its own
 // transport and builds the names with the same shared function.
-let _rooms = null;
+// Keyed by the connection the answer belongs to, NOT a single slot. One slot was right
+// only while a process talked to one house as one member; `relocate` talks to two, and the
+// second call would have been handed the first house's names — silently, in the one
+// command whose whole job is moving rooms between houses.
+const _rooms = new Map();
 async function roomsFor(cfg) {
-  if (_rooms) return _rooms;
+  const key = JSON.stringify([cfg.url, cfg.user, cfg.db]);
+  if (_rooms.has(key)) return _rooms.get(key);
   const rows = await chRows(cfg, 'SELECT currentUser() AS u');
   const member = rows[0] && rows[0].u;
   if (!member) throw new Error('could not determine currentUser() for room resolution');
-  _rooms = roomNames(member);
-  return _rooms;
+  const r = roomNames(member);
+  _rooms.set(key, r);
+  return r;
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────────
@@ -363,20 +402,21 @@ memhouse ${PKG.version} — agent conversation memory across 17 editors
 
 Setup        onboard              interactive wizard: discover → configure → ship → start
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
-                                  --env FILE installs from an invite file (see: invite)
-             invite <name>        mint a member + house on the server and write the env
-                                  file their install needs (--url --admin-user
-                                  [--admin-password, else prompted] [--db NAME]
-                                  [--out FILE]); local machine untouched. Refuses a house
-                                  that already holds someone's messages — --adopt if
-                                  sharing it is intended. Not an admin? --print-sql gives
-                                  the statements to hand to whoever is
-             passwd               rotate this member's password + rewrite the env file
-                                  (admin-assisted: --admin-user --admin-password)
                                   --print-sql            print the SQL, run it yourself
                                   with admin: --admin-user --admin-password [--member NAME]
                                   builds house + user + rooms + grants, then verifies as
                                   the member. The admin credential is never stored.
+                                  --env FILE installs from an invite file (see: invite)
+             invite <name>        mint a member and write the env file their install needs
+                                  (--url [--db NAME] [--out FILE]; --admin-user and
+                                  --admin-password only if this install keeps no admin
+                                  credential). They get rooms named for them, <db>.<name>_*,
+                                  and one grant on exactly those. Refuses a name whose rooms
+                                  already hold messages; --adopt takes them over (same
+                                  person, new credential). Not an admin? --print-sql prints
+                                  the plan to hand to whoever is.
+             passwd               rotate this member's password + rewrite the env file
+                                  (admin-assisted: --admin-user --admin-password)
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
              uninstall            stop daemons + service, clear runtime state (asks; --yes).
@@ -398,6 +438,8 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              search <terms…>      full-text search across all sessions
              resume <session-id>  print the command that reopens that session in its editor
              sessions-query       print the session rollup SQL for this credential
+             rooms                what your rooms are actually called (--json)
+             members              who is in a house and what each can reach (--db, admin)
              start | stop |       shipper loop + dashboard as background daemons
              share <user>         let someone read this house (--only project=… |
                                   session=… | host=… | source=… | folder=… | since=… |
@@ -449,12 +491,20 @@ function printAdapterErrors(errors) {
 
 async function cmdDiscover() {
   const out = { editors: [], clickhouse: [], config: null, memoryHouse: false };
-  process.stdout.write(JSON_OUT ? '' : 'Scanning editors (reading local session stores)…\n');
+  // The adapters read the scope from the environment; discover runs them in-process, so
+  // the configured scope has to be put there first or it would report a wider machine
+  // than the shipper will ship.
+  { const c = resolveConfig(); if (c.editors && !process.env.MEMHOUSE_EDITORS) process.env.MEMHOUSE_EDITORS = c.editors;
+    if (c.claudeRoots && !process.env.MEMHOUSE_CLAUDE_ROOTS) process.env.MEMHOUSE_CLAUDE_ROOTS = c.claudeRoots; }
+  out.scope = require(path.join(REPO_ROOT, 'editors', 'scope')).describe();
+  out.watched = [];
+  process.stdout.write(JSON_OUT ? '' : `Scanning editors (reading local session stores)… scope: ${out.scope}\n`);
   try {
     const { getAllChats, getAdapterErrors } = require(path.join(REPO_ROOT, 'editors'));
     const counts = {};
     for (const c of getAllChats()) counts[c.source] = (counts[c.source] || 0) + 1;
     out.editors = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([source, sessions]) => ({ source, sessions }));
+    out.watched = require(path.join(REPO_ROOT, 'editors', 'scope')).watching();
     out.adapterErrors = getAdapterErrors();
   } catch (e) { out.editorsError = e.message; }
 
@@ -482,6 +532,13 @@ async function cmdDiscover() {
   console.log('\nEditors with sessions on this machine:');
   if (out.editors.length === 0) console.log(warn('none found' + (out.editorsError ? ` (${out.editorsError})` : '')));
   for (const e of out.editors) console.log(ok(`${e.source.padEnd(16)} ${e.sessions} session${e.sessions === 1 ? '' : 's'}`));
+  // Where each adapter looked, and the variable that moves it. This is the list a person
+  // reads before deciding what to ship from a machine that keeps several stores.
+  console.log('\nWatched directories (override with the variable shown, in the env file):');
+  for (const w of out.watched) {
+    const where = w.error ? w.error : (w.roots.length ? w.roots.map((r) => r.replace(os.homedir(), '~')).join(', ') : '(nothing found)');
+    console.log(`  ${w.error ? '•' : ' '} ${w.name.padEnd(18)} ${where}${w.key ? `   [${w.key}]` : '   [built-in]'}`);
+  }
   printAdapterErrors(out.adapterErrors);
   console.log('\nClickHouse endpoints:');
   for (const p of out.clickhouse) {
@@ -680,79 +737,9 @@ function generatePassword() {
  * same templates provision.js applies, so the two cannot drift into different houses.
  */
 function memberSql(db, member, password) {
-  // The template is written unqualified because the shipper applies it with the house
-  // already selected. A human pastes this somewhere unknown — clickhouse-client, the
-  // play UI, curl — so every name is qualified here and there is no `USE`.
-  const qualify = (sql) => sql
-    .replace(/CREATE TABLE IF NOT EXISTS (\w+)/g, `CREATE TABLE IF NOT EXISTS ${db}.$1`);
-  const rooms = qualify(fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'house', 'schema.sql.tpl'), 'utf-8'));
-  return `-- memhouse: everything '${member}' needs in house '${db}'. Run as a user with
--- ACCESS MANAGEMENT (a stock 'default' with access_management=1 will do).
---
--- A house is a database; its rooms are three shared tables. Everyone granted on the
--- database writes into the same tables, and every row carries who (user_id, stamped by
--- the server) and where from (host, the install's fingerprint). Adding a housemate later
--- is the same two statements: CREATE USER, GRANT ALL ON the house.
---
--- Every name is qualified and there is no USE, so this runs anywhere: clickhouse-client,
--- the play UI, curl, a GUI. Order matters only in that the database comes first.
---
--- The messages room carries two text indexes. ClickHouse 25.x gates them behind
--- allow_experimental_full_text_index and refuses the CREATE without it (Code: 344);
--- 26.x accepts the setting as a no-op. The SET below covers any client that keeps a
--- session — clickhouse-client, a GUI. Over HTTP, where each statement is its own
--- request and SET does not persist, put it in the URL instead:
---     curl "\$URL/?allow_experimental_full_text_index=1" --data-binary "<one statement>"
---
--- One statement PER REQUEST over HTTP. The interface refuses a body carrying several
--- ("Multi-statements are not allowed"), and there is no setting that changes that —
--- 'multiquery' is a clickhouse-client flag and sending it as an HTTP param fails the
--- whole request with UNKNOWN_SETTING. Split on ';' and post each in turn, or use
--- clickhouse-client, which takes the file whole.
-
-SET allow_experimental_full_text_index = 1;
-
-CREATE DATABASE IF NOT EXISTS ${db};
-CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}';
-
-${rooms.trim()}
-
--- The whole database, WITH GRANT OPTION. ALL on your own house reaches nothing outside it
--- — the database is the boundary — and it lets the shipper create and evolve its own
--- tables. The grant option makes the member the real owner: they can hand on any of their
--- own data (\`/mem:access\` still opens only a read-only SELECT window, but the owner is not
--- boxed into read-only sharing of their own house). Scoped to this db, and no CREATE USER
--- rides with it — a member still cannot mint accounts or reach another house.
-GRANT ALL ON ${db}.* TO ${member} WITH GRANT OPTION;
-
--- Self-scoped ALTER USER: the member may change THEIR OWN password and no one else's.
--- \`ON ${member}\` names exactly this user, so \`memhouse passwd\` needs no admin, and an
--- invited member can make an inviter-set password their own. Verified non-escalating:
--- the holder cannot alter another user, nor grant this on another user, nor forge another
--- identity (user_id is server-side currentUser()). The one thing this grant also permits
--- is a member dropping their OWN async-insert pin, which on some ClickHouse versions
--- makes their OWN rows land with an empty user_id — self-inflicted, within the collaborator
--- trust model, flagged by \`memhouse doctor\`, and re-asserted on every \`ship --ensure-schema\`.
-GRANT ALTER USER ON ${member} TO ${member};
-
--- See the OTHER members, read-only. SHOW USERS lets \`/mem:house\` list who is on this
--- ClickHouse (names only — no passwords, no data) so a member can find who to share with.
--- It grants no read of anyone's rows; reading a housemate's memory still needs /mem:access.
-GRANT SHOW USERS ON *.* TO ${member};
-
--- \`memhouse relocate\` runs FROM the destination, pulling the source over remoteSecure() —
--- a table function ClickHouse gates behind its own access type, separate from GRANT ALL on
--- a database. Without this, relocate fails at the native-reachability probe with
--- ACCESS_DENIED (source untouched, nothing lost — just unusable until granted).
-GRANT REMOTE ON *.* TO ${member};
-
--- Pin async_insert on the user (ADD SETTING merges; a bare SETTINGS clause would replace
--- the user's whole list). The pin keeps the user_id stamp honest: a MATERIALIZED
--- currentUser() is computed during the INSERT, and an async flush stores it as the empty
--- string. CONST refuses the override; a client that never mentions the setting is held
--- at 0 and its insert lands stamped.
-ALTER USER ${member} ADD SETTING ${MEMBER_PIN};
-`;
+  // The SAME plan adminBootstrap executes, rendered. Not a second description of it.
+  const { plan, render } = require(path.join(REPO_ROOT, 'memhouse', 'provision'));
+  return render(plan({ db, member, password }), { db, member });
 }
 
 /**
@@ -789,8 +776,8 @@ async function adminBootstrap(cfg, admin) {
   } catch (e) {
     if (/Not enough privileges|ACCESS_DENIED|system\.users/i.test(e.message || '')) {
       console.log(bad(`'${admin.user}' is not an admin of this house — it cannot read system.users, so it cannot provision a member`));
-      console.log('  Joining a house is two statements for whoever owns it:');
-      console.log(`     CREATE USER ${admin.member} IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO ${admin.member};`);
+      console.log('  Joining a house is a user and one grant, for whoever owns it — print them with:');
+      console.log(`     memhouse install --print-sql --member ${admin.member} --db ${cfg.db}`);
       console.log('  If you already HAVE a credential on this house, you do not need admin:');
       console.log(`     memhouse install --url ${adminCfg.url} --user ${admin.member} --password …`);
       return null;
@@ -847,30 +834,22 @@ async function adminBootstrap(cfg, admin) {
     // grants SELECT), but the owner is not boxed into read-only sharing of their own house.
     // Scoped to their db: the grant option reaches nothing outside it, and no CREATE USER
     // comes with it, so a member still cannot mint accounts or touch another house.
-    await q(`GRANT ALL ON ${cfg.db}.* TO ${admin.member} WITH GRANT OPTION`, { database: '' });
-    // Self-scoped ALTER USER — the member owns their own password (memhouse passwd needs
-    // no admin; an invitee can rotate the password the inviter set). Non-escalating: the
-    // grant names this one user, so it reaches no other account. Best-effort: a house on
-    // a ClickHouse where the admin lacks access-management can still ship, just without
-    // self-rotation.
-    try { await q(`GRANT ALTER USER ON ${admin.member} TO ${admin.member}`, { database: '' }); }
-    catch { /* admin without access-management: passwd stays admin-assisted for this member */ }
-    // See the OTHER members, read-only: SHOW USERS lets `/mem:house` list who is on this
-    // ClickHouse (names only — no passwords, no data) so a member can find who to share
-    // with. It grants no read of anyone's rows; that still needs an explicit /mem:access.
-    // Best-effort like ALTER USER above — an admin without access-management just skips it.
-    try { await q(`GRANT SHOW USERS ON *.* TO ${admin.member}`, { database: '' }); }
-    catch { /* no access-management: /mem:house section 4 stays admin-only for this member */ }
-    // REMOTE: `memhouse relocate` runs FROM the destination, pulling the source over
-    // remoteSecure() — a table function ClickHouse gates behind its own access type,
-    // separate from any GRANT ALL on a database. Without it every relocate a member runs
-    // fails at the native-reachability probe with ACCESS_DENIED, source untouched, no
-    // data lost — just relocate unusable until an admin grants this by hand. Best-effort
-    // like the two grants above.
-    try { await q(`GRANT REMOTE ON *.* TO ${admin.member}`, { database: '' }); }
-    catch { /* no access-management: relocate stays admin-assisted for this member */ }
-    await q(`ALTER USER ${admin.member} ADD SETTING ${MEMBER_PIN}`, { database: '' });
-    console.log(ok(`granted the house: ALL ON ${cfg.db}.* to '${admin.member}', SHOW USERS, REMOTE, async_insert pinned`));
+    // The user was created or verified above, so the plan runs with password: null and its
+    // CREATE USER is omitted; the database was handled at the top. Everything else is
+    // executed as written — what a DBA gets from --print-sql and what happens here are the
+    // same statements by construction.
+    const { plan } = require(path.join(REPO_ROOT, 'memhouse', 'provision'));
+    const skipped = [];
+    for (const step of plan({ db: cfg.db, member: admin.member, password: null })) {
+      if (step.sql.startsWith('CREATE DATABASE')) continue;
+      try { await q(step.sql, { database: '' }); }
+      catch (e) {
+        if (!step.optional) throw e;
+        skipped.push(step.why.replace(/`/g, ''));
+      }
+    }
+    console.log(ok(`granted '${admin.member}' ${cfg.db}.${admin.member}_* — their rooms and nothing else; async_insert pinned`));
+    for (const w of skipped) console.log(warn(`skipped (needs ACCESS MANAGEMENT): ${w}`));
   } catch (e) {
     console.log(bad(`could not grant the house to '${admin.member}': ${e.message}`));
     if (createdUser) {
@@ -885,6 +864,7 @@ async function adminBootstrap(cfg, admin) {
 
   // The step that makes this trustworthy: stop being admin, and prove the credential we
   // are about to persist can build and reach the rooms itself.
+  // The proof below runs the real shipper as the new member; it creates their rooms itself.
   const memberCfg = { ...cfg, user: admin.member, password };
   // An invite must not mint THIS machine's host identity, nor record the invitee as a
   // <invitee>@<inviter-host> writer in a house the inviter will never ship to. Run the
@@ -898,10 +878,14 @@ async function adminBootstrap(cfg, admin) {
     return null;
   }
   try {
-    const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN ('sessions','messages','tool_calls')`, { database: '' });
+    const want = roomNames(admin.member);
+    const names = ROOM_TYPES.map((t) => `'${want.physical[t]}'`).join(',');
+    const seen = await chRows(memberCfg, `SELECT count() AS n FROM system.tables WHERE database = '${cfg.db}' AND name IN (${names})`, { database: '' });
     if (Number(seen[0]?.n) !== 3) { console.log(bad(`'${admin.member}' cannot see the three rooms — nothing written`)); return null; }
   } catch (e) { console.log(bad(`'${admin.member}' could not connect after provisioning: ${e.message}`)); return null; }
-  console.log(ok(`verified as '${admin.member}' — admin credential discarded, not stored`));
+  // Whether the admin credential is kept is the CALLER's business: an operator's own
+  // install keeps it in the env file beside the member's; an invitee's file never carries it.
+  console.log(ok(`verified as '${admin.member}' with the member credential`));
   return memberCfg;
 }
 
@@ -1080,8 +1064,8 @@ async function cmdInstall({ interactive }) {
       console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
     }
     console.log(ok('installed'));
-    console.log('  adding a housemate later is two statements for the admin:');
-    console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${cfg.db}.* TO <name>;`);
+    console.log('  adding a housemate later — the admin credential is in your env file, so no flags:');
+    console.log(`     memhouse invite <name> --url ${cfg.url}`);
     printGettingStarted(cfg);
     await finishInvite(cfg);
     // The first ship loads the whole backlog; do it in the background so install returns
@@ -1322,16 +1306,18 @@ async function finishInvite(cfg) {
  * Kept to one screen; each line is a thing to DO, not a feature list.
  */
 function printGettingStarted(cfg) {
+  // Every line must be runnable as typed. An install under MEMHOUSE_HOME is addressed
+  // through that variable — bare `memhouse start` would start the default home's daemons.
+  const mh = process.env.MEMHOUSE_HOME ? `MEMHOUSE_HOME=${process.env.MEMHOUSE_HOME.replace(os.homedir(), '~')} memhouse` : 'memhouse';
   console.log('');
   console.log('  Your house is live. From here:');
-  console.log('     memhouse start                  dashboard + shipper loop (background daemons)');
+  console.log(`     ${mh} start                  dashboard + shipper loop (background daemons)`);
   console.log(`       -> http://localhost:${cfg.port || 4640}       browse, search, and analyze every session`);
-  console.log('     memhouse service install        or: ship at login, no terminal needed');
-  console.log('     memhouse plugins install claude give your agents /mem:house, /mem:recall,');
-  console.log('                                     /mem:recall, /mem:access, /mem:sql,');
-  console.log('                                     /mem:house');
-  console.log('     memhouse search <terms>         find a past conversation right now');
-  console.log('     memhouse doctor                 every line a check mark = healthy');
+  console.log(`     ${mh} service install        or: ship at login, no terminal needed`);
+  console.log(`     ${mh} plugins install claude give your agents /mem:house, /mem:recall,`);
+  console.log('                                     /mem:sql, /mem:access, /mem:admin');
+  console.log(`     ${mh} search <terms>         find a past conversation right now`);
+  console.log(`     ${mh} doctor                 every line a check mark = healthy`);
   console.log('  The house keeps shipping as you work; nothing else to do.');
 }
 
@@ -1515,14 +1501,14 @@ async function fleetState(cfg) {
   try {
     const writers = new Map(); // 'member@host' -> row
     for (const d of await chRows(cfg,
-      "SELECT user_id, host, formatDateTime(max(ingested_at), '%Y-%m-%dT%H:%i:%SZ') AS last_row FROM messages GROUP BY user_id, host")) {
+      `SELECT user_id, host, formatDateTime(max(ingested_at), '%Y-%m-%dT%H:%i:%SZ') AS last_row FROM ${physicalRoom('messages', cfg.user)} GROUP BY user_id, host`)) {
       writers.set(`${d.user_id}@${d.host}`, { writer: `${d.user_id}@${d.host}`, lastRow: d.last_row, version: null, schema: null, lastShip: null });
     }
     if (!writers.size) return null;
     let houseSchema = 0;
     try {
       for (const r of await chRows(cfg,
-        "SELECT key, value FROM house_meta FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'")) {
+        `SELECT key, value FROM ${physicalRoom('meta', cfg.user)} FINAL WHERE key = 'schema_version' OR key LIKE 'client_%' OR key LIKE 'last_ship:%'`)) {
         if (r.key === 'schema_version') { houseSchema = Number(r.value) || 0; continue; }
         const cut = r.key.indexOf(':');
         const kind = r.key.slice(0, cut); const who = r.key.slice(cut + 1);
@@ -1770,16 +1756,16 @@ async function cmdDoctor() {
     // that still work and a `<room>__migrating` nobody would notice; the events table is
     // the only place that shows it, so doctor reads it rather than the pilot.
     try {
-      const meta = new Map((await chRows(cfg, 'SELECT key, value FROM house_meta FINAL'))
+      const meta = new Map((await chRows(cfg, `SELECT key, value FROM ${physicalRoom('meta', cfg.user)} FINAL`))
         .map((m) => [m.key, String(m.value)]));
       const at = meta.get('schema_version');
       const last = (await chRows(cfg,
         `SELECT id, argMax(status, event_at) AS status, formatDateTime(max(event_at), '%Y-%m-%d %H:%i') AS at
-         FROM house_events WHERE kind = 'migration' GROUP BY id ORDER BY max(event_at) DESC LIMIT 1`))[0];
+         FROM ${physicalRoom('events', cfg.user)} WHERE kind = 'migration' GROUP BY id ORDER BY max(event_at) DESC LIMIT 1`))[0];
       const stuck = last && last.status !== 'applied';
       // The ROOMS are the truth; this table is the paperwork. A house whose keys are
       // already current but whose record is missing — a fresh install by an older client,
-      // or a member with no rights on house_meta — is not un-migrated, and telling it to
+      // or a member with no rights on meta — is not un-migrated, and telling it to
       // run migrate-rooms sends the pilot to rebuild rooms that are already correct.
       const recorded = at === String(SCHEMA_VERSION);
       add(!stuck && (recorded || keysCorrect),
@@ -2098,18 +2084,33 @@ function installKind() {
 // Each of those has cost a real machine real sessions. This command owns all three.
 async function cmdUpdate() {
   const { kind, root } = installKind();
-  const latest = await (async () => {
-    try {
-      const res = await fetch('https://registry.npmjs.org/memhouse/latest', { signal: AbortSignal.timeout(8000) });
-      return res.ok ? (await res.json()).version : null;
-    } catch { return null; }
-  })();
-
-  if (JSON_OUT && flags.check) return console.log(JSON.stringify({ kind, root, current: PKG.version, latest }, null, 2));
+  const chan = require(path.join(REPO_ROOT, 'memhouse', 'channel'));
+  const cfg0 = resolveConfig();
+  // --channel pins for this run AND every later one: the point of pinning is that the next
+  // person to type `memhouse update` does not have to remember it.
+  if (flags.channel && flags.channel !== true && String(flags.channel) !== cfg0.channel) {
+    writeEnvFile({ ...cfg0, channel: String(flags.channel) });
+    console.log(ok(`channel pinned in ${short(ENV_FILE)}: ${flags.channel}`));
+  }
+  const pinned = flags.channel && flags.channel !== true ? String(flags.channel) : (cfg0.channel || null);
+  const tags = await chan.fetchTags();
+  const pick = chan.pickChannel({ version: PKG.version, pinned, tags });
+  const latest = pick.target;
+  if (JSON_OUT && flags.check) return console.log(JSON.stringify({ kind, root, current: PKG.version, channel: pick.channel, target: pick.target, reason: pick.reason, tags }, null, 2));
   console.log(`  installed  ${PKG.version}  (${kind}: ${root})`);
-  console.log(`  latest     ${latest || 'unknown — the registry did not answer'}`);
+  console.log(`  channel    ${pick.channel || '—'}  (${pick.reason})`);
+  console.log(`  target     ${pick.target || (tags ? 'nothing to install' : 'unknown — the registry did not answer')}`);
   if (latest && latest === PKG.version && kind !== 'checkout') console.log(ok('already current'));
   if (flags.check) return 0;
+  if (!pick.channel && kind !== 'checkout') {
+    console.log(warn('no automatic update for this install'));
+    console.log(`  ${pick.reason}`);
+    return 1;
+  }
+  if (pick.channel && !pick.target && kind !== 'checkout') {
+    console.log(bad(`channel '${pick.channel}' has no version on the registry — nothing to install, nothing changed`));
+    return 1;
+  }
 
   if (kind === 'npx') {
     console.log(warn('nothing to update — npx resolves the registry on every run'));
@@ -2118,7 +2119,7 @@ async function cmdUpdate() {
   }
   if (kind === 'local-dep') {
     console.log(warn('this is a project dependency, not a global install'));
-    console.log(`  upgrade it where it lives: npm install memhouse@latest`);
+    console.log(`  upgrade it where it lives: npm install memhouse@${pick.channel || 'latest'}`);
     return 1;
   }
 
@@ -2156,7 +2157,7 @@ async function cmdUpdate() {
     // long as SQLite was a native module: npm never remembered it, and an upgrade without
     // it left the binding unbuilt and the five SQLite-backed adapters reading zero
     // sessions on every pass afterwards. There is no binding to build now.
-    const r = spawnSync('npm', ['install', '-g', 'memhouse@latest'], { stdio: 'inherit' });
+    const r = spawnSync('npm', ['install', '-g', `memhouse@${pick.channel}`], { stdio: 'inherit' });
     if (r.status !== 0) {
       console.log(bad('npm install failed — nothing was restarted, the running version is unchanged'));
       console.log('  if it was EACCES: ls -ld "$(npm prefix -g)" — root-owned needs sudo, yours needs a chown');
@@ -2535,7 +2536,7 @@ async function cmdReset() {
 // ── the house's record of itself ────────────────────────────────────────────────
 const sqlStr = (s) => `'${String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 
-/** Append one row to house_events. Never fatal: paperwork must not stop a migration. */
+/** Append one row to events. Never fatal: paperwork must not stop a migration. */
 async function houseEvent(cfg, e) {
   const cols = ['kind', 'id', 'status', 'from_version', 'to_version', 'host', 'rows_before', 'rows_after', 'detail'];
   // Numeric columns render as 0 when absent, NEVER as ''. An event without rows_after —
@@ -2549,14 +2550,14 @@ async function houseEvent(cfg, e) {
     ? String(Number(e[c]) || 0)
     : sqlStr(e[c] || '')));
   try {
-    await ch(cfg, `INSERT INTO house_events (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
+    await ch(cfg, `INSERT INTO ${physicalRoom('events', cfg.user)} (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
       { settings: { async_insert: 0 } });
   } catch { /* an unwritable log is not a reason to abandon a rebuild */ }
 }
 
 async function houseMeta(cfg, key, value) {
   try {
-    await ch(cfg, `INSERT INTO house_meta (key, value) VALUES (${sqlStr(key)}, ${sqlStr(value)})`,
+    await ch(cfg, `INSERT INTO ${physicalRoom('meta', cfg.user)} (key, value) VALUES (${sqlStr(key)}, ${sqlStr(value)})`,
       { settings: { async_insert: 0 } });
   } catch { /* same */ }
 }
@@ -2602,7 +2603,7 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
   // record (schema 3 -> 2) — defeating the writer guard for every old shipper whose key
   // shapes happen to match. An older memhouse cannot migrate a newer house, only say so.
   try {
-    const rec = await q.rows("SELECT value FROM house_meta FINAL WHERE key = 'schema_version'");
+    const rec = await q.rows(`SELECT value FROM ${physicalRoom('meta', cfg.user)} FINAL WHERE key = 'schema_version'`);
     const recorded = rec.length ? Number(rec[0].value) || 0 : 0;
     if (recorded > SCHEMA_VERSION) {
       console.log(bad(`this house is at schema ${recorded}; this memhouse knows migrations up to ${SCHEMA_VERSION}.`));
@@ -2700,7 +2701,7 @@ async function cmdMigrate({ component = null, quiet = false, assumeYes = false }
       await mig.runMigration(q, ctx, item, { ledger, ui });
     } catch (e) {
       console.log(bad(`${item.migration.id}: ${e.message}`));
-      console.log('  what completed stands (house_events per room says which); what failed was not swapped.');
+      console.log('  what completed stands (events per room says which); what failed was not swapped.');
       console.log(`  a partial copy may sit in <room>__migrating — inspect before dropping. Re-run when fixed:`);
       console.log('     memhouse migrate');
       return 1;
@@ -2789,7 +2790,7 @@ async function cmdRelocate() {
   try { srcMember = (await chRows(src, 'SELECT currentUser() AS u', { database: '' }))[0]?.u; }
   catch (e) { console.log(bad(`source not reachable: ${netReason(e)}`)); return 1; }
   try {
-    const rec = await chRows(src, "SELECT value FROM house_meta FINAL WHERE key = 'schema_version'", { database: src.db });
+    const rec = await chRows(src, `SELECT value FROM ${physicalRoom('meta', src.user)} FINAL WHERE key = 'schema_version'`, { database: src.db });
     const v = rec.length ? Number(rec[0].value) || 0 : 0;
     if (v !== SCHEMA_VERSION) {
       console.log(bad(`source house is at schema ${v || 'pre-record'}; this memhouse is ${SCHEMA_VERSION}.`));
@@ -2797,7 +2798,7 @@ async function cmdRelocate() {
       return 1;
     }
   } catch {
-    console.log(bad('source house has no house_meta — migrate it first:  memhouse migrate'));
+    console.log(bad('source house has no meta — migrate it first:  memhouse migrate'));
     return 1;
   }
   const base = {};
@@ -2869,8 +2870,8 @@ async function cmdRelocate() {
       const cols = rel.copyColumns(destCols, srcCols);
       if (!cols.length) { console.log(warn(`${t}: no shared columns — skipped`)); continue; }
       const list = cols.map(bq).join(', ');
-      // house_meta carries only durable facts; the per-host heartbeats regenerate.
-      const where = t === 'house_meta'
+      // meta carries only durable facts; the per-host heartbeats regenerate.
+      const where = t === 'meta'
         ? " WHERE key IN ('schema_version','min_writer_schema','house_id') OR key LIKE 'share:%'" : '';
       const copySql = `INSERT INTO ${bq(t)} (${list}) SELECT ${list} FROM ${nat.fn}(${sq(nat.addr)}, ${sq(src.db)}, ${sq(t)}, ${sq(src.user)}, ${sq(src.password)})${where}`
         + ' SETTINGS insert_allow_materialized_columns = 1, allow_experimental_full_text_index = 1';
@@ -3033,6 +3034,14 @@ async function cmdShare() {
   const cfg = requireConfig(resolveConfig(), 'share');
   if (!cfg.user) return 1;
   const db = cfg.db;
+  // In a SHARED database a member owns three named rooms, not the database. Granting
+  // `ON <db>.*` there would hand over every housemate's rooms as well — it fails closed
+  // today (the member has no grant option on the database) but with a raw ACCESS_DENIED
+  // naming a privilege nobody can explain. Grant the rooms this member actually owns.
+  const mine = roomNames(cfg.user);
+  // One grant on the member's own pattern: the shape the member holds, one level down
+  // (SELECT only). It reaches nothing a housemate wrote.
+  const shareTargets = [`${db}.${mine.pattern}`];
 
   // Statements, not reads: this is the one command in the read family that writes, so it
   // does NOT go through the readonly connection the skills use.
@@ -3060,10 +3069,10 @@ async function cmdShare() {
   if (flags.revoke === true) {
     let dropped = 0;
     for (const room of ROOM_TYPES) {
-      try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${room}`); dropped++; }
+      try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); dropped++; }
       catch (e) { console.log(warn(`could not drop the policy on ${room}: ${e.message.split('\n')[0]}`)); }
     }
-    try { await run(`REVOKE SELECT ON ${db}.* FROM ${user}`); }
+    try { for (const tgt of shareTargets) await run(`REVOKE SELECT ON ${tgt} FROM ${user}`); }
     catch (e) { console.log(bad(`could not revoke: ${netReason(e)}`)); return 1; }
     await houseMeta(cfg, `share:${user}`, `revoked ${new Date().toISOString().slice(0, 10)}`);
     console.log(ok(`revoked '${user}' — SELECT withdrawn and ${dropped} row polic${dropped === 1 ? 'y' : 'ies'} dropped`));
@@ -3098,8 +3107,43 @@ async function cmdShare() {
     if (verdict === null) console.log(warn('could not verify how this server treats readers without a policy — continuing'));
   }
 
-  try { await run(`GRANT SELECT ON ${db}.* TO ${user}`); }
-  catch (e) { console.log(bad(`could not grant: ${netReason(e)}`)); return 1; }
+  // A SCOPED share builds its filters BEFORE it grants anything. The order used to be the
+  // other way round, and the failure mode was the worst one this command has: a member ran
+  // `share <user> --only project=x`, the GRANT landed, the policy step was refused, and the
+  // grantee was left able to read EVERY project — the exact opposite of what was asked for,
+  // reported as "PARTIALLY APPLIED" after the fact. Building filters first means a refusal
+  // leaves the grantee with exactly what they had before: nothing.
+  if (scope) {
+    const made = [];
+    for (const room of ROOM_TYPES) {
+      const pred = share.scopePredicate(scope, room, sqlStr);
+      try {
+        await run(`CREATE ROW POLICY OR REPLACE ${share.policyName(user, room)} ON ${db}.${mine.physical[room]} USING ${pred} TO ${user}`);
+        made.push(room);
+      } catch (e) {
+        console.log(bad(`could not scope ${room}: ${e.message.split('\n')[0]}`));
+        for (const r of made) {
+          try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, r)} ON ${db}.${mine.physical[r]}`); } catch { /* best effort */ }
+        }
+        console.log(`  NOTHING WAS GRANTED — '${user}' can read no more than before, and any`);
+        console.log('  filters this attempt created have been removed.');
+        return 1;
+      }
+    }
+  }
+
+  try { for (const tgt of shareTargets) await run(`GRANT SELECT ON ${tgt} TO ${user}`); }
+  catch (e) {
+    console.log(bad(`could not grant: ${netReason(e)}`));
+    // Filters without a grant are inert, but leaving them behind would make a later full
+    // share silently scoped — the case the widening path below exists to catch.
+    if (scope) {
+      for (const room of ROOM_TYPES) {
+        try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); } catch { /* best effort */ }
+      }
+    }
+    return 1;
+  }
 
   if (!scope) {
     // A previous partial share leaves policies that would still be filtering. Widening to
@@ -3108,32 +3152,24 @@ async function cmdShare() {
     for (const room of ROOM_TYPES) {
       try {
         const had = await rows(`SELECT count() AS n FROM system.row_policies WHERE database = ${sqlStr(db)} AND short_name = ${sqlStr(share.policyName(user, room))}`);
-        if (Number(had[0] && had[0].n) > 0) { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${room}`); cleared++; }
+        if (Number(had[0] && had[0].n) > 0) { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); cleared++; }
       } catch { /* nothing to clear */ }
     }
     await houseMeta(cfg, `share:${user}`, `granted ${new Date().toISOString().slice(0, 10)}`);
-    console.log(ok(`'${user}' can now read every session in '${db}'`));
+    console.log(ok(`'${user}' can now read every session in your rooms (${db}.${mine.pattern})`));
     if (cleared) console.log(warn(`cleared ${cleared} row polic${cleared === 1 ? 'y' : 'ies'} from an earlier scoped share — this is now a FULL share`));
     console.log(`  Everything: every project, machine and editor, including anything ever pasted`);
-    console.log(`  into a session. Narrow it with:  memhouse share ${user} --only project=<name>`);
+    console.log("  into a session of yours — housemates' rooms are untouched.");
+    console.log(`  Narrow it with:  memhouse share ${user} --only project=<name>`);
     console.log(`  Withdraw with:                   memhouse share ${user} --revoke`);
     return 0;
   }
 
-  for (const room of ROOM_TYPES) {
-    const pred = share.scopePredicate(scope, room, sqlStr);
-    try { await run(`CREATE ROW POLICY OR REPLACE ${share.policyName(user, room)} ON ${db}.${room} USING ${pred} TO ${user}`); }
-    catch (e) {
-      console.log(bad(`could not scope ${room}: ${e.message.split('\n')[0]}`));
-      console.log('  PARTIALLY APPLIED — a share filtered on some rooms and not others leaks.');
-      console.log(`  Put it right with:  memhouse share ${user} --revoke`);
-      return 1;
-    }
-  }
+  // The filters are already in place — built above, before the grant.
   await houseMeta(cfg, `share:${user}`, `granted ${new Date().toISOString().slice(0, 10)} scope=${scopeRaw}`);
 
   // Say what they can actually reach, counted through their own filter.
-  console.log(ok(`'${user}' can read '${db}' where ${scopeRaw}`));
+  console.log(ok(`'${user}' can read your rooms in '${db}' where ${scopeRaw}`));
   for (const room of ROOM_TYPES) {
     try {
       const r = await rows(`SELECT count() AS n FROM ${room} WHERE ${share.scopePredicate(scope, room, sqlStr)}`);
@@ -3175,7 +3211,7 @@ async function shareList(cfg, share) {
   const db = cfg.db;
   let recorded = [];
   try {
-    recorded = await chRows(cfg, "SELECT substring(key, 7) AS user, value AS state FROM house_meta FINAL WHERE key LIKE 'share:%' ORDER BY key", { database: db });
+    recorded = await chRows(cfg, `SELECT substring(key, 7) AS user, value AS state FROM ${physicalRoom('meta', cfg.user)} FINAL WHERE key LIKE 'share:%' ORDER BY key`, { database: db });
   } catch { /* unreadable record */ }
   let policies = [];
   try {
@@ -3183,14 +3219,33 @@ async function shareList(cfg, share) {
   } catch { /* members may not read system.row_policies on every server */ }
 
   if (!recorded.length && !policies.length) {
-    console.log(ok(`nobody has been granted a read of '${db}'`));
+    if (JSON_OUT) { console.log(JSON.stringify({ database: db, rooms: `${cfg.user}_*`, grantees: [] }, null, 2)); return 0; }
+    console.log(ok(`nobody has been granted a read of your rooms in '${db}'`));
     console.log(`  Share it with:  memhouse share <user> [--only project=<name>]`);
     return 0;
   }
-  console.log(`  who can read '${db}' — memhouse's own record, not ClickHouse's grant table:`);
+  // In a shared house a grantee reads YOUR ROOMS, never the database — every other member
+  // keeps their own rooms in it and none of them were shared by this.
+  if (JSON_OUT) {
+    // The flag was accepted and ignored, so `share --list --json` printed the human text
+    // and any caller parsing it got prose. It is the audit surface; it should be readable
+    // by something other than a person.
+    console.log(JSON.stringify({
+      database: db, rooms: `${cfg.user}_*`,
+      grantees: recorded.map((r) => ({
+        user: r.user, state: r.state,
+        scoped: policies.filter((p) => String(p.short_name).startsWith(`mh_share_${r.user}_`))
+          .map((p) => ({ room: p.table, filter: p.select_filter })),
+      })),
+      note: "memhouse's own record, not ClickHouse's grant table — a grant made by hand does not appear here",
+    }, null, 2));
+    return 0;
+  }
+  console.log(`  who can read your rooms in '${db}' — memhouse's own record, not ClickHouse's grant table:`);
   for (const r of recorded) {
     const scoped = policies.filter((p) => String(p.short_name).startsWith(`mh_share_${r.user}_`));
-    console.log(`    ${String(r.user).padEnd(16)} ${r.state}${scoped.length ? '' : (String(r.state).startsWith('granted') ? '  (full house)' : '')}`);
+    const whole = '  (all your rooms)';
+    console.log(`    ${String(r.user).padEnd(16)} ${r.state}${scoped.length ? '' : (String(r.state).startsWith('granted') ? whole : '')}`);
     for (const p of scoped) console.log(`      ${String(p.table).padEnd(11)} ${p.select_filter}`);
   }
   console.log('  A grant made by hand does not appear here — this list is what memhouse recorded.');
@@ -3218,8 +3273,8 @@ async function shareList(cfg, share) {
 async function cmdWhoami() {
   const cfg = resolveConfig();
   const wantAdmin = flags.admin === true;
-  const au = process.env.MEMHOUSE_ADMIN_USER;
-  const ap = process.env.MEMHOUSE_ADMIN_PASSWORD;
+  const au = cfg.adminUser || undefined;
+  const ap = cfg.adminPassword || undefined;
   const usingAdminEnv = wantAdmin && au;
   // `--admin` with nothing to resolve is worth saying out loud. Silently falling back to
   // the member credential makes `whoami --admin` and `whoami` print the same thing, and
@@ -3301,7 +3356,17 @@ async function cmdInvite() {
     console.log('  for the same-machine case.');
     return 1;
   }
-  const db = flags.db && flags.db !== true ? String(flags.db) : name;
+  // ONE layout: the member's rooms are named for them inside whichever house --db names,
+  // and the default is the configured house. There is nothing else to choose.
+  // Default to the configured house only when inviting into the SAME server this install
+  // ships to; a different --url is a different house, and its default is `mem`. Without
+  // this, an invite to a fresh server named its database after whatever this machine's env
+  // file happened to hold.
+  // resolveConfig() lets --url win, so cfg.url IS the flag here; the CONFIGURED house is
+  // what the env file or environment says, and that is what "same server" means.
+  const configuredUrl = process.env.MEMHOUSE_URL || readEnvFile().MEMHOUSE_URL || null;
+  const db = flags.db && flags.db !== true ? String(flags.db)
+    : (configuredUrl && sameEndpoint(configuredUrl, url) ? cfg.db : 'mem');
   try { require(path.join(REPO_ROOT, 'memhouse', 'house', 'house')).assertUsableName(db, 'house'); }
   catch (e) { console.log(bad(e.message)); return 1; }
 
@@ -3313,8 +3378,9 @@ async function cmdInvite() {
   if (flags['print-sql'] === true) {
     const password = flags['member-password'] && flags['member-password'] !== true
       ? String(flags['member-password']) : generatePassword();
-    console.log(`-- memhouse: give '${name}' an account and their own house on this ClickHouse.`);
-    console.log(`-- Run as a user with ACCESS MANAGEMENT (a stock 'default' will do).`);
+    // memberSql prints its own header naming the house and the credential it needs; a
+    // second one above it said the same thing twice, and in a shared house said the wrong
+    // thing ("their own house" — they get rooms in a shared one).
     console.log(memberSql(db, name, password));
     console.log('-- Then send them these four lines — they are a credential, so use a channel');
     console.log('-- you trust (croc, a password manager), not chat:');
@@ -3330,8 +3396,11 @@ async function cmdInvite() {
   // CONFIGURED ONE — a `deploy --local` house makes its member the superuser
   // (CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1), so the person who stood the house up
   // invites with no extra flags.
-  let adminUser = flags['admin-user'];
-  let adminPass = flags['admin-password'];
+  // --admin-* wins. Otherwise the admin credential this install keeps beside its member
+  // credential (a house you deployed or administer). Failing both, the member credential
+  // itself is tried below — which works for whoever set the house up as its superuser.
+  let adminUser = flags['admin-user'] || cfg.adminUser || undefined;
+  let adminPass = flags['admin-password'] || (!flags['admin-user'] && cfg.adminPassword) || undefined;
   if (!adminUser) {
     const c = requireConfig(cfg, 'invite');
     if (!c.user) return 1;
@@ -3419,26 +3488,30 @@ async function cmdInvite() {
   // Read-only, best-effort: an admin that cannot count rows should not lose the ability
   // to invite, and a house that does not exist yet is the ordinary case.
   const adminCfg = { ...cfg, url: provisionUrl, user: adminUser, password: adminPass || '', db, stated: true };
+
+  const room = physicalRoom('messages', name);
   let occupied = null;
   try {
-    const exists = await chRows(adminCfg, `SELECT count() AS n FROM system.tables WHERE database = '${db.replace(/'/g, "\\'")}' AND name = 'messages'`, { database: '' });
+    const exists = await chRows(adminCfg, `SELECT count() AS n FROM system.tables WHERE database = '${db.replace(/'/g, "\\'")}' AND name = '${room.replace(/'/g, "\\'")}'`, { database: '' });
     if (Number(exists[0] && exists[0].n) > 0) {
-      const r = await chRows(adminCfg, 'SELECT count() AS msgs, uniqExact(user_id) AS writers FROM messages', { database: db });
+      const r = await chRows(adminCfg, `SELECT count() AS msgs, uniqExact(user_id) AS writers FROM ${room}`, { database: db });
       const msgs = Number(r[0] && r[0].msgs) || 0;
       if (msgs > 0) occupied = { msgs, writers: Number(r[0].writers) || 0 };
     }
   } catch { /* cannot tell — provisioning below will surface any real access problem */ }
   if (occupied && flags.adopt !== true) {
-    console.log(bad(`house '${db}' already exists and holds ${occupied.msgs} messages from ${occupied.writers} writer(s) — NOT inviting.`));
+    console.log(bad(`${db}.${room} already exists and holds ${occupied.msgs} messages from ${occupied.writers} writer(s) — NOT inviting.`));
     console.log(`  Inviting '${name}' here would hand them somebody else's memory, and their`);
     console.log('  first ship would land on top of it. Nothing has been changed.');
     console.log('  Pick a different handle:   memhouse invite <other-name> --url …');
     console.log(`  Or a different house:      memhouse invite ${name} --url … --db <house>`);
-    console.log(`  If sharing this house IS the intent, say so:  --adopt`);
+    console.log(`  Taking the house over — same person, new credential:  --adopt`);
     return 1;
   }
   if (occupied) {
     console.log(warn(`adopting existing house '${db}' — ${occupied.msgs} messages already here (--adopt)`));
+    console.log(`  '${name}' will read and ship on top of them. If that memory belongs to`);
+    console.log('  somebody else, stop now — this is a takeover, not a shared house.');
   }
 
   const built = await adminBootstrap({ ...cfg, url: provisionUrl, db, stated: true }, {
@@ -3459,6 +3532,7 @@ async function cmdInvite() {
     `MEMHOUSE_USER=${sq(built.user)}`,
     `MEMHOUSE_PASSWORD=${sq(built.password)}`,
     `MEMHOUSE_DB=${sq(built.db)}`,
+    ...(cfg.channel ? [`MEMHOUSE_CHANNEL=${sq(cfg.channel)}`] : []),
     '# This credential was issued by an invitation (no admin access here); memhouse offers',
     '# to rotate it on install so the inviter no longer knows it.',
     'MEMHOUSE_INVITE=1',
@@ -3482,9 +3556,39 @@ async function cmdInvite() {
     return 1;
   }
   console.log(ok(`invite written: ${out}`));
-  console.log(`  hand it to ${name} over a channel you trust (croc, a password manager — not chat).`);
-  console.log(`  they run:   memhouse install --env ${path.basename(out)}`);
-  console.log(`  then they should rotate the password you now both know:  memhouse passwd`);
+  // The guide that travels with the credential. Rendered, not linked: it names THIS
+  // invitee's file, this house, and — until the build is published — the exact tarball
+  // to install, none of which a static page can carry. Nothing secret goes into it.
+  const prerelease = /-/.test(PKG.version);
+  const guide = path.join(path.dirname(out), 'MEMHOUSE-INVITATION.md');
+  try {
+    const tpl = fs.readFileSync(path.join(DELIVERY, 'INVITATION.md.tpl'), 'utf-8');
+    // A nightly stamps its own version into the filename, so the guide names the shape of
+    // the file, not a name it cannot know; the version check below matches on the base.
+    const base = PKG.version.split('-')[0];
+    // A house on a published channel installs by tag; a pre-release on no channel is a
+    // tarball. `memhouse update` on the invitee's machine follows the same channel.
+    const install = cfg.channel
+      ? `\`\`\`\nnpm install -g memhouse@${cfg.channel}\n\`\`\`\n\nThis house follows the \`${cfg.channel}\` channel; \`memhouse update\` keeps following it.`
+      : prerelease
+        ? `This house runs a pre-release build, so install the tarball you were sent rather than the\n`
+          + `published package. From the directory you saved it in:\n\n\`\`\`\nnpm install -g ./memhouse-*.tgz\n\`\`\``
+        : `\`\`\`\nnpm install -g memhouse@${PKG.version}\n\`\`\``;
+    fs.writeFileSync(guide, tpl
+      .replaceAll('{{NAME}}', name)
+      .replaceAll('{{FILE}}', path.basename(out))
+      .replaceAll('{{URL}}', url)
+      .replaceAll('{{DB}}', built.db)
+      .replaceAll('{{VERSION}}', prerelease ? `${base}-…` : PKG.version)
+      .replaceAll('{{INSTALL}}', install)
+      .replaceAll('{{INVITER}}', cfg.user || require('os').userInfo().username));
+    console.log(ok(`guide written:  ${guide}`));
+  } catch (e) { console.log(warn(`could not write the invitation guide: ${e.message}`)); }
+  console.log(`  send ${name} BOTH files over a channel you trust (croc, a password manager — not chat):`);
+  console.log(`     ${path.basename(out)}   their credential — one-time, install deletes it`);
+  console.log(`     MEMHOUSE-INVITATION.md  the steps, nothing secret`);
+  if (prerelease && !cfg.channel) console.log(`     and the tarball this build came from (memhouse nightly --out …) — ${PKG.version} is not on npm`);
+  console.log(`  they run:   memhouse install --env ${path.basename(out)}   (rotates the password to one only they know)`);
   console.log(`  once installed, they are a member — sharing works both ways: /mem:access ${name}`);
   return 0;
 }
@@ -3779,6 +3883,83 @@ async function cmdUninstall() {
       console.log(r.sessions_v);
       break;
     }
+    case 'members': {
+      // "Who is in this database, and what can each of them reach?" Before shared houses a
+      // database had exactly one member and the question did not exist; this layout creates
+      // it, and an operator had no supported way to answer — they had to hand-write SQL
+      // against system.grants. Found in a drill.
+      const cfg = requireConfig(resolveConfig(), 'members');
+      const db = flags.db && flags.db !== true ? String(flags.db) : cfg.db;
+      // --admin-* wins; otherwise the admin credential this install keeps (a house you
+      // deployed or administer). A member alone cannot read other accounts' grants.
+      const au = flags['admin-user'] && flags['admin-user'] !== true ? String(flags['admin-user']) : (cfg.adminUser || null);
+      const ap = flags['admin-password'] && flags['admin-password'] !== true ? String(flags['admin-password']) : (cfg.adminPassword || '');
+      // Reading ANOTHER account's grants needs privilege; without it ClickHouse simply
+      // returns fewer rows. Say so rather than presenting a short list as the whole truth.
+      const who = au ? { ...cfg, user: au, password: ap } : cfg;
+      let rows = [];
+      try {
+        // `is_wildcard` arrived in 26.x. On 25.11 — the default local tag — a wildcard grant
+        // is enforced identically but its row carries only the bare prefix (`alice_`), so
+        // without the column the trailing underscore is the marker.
+        const hasWild = Number((await chRows(who, "SELECT count() AS n FROM system.columns WHERE database = 'system' AND table = 'grants' AND name = 'is_wildcard'", { database: '' }))[0]?.n) > 0;
+        const star = hasWild ? "if(is_wildcard, '*', '')" : "if(endsWith(table, '_'), '*', '')";
+        rows = await chRows(who,
+          `SELECT user_name AS u, max(table IS NULL) AS db_wide,
+                  arrayStringConcat(arraySort(groupUniqArray(concat(table, ${star}))), ', ') AS tables
+             FROM system.grants
+            WHERE database = ${sqlStr(db)} AND user_name IS NOT NULL
+            GROUP BY user_name ORDER BY user_name`, { database: '' });
+      } catch (e) {
+        console.log(bad(`could not read the grant table: ${e.message}`));
+        console.log('  Pass an admin credential:  memhouse members --admin-user <a> --admin-password <p>');
+        process.exitCode = 1; break;
+      }
+      if (JSON_OUT) {
+        console.log(JSON.stringify({ database: db, members: rows.map((r) => ({
+          name: r.u, scope: Number(r.db_wide) === 1 ? 'database' : 'rooms',
+          rooms: Number(r.db_wide) === 1 ? null : String(r.tables || '').split(', ').filter(Boolean),
+        })) }, null, 2));
+        break;
+      }
+      if (!rows.length) {
+        console.log(ok(`no member holds a grant on '${db}'`));
+        console.log(`  Either it is empty, or this credential cannot see other accounts' grants.`);
+        console.log('  With an admin:  memhouse members --db ' + db + ' --admin-user <a> --admin-password <p>');
+        break;
+      }
+      const owners = rows.filter((r) => Number(r.db_wide) === 1);
+      console.log(`  '${db}' — ${rows.length} member(s):`);
+      for (const r of rows) {
+        if (Number(r.db_wide) === 1) console.log(`    ${String(r.u).padEnd(16)} the whole database`);
+        else console.log(`    ${String(r.u).padEnd(16)} ${String(r.tables || '(none)')}`);
+      }
+      if (owners.length && rows.length > 1) {
+        console.log('');
+        console.log(warn(`'${owners[0].u}' holds the WHOLE database while others hold rooms in it —`));
+        console.log(`  they can read and re-grant every housemate's rows. memhouse does not create`);
+        console.log(`  this shape; something granted it by hand. Narrow it to their own rooms.`);
+      }
+      if (!au) console.log('  (run with --admin-user to be sure you are seeing every account)');
+      break;
+    }
+    case 'rooms': {
+      // What are my rooms called? One answer, in one place: named for the member, inside the
+      // configured house. It resolves through roomNames(), so it cannot drift from what the
+      // shipper writes to.
+      const cfg = requireConfig(resolveConfig(), 'rooms');
+      const r = await roomsFor(cfg);
+      const names = {};
+      for (const t of [...ROOM_TYPES, ...META_TYPES]) names[t] = r.physical[t];
+      if (JSON_OUT) {
+        console.log(JSON.stringify({ database: cfg.db, member: r.member, pattern: r.pattern, rooms: names }, null, 2));
+      } else {
+        console.log(`${cfg.db} — your rooms, named for you (${cfg.db}.${r.pattern}):`);
+        for (const t of [...ROOM_TYPES, ...META_TYPES]) console.log(`  ${cfg.db}.${names[t]}`);
+        console.log(`\n  Housemates keep their own rooms beside these. A bare 'messages' is not a table you have.`);
+      }
+      break;
+    }
     case 'plugins': process.exitCode = await cmdPlugins(); break;
     case 'prompt':
       // Two audiences, two prompts. Bare `prompt` is the memory-USAGE snippet that goes
@@ -3898,7 +4079,11 @@ async function cmdUninstall() {
       // one we are about to bind. When it is not, fall through to the missing-credential
       // refusal below, which already says the right things.
       const configIsLocalHouse = !!priorCfg.url && sameEndpoint(priorCfg.url, targetUrl);
-      const reusable = initialised && configIsLocalHouse && priorCfg.password ? priorCfg.password : null;
+      // The credential that initialised the volume is the SUPERUSER's. In a one-layout house
+      // that is the admin credential kept beside the member's; in a house from before
+      // fencing the member was the superuser, so it is the member's.
+      const reusable = initialised && configIsLocalHouse && (priorCfg.adminPassword || priorCfg.password)
+        ? (priorCfg.adminPassword || priorCfg.password) : null;
 
       // Every way of asking for a different password against an existing house. The image
       // applies CLICKHOUSE_PASSWORD only when it INITIALISES a data directory, so any of
@@ -3978,7 +4163,7 @@ async function cmdUninstall() {
       // handed a fresh deploy `memhouse_root` as the house name while the superuser was
       // 'polat' — the memory would live in a database named after a role account nobody
       // chose.
-      const targetDb = flags.db || process.env.MEMHOUSE_DB || readEnvFile().MEMHOUSE_DB || houseUser;
+      const targetDb = flags.db || process.env.MEMHOUSE_DB || readEnvFile().MEMHOUSE_DB || 'mem';
       // Same check install runs, but EARLY — deploy initialises the container volume and
       // writes the env file before its install step, so a refusal that waits for install
       // arrives after the damage.
@@ -4035,9 +4220,17 @@ async function cmdUninstall() {
         try { process.kill(pid, 'SIGTERM'); } catch { /* raced */ }
         try { fs.unlinkSync(path.join(RUN_DIR, `${name}.pid`)); } catch { /* absent */ }
       }
+      // ONE LAYOUT from the first install. The container's superuser is the ADMIN
+      // credential (`memhouse_root`); the person shipping is a fenced MEMBER named for them,
+      // holding one grant on mem.<name>_*. A house of one is still a house — inviting a
+      // colleague later is one more member, never a change to this one. A volume that
+      // predates fencing was initialised with the member as superuser; it is reused as it
+      // is, and doctor says how to fence it.
+      const superUser = initialised ? (priorCfg.adminUser || houseUser) : 'memhouse_root';
       const pw = reusable || crypto.randomBytes(16).toString('hex');
+      const memberPw = reusable ? (priorCfg.password || pw) : (houseUser === superUser ? pw : crypto.randomBytes(16).toString('hex'));
       if (reusable) console.log(ok('reusing the existing house credential (its data volume is already initialised)'));
-      const r = dep.up({ password: pw, port, tag, user: houseUser });
+      const r = dep.up({ password: pw, port, tag, user: superUser });
       if (!r.ok) { console.log(bad(r.msg)); process.exitCode = 1; break; }
       console.log(ok(`ClickHouse starting via ${r.engine} on ${r.url} (loopback only)`));
 
@@ -4052,7 +4245,7 @@ async function cmdUninstall() {
         // db INCLUDED: this file is read back by the install below, and writing
         // priorCfg's computed default here made that install refuse over a mismatch
         // with a file this same command had just written.
-        writeEnvFile({ ...priorCfg, url: r.url, user: houseUser, password: pw, db: targetDb });
+        writeEnvFile({ ...priorCfg, url: r.url, user: houseUser, password: memberPw, db: targetDb, adminUser: superUser, adminPassword: pw });
         console.log(ok(`credential saved to ${ENV_FILE} before waiting — the volume is initialised with it`));
       }
 
@@ -4065,6 +4258,27 @@ async function cmdUninstall() {
         process.exitCode = 1; break;
       }
       console.log(ok('ClickHouse ready'));
+      // Fence the member from the start, with the same plan `invite` runs: mem.<name>_* and
+      // nothing else. Idempotent, so a reused house gets the same pass and nothing changes.
+      if (houseUser !== superUser) {
+        const { plan } = require(path.join(REPO_ROOT, 'memhouse', 'provision'));
+        const adminCfg = { url: r.url, user: superUser, password: pw, db: targetDb, stated: true };
+        let failed = null;
+        try {
+          for (const step of plan({ db: targetDb, member: houseUser, password: reusable ? null : memberPw })) {
+            try { await ch(adminCfg, step.sql, { database: '' }); }
+            catch (e) { if (!step.optional) throw e; }
+          }
+        } catch (e) { failed = e; }
+        if (failed) {
+          console.log(bad(`could not provision member '${houseUser}': ${String(failed.message).split('\n')[0]}`));
+          console.log(`  the house is up and the admin credential is in ${ENV_FILE.replace(os.homedir(), '~')}; fix and re-run deploy --local.`);
+          process.exitCode = 1; break;
+        }
+        console.log(ok(`member '${houseUser}' holds ${targetDb}.${houseUser}_* and nothing else; '${superUser}' administers the house`));
+      } else if (initialised && !priorCfg.adminUser) {
+        console.log(warn(`'${houseUser}' is both member and superuser here — this house predates fencing. It works; \`memhouse doctor\` says how to fence it.`));
+      }
       // A ROOTLESS container lives in the user's systemd slice, which MAY be torn down at
       // logout — if so the container takes a SIGTERM and the house goes with it. The
       // volume survives, so nothing is lost, but the house is gone with no explanation.
@@ -4102,10 +4316,18 @@ async function cmdUninstall() {
       // anticipates it) and it is NOT the narrow set INSTALL.md's grant-set argument
       // describes. A user who later adds a second member should know which house they
       // have.
-      console.log(warn(`this house is yours alone: '${houseUser}' is its superuser, and that is the credential being saved`));
-      console.log('  Adding a housemate later is two statements:');
-      console.log(`     CREATE USER <name> IDENTIFIED BY '…';  GRANT ALL ON ${targetDb}.* TO <name>;`);
-      flags.url = r.url; flags.user = houseUser; flags.password = pw;
+      if (houseUser !== superUser) {
+        console.log(ok(`'${houseUser}' ships as a member of ${targetDb}; '${superUser}' administers it — both credentials are in the env file`));
+        console.log('  Adding a housemate later:  memhouse invite <name> --url <an address they can reach>');
+      } else {
+        console.log(warn(`this house is yours alone: '${houseUser}' is its superuser, and that is the credential being saved`));
+      }
+      // The install below runs AS THE MEMBER, with the member's password — not the
+      // superuser's, which is what this handed it before the two were separated. The admin
+      // credential is NOT passed as flags: that would send install down the provisioning
+      // path for a member that already exists. It is already in the env file written above,
+      // and resolveConfig() carries it through to the file install rewrites.
+      flags.url = r.url; flags.user = houseUser; flags.password = memberPw;
       flags.db = targetDb;
       flags.yes = true;
       process.exitCode = await cmdInstall({ interactive: false });

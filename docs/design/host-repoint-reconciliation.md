@@ -18,16 +18,16 @@ stranger, and not just die on a raw "no such table".
 
 - **Plain `ship` never creates tables.** Only `install` / `--ensure-schema` do
   (`memhouse/shipper/ship.js`). Repoint to an empty host → `assertWriterSupported` finds
-  no `house_meta`, treats it as a "pre-record house" and waves it through → the INSERT
+  no `meta`, treats it as a "pre-record house" and waves it through → the INSERT
   into `messages` then fails with *no such table*. A raw error, no story.
-- **No local memory of the target.** The only state is server-side `house_meta`
+- **No local memory of the target.** The only state is server-side `meta`
   (schema_version, client_*, `last_ship:<writer>` heartbeat). There is **no `house_id`**
   and **nothing on the client** recording which house the shipper is bound to — so the
   shipper cannot tell "I was writing to A, now I'm pointed at empty B" from "first run".
 
 ## Two states to add
 
-**Target (server): a house identity.** Stamp `house_meta['house_id']` = a UUID, written
+**Target (server): a house identity.** Stamp `meta['house_id']` = a UUID, written
 once at house creation (install / invite / init). Presence of `house_id` = an initialized
 house with a stable identity; no tables at all = an empty target. `house_id` is what makes
 "same house" vs "different house at the same URL" vs "the house I knew got wiped"
@@ -51,7 +51,7 @@ point" record.
 | `house_id A` | `house_id A` | steady state — ship. |
 | `house_id A` | **empty (no tables)** | **STOP** — see below. |
 | `house_id A` | `house_id B` (different, initialized) | **STOP** — now pointed at a different house; re-baseline deliberately or fix env. |
-| `house_id A` | tables exist, no `house_meta`/`house_id` (pre-0.10 legacy) | existing path → `memhouse migrate`. |
+| `house_id A` | tables exist, no `meta`/`house_id` (pre-0.10 legacy) | existing path → `memhouse migrate`. |
 
 ## How to continue in the STOP case (was shipping to A, target empty)
 
@@ -88,7 +88,7 @@ a continuity that a bare repoint does not give — `relocate` is the command tha
 
 ## Scope when built
 
-1. `house_id` stamp in `house_meta` (create paths + a backfill for existing houses on
+1. `house_id` stamp in `meta` (create paths + a backfill for existing houses on
    `memhouse migrate`).
 2. `$MEMHOUSE_HOME/house.json` written on install / first ship.
 3. The reconciliation gate in `ship` (the matrix above), before any INSERT.

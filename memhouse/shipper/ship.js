@@ -61,12 +61,11 @@ const selfUpdate = require('../self-update');
 // gets. Taking it later would record whatever an upgrade had already replaced.
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
-  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN,
-  SUPPORTED_SCHEMAS, keyProblem,
-} = require('../house/house');
+  resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN, createStatement,
+  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
-// house_events would otherwise roll out to nobody.
+// events would otherwise roll out to nobody.
 const ALL_TABLES = [...ROOM_TYPES, ...META_TYPES];
 
 const BATCH_ROWS = 2000;   // insert batch ceiling by ROW COUNT
@@ -410,17 +409,25 @@ async function assertRoomKeys(client, rooms) {
   }
 }
 
+// The shipper reads the prefix straight from its environment: it is spawned with the
+// resolved MEMHOUSE_* env by the CLI, and every room name it touches comes from
+// resolveRooms, so this is the only line that needs to know.
+
 async function ensureSchema(client) {
   const rooms = await resolveRooms(client);
   // BEFORE the CREATEs and ALTERs, not beside the end-of-function asserts. A house whose
   // record says a newer release moved it forward may have columns this template does not
   // know; running this template's DDL first could add back what that release removed —
   // the exact write the guard exists to prevent.
+  await assertNotLegacyLayout(client, rooms);
   await assertWriterSupported(client, rooms);
   const tpl = fs.readFileSync(path.join(__dirname, '..', 'house', 'schema.sql.tpl'), 'utf-8');
-  const sql = tpl; // plain shared tables — nothing to render
-  const stripped = sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
-  const stmts = stripped.split(';').map((s) => s.trim()).filter(Boolean);
+  // Rendered per room rather than taken as one blob, because a prefixed house names its
+  // rooms `<prefix>_messages` and the template says `messages`. With no prefix the two
+  // are identical, so this is the same statements in the same order as before.
+  const stmts = [...ROOM_TYPES, ...META_TYPES]
+    .map((t) => createStatement(tpl, t, rooms.physical ? rooms.physical[t] : t)
+      .replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
   // Two failure shapes are survivable here and both are skipped rather than fatal:
   //
   //   - a permission denial. A read-only credential can still run --ensure-schema for
@@ -431,16 +438,24 @@ async function ensureSchema(client) {
   //     the loser can get TABLE_ALREADY_EXISTS or a metadata-file collision. The table
   //     exists either way, which is the outcome this function wants.
   let denied = 0;
-  for (const q of stmts) {
+  // The text-index grammar changed at 25.10 and neither side parses the other (measured:
+  // 25.8/25.9 take the quoted form, 25.10+ the function form). Pick by the server's own
+  // version, then keep one fallback: if the chosen form is refused on grammar alone —
+  // never on privilege — send the other. A wrong guess costs a round-trip, not the install.
+  const version = await serverVersion(client);
+  const dialect = textIndexDialectFor(version);
+  if (dialect === 'legacy') console.error(`[memhouse] ClickHouse ${version}: text indexes in the pre-25.10 grammar`);
+  const create = (q) => client.command({ query: q, clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 } });
+  for (const modern of stmts) {
+    const legacy = legacyTextIndexDialect(modern);
+    const [first, second] = dialect === 'legacy' ? [legacy, modern] : [modern, legacy];
     try {
-      await client.command({
-        query: q,
-        // allow_experimental_full_text_index: on 25.x the messages text indexes
-        // are gated behind this flag (SUPPORT_IS_DISABLED without it); 26.x+
-        // accepts it as a no-op. Query-scoped, so no server config or admin
-        // rights are needed. Verified on 25.11 and 26.7.
-        clickhouse_settings: { async_insert: 0, allow_experimental_full_text_index: 1 },
-      });
+      try { await create(first); }
+      catch (e) {
+        const m = e && e.message ? e.message : String(e);
+        if (!(first !== second && isTextIndexGrammarRefusal(m))) throw e;
+        await create(second);
+      }
     } catch (e) {
       const m = e && e.message ? e.message : String(e);
       if (/Not enough privileges|ACCESS_DENIED/i.test(m)) { denied++; continue; }
@@ -449,8 +464,16 @@ async function ensureSchema(client) {
     }
   }
   if (denied) {
-    console.error(`[memhouse] ${denied} schema statement(s) needed rights you do not hold — continuing with what you can do.`);
-    console.error('[memhouse] creating or replacing a ROOM is the house owner\'s job; adding a missing COLUMN is not.');
+    // In a SHARED house this is the designed state, not a shortfall: the operator creates
+    // each member's rooms during `invite` precisely so the member cannot — a member who
+    // could CREATE TABLE here could add tables beside every housemate's. Saying "you do
+    // not hold these rights" and then "schema ensured" about the same statements reads as
+    // a contradiction on every routine ship, which is how often a member sees it.
+    // A member holds CREATE TABLE on their own name pattern, so this is no longer the
+    // ordinary path — it is a credential provisioned outside memhouse with less than the
+    // plan gives. Say what to ask for rather than whose job it is.
+    console.error(`[memhouse] ${denied} schema statement(s) needed rights this credential does not hold — continuing with what it can do.`);
+    console.error('[memhouse] the memhouse grant is one line — `memhouse install --print-sql` shows it; ask whoever administers the house to run it.');
   }
   // A house created before origin existed has no such column, and every read and write
   // scopes by it. Add it in place; ReplacingMergeTree backfills the DEFAULT, so every
@@ -503,7 +526,7 @@ async function ensureSchema(client) {
   // There used to be a second, hardcoded `ADD COLUMN … origin` here, from when the healer
   // above could only add that one column. It is redundant now that the generic loop reads
   // the template correctly — and it would have been actively wrong once this loop covered
-  // house_meta and house_events, which have no origin and want none.
+  // meta and events, which have no origin and want none.
 
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);
@@ -534,7 +557,7 @@ async function ensureSchema(client) {
  * Keep the house's record of itself current: which schema generation it is at, and which
  * memhouse version is writing into it.
  *
- * Written only when something CHANGED. A row per pass would turn house_events into a
+ * Written only when something CHANGED. A row per pass would turn events into a
  * heartbeat log — under `--loop` at the default interval that is 288 rows a day per
  * machine, and the one question the table exists to answer ("when did this house move,
  * and who moved it") would be buried in noise.
@@ -548,7 +571,7 @@ async function recordHouseState(client, rooms, host) {
   const writer = `${rooms.user}@${host}`;
   try {
     const rs = await client.query({
-      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', {ck:String}, {cs:String})`,
+      query: `SELECT key, value FROM ${rooms.meta} FINAL WHERE key IN ('schema_version', {ck:String}, {cs:String})`,
       // Keyed per member AND host. Keyed by member alone, two machines of one member
       // overwrote each other's entry on every pass, so the fleet view could only ever
       // show the machine that shipped last — the exact machine that needs no attention.
@@ -588,15 +611,15 @@ async function recordHouseState(client, rooms, host) {
     }
     // The heartbeat, EVERY pass — the fleet view's health column. Latest-wins on the key,
     // so it is one live row per writer however often it fires; version/schema above stay
-    // change-only so house_events remains a record of moves, not a pulse trace.
+    // change-only so events remains a record of moves, not a pulse trace.
     metas.push({ key: `last_ship:${writer}`, value: new Date().toISOString(), host });
     await client.insert({
-      table: rooms.house_meta_raw, values: metas, format: 'JSONEachRow',
+      table: rooms.meta_raw, values: metas, format: 'JSONEachRow',
       clickhouse_settings: { async_insert: 0 },
     });
     if (events.length) {
       await client.insert({
-        table: rooms.house_events_raw, values: events, format: 'JSONEachRow',
+        table: rooms.events_raw, values: events, format: 'JSONEachRow',
         clickhouse_settings: { async_insert: 0 },
       });
     }
@@ -609,8 +632,8 @@ async function recordHouseState(client, rooms, host) {
  *
  * Distinct from assertRoomKeys, which inspects key SHAPES — a future generation could be
  * a data transform the keys do not show. This reads what the house says about itself:
- * house_meta['schema_version'] (what generation the rooms are at) and
- * house_meta['min_writer_schema'] (the floor `memhouse migrate` sets under writers).
+ * meta['schema_version'] (what generation the rooms are at) and
+ * meta['min_writer_schema'] (the floor `memhouse migrate` sets under writers).
  * Too new -> the fix is on THIS machine: memhouse update. Below the floor -> same.
  * (A house OLDER than this release is not an error here — the room checks catch it and
  * name `memhouse migrate`; this guard must not fire on a pre-0.10 house that has no
@@ -619,17 +642,52 @@ async function recordHouseState(client, rooms, host) {
  * Releases before 0.10.0 never read this — for them the floor is enforced by the
  * pilot's GRANTs, not by code.
  */
+/**
+ * A house from before the one-layout holds plain rooms — `messages`, not `<member>_messages`.
+ * Shipping into it would quietly create a second, empty set of rooms beside the full ones
+ * and write there: every past session invisible to the member's own reads, the dashboard
+ * and the skills, with nothing anywhere saying why. Refuse, and say exactly what moves the
+ * old rooms across — a RENAME, instant, nothing copied.
+ *
+ * Trips only when the member's rooms are ABSENT and the plain ones PRESENT; a house holding
+ * both is mid-conversion and is left alone.
+ */
+async function serverVersion(client) {
+  try {
+    const rs = await client.query({ query: 'SELECT version() AS v', format: 'JSONEachRow' });
+    return String(((await rs.json())[0] || {}).v || '');
+  } catch { return ''; }
+}
+
+async function assertNotLegacyLayout(client, rooms) {
+  const rs = await client.query({
+    query: `SELECT name FROM system.tables WHERE database = currentDatabase() AND name IN ('messages', '${rooms.physical.messages}')`,
+    format: 'JSONEachRow',
+  });
+  const names = new Set((await rs.json()).map((r) => r.name));
+  if (names.has(rooms.physical.messages) || !names.has('messages')) return;
+  // The plain rooms of a pre-one-layout house: the transcript rooms by type name, and the
+  // two bookkeeping rooms under the names they had then.
+  const legacyName = { meta: 'house_meta', events: 'house_events' };
+  const moves = [...ROOM_TYPES, ...META_TYPES].map((t) => `RENAME TABLE ${legacyName[t] || t} TO ${rooms.physical[t]};`).join('\n     ');
+  throw new Error(
+    'this house holds plain rooms (messages, sessions, tool_calls) — the layout before rooms were named for their member.\n'
+    + `  Shipping now would create empty ${rooms.pattern} rooms beside them and write there, hiding every past session.\n`
+    + `  Move the old rooms across (a rename — instant, nothing copied), then ship again:\n     ${moves}\n`
+    + `  Then replace the database-wide grant with the one-layout grant:  memhouse install --print-sql --member ${rooms.member}`);
+}
+
 async function assertWriterSupported(client, rooms) {
   let have;
   try {
     const rs = await client.query({
-      query: `SELECT key, value FROM ${rooms.house_meta} FINAL WHERE key IN ('schema_version', 'min_writer_schema')`,
+      query: `SELECT key, value FROM ${rooms.meta} FINAL WHERE key IN ('schema_version', 'min_writer_schema')`,
       format: 'JSONEachRow',
     });
     have = new Map((await rs.json()).map((r) => [r.key, toInt(r.value)]));
   } catch (e) {
     // ONLY a missing table means a pre-0.10 house (the room checks own that case). Any
-    // other failure — an ACCESS_DENIED on house_meta, a timeout — used to fall through
+    // other failure — an ACCESS_DENIED on meta, a timeout — used to fall through
     // here too, and a writer that merely could not READ the record was treated as if the
     // record did not exist: on a newer-schema house whose key shapes happen to match,
     // that bypassed the whole compatibility guard. Not being able to check is a reason
@@ -1004,6 +1062,7 @@ async function runShip(client, opts = {}) {
   // shape: writing at the wrong epoch either forks a session that did not change, or
   // overwrites a stored parse that did.
   const rooms = await resolveRooms(client);
+  await assertNotLegacyLayout(client, rooms);
   await assertWriterSupported(client, rooms);
   await assertRoomsExist(client, rooms);
   await assertRoomKeys(client, rooms);

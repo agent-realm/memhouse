@@ -1,12 +1,18 @@
-# The house — a database, three shared rooms
+# The house — a database, and the rooms in it
 
 **A house is a ClickHouse database.** Any database, named whatever its people name it —
-`polat`, `team_a`, even `default`. Its rooms are three plain tables: `sessions`,
-`messages`, `tool_calls`. There is nothing else to provision: no per-member tables, no
-Merge rooms, no views, no settings profile.
+`polat`, `team_a`, even `default`. Its rooms are tables: `sessions`, `messages`,
+`tool_calls`. No views, no Merge rooms, no settings profile.
 
-**Everyone in the house writes into the same tables**, each with their own credential,
-and two columns say where every row came from:
+**Every member's rooms are named for them, and one grant covers them.** `mem.polat_*`
+for polat, `mem.alice_*` for alice, in the same database — `mem` unless somebody has a
+reason. The grant is `GRANT … ON mem.polat_* TO polat WITH GRANT OPTION`: it lets the
+member create and rebuild their own rooms, share them, and reach nothing else. Nobody is
+granted the database itself. A house with one member is a house of one, not a different
+kind of house — a colleague joins as one more member and nothing about the first changes.
+`roomNames()` in `house.js` is the only place a table name is produced.
+
+Two columns say where every row came from:
 
 | Column | Meaning | Comes from |
 |---|---|---|
@@ -31,9 +37,17 @@ shipper create and evolve the rooms (`ship.js --ensure-schema`) — no admin has
 memhouse code. Joining a ClickHouse that happens to run a kernel is the same three
 statements: a database and a credential, nothing else.
 
-The model is **collaborative**: housemates trust each other with the house. Narrower
-grants can be layered on later if a team wants them; the isolation mechanism between
-groups that do NOT trust each other is a separate house.
+**Housemates do not have to trust each other with the house.** They used to: everyone
+held `ALL` on the database, and the isolation mechanism between parties who should not
+see each other was a separate house. That shape leaked — one member could `GRANT SELECT
+ON db.* TO <outsider>` and hand over a housemate's transcripts, with no admin and no
+notification.
+
+In a shared house each member is granted their own rooms and nothing else, so isolation
+lives INSIDE one house and is checkable: `SHOW GRANTS` lists what you hold, and `SHOW
+TABLES` does not list what you do not. A separate house is still the boundary between
+groups that should not even know of each other — names leak across a shared house even
+when content does not.
 
 ## One user on two machines, same session id
 
@@ -91,9 +105,9 @@ for writes and DDL.
 
 Two tables that are not rooms:
 
-- `house_meta` — house-wide key/value, latest-wins: `schema_version`, and the memhouse
+- `meta` — house-wide key/value, latest-wins: `schema_version`, and the memhouse
   version each member last shipped with.
-- `house_events` — append-only: migrations (`pending` → `applied` | `failed`), version
+- `events` — append-only: migrations (`pending` → `applied` | `failed`), version
   changes, schema observations, each with actor, host and row counts. Nothing is updated
   in place, so a migration that failed and was retried reads as exactly that.
 

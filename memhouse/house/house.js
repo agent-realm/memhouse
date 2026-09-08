@@ -1,9 +1,8 @@
 // The house.
 //
-// A house is a ClickHouse DATABASE — any database, named whatever its people name it
-// (`polat`, `team_a`, even `default`). Its rooms are three plain tables: `sessions`,
-// `messages`, `tool_calls`. Everyone in the house writes into the SAME tables, each with
-// their own credential, and two columns say who and where every row came from:
+// A house is a ClickHouse DATABASE, `mem` by default. Its rooms are tables — `sessions`,
+// `messages`, `tool_calls` — one set per member, named for them, and two columns say who
+// and where every row came from:
 //
 //   user_id  String MATERIALIZED currentUser()   — stamped by the server, unforgeable by
 //                                                  clients (async_insert is pinned to 0
@@ -12,19 +11,30 @@
 //   host     LowCardinality(String)              — the machine's fingerprint, minted once
 //                                                  per install (../host.js)
 //
-// That pair IS the provenance model. Alice and Bob point their shippers at `team_a` and
-// both write; `WHERE user_id = 'alice'` is one person, `WHERE host = '…'` is one machine.
-// The model is collaborative — housemates trust each other with the house — and the
-// boundary between houses is the database: joining someone's ClickHouse takes a database
-// and a credential (`GRANT ALL ON team_a.* TO alice`), nothing else, because ALL on your
-// own database reaches nothing outside it.
+// That pair IS the provenance model.
 //
-// THIS REPLACES THE PER-MEMBER LAYOUT. Rooms were `sessions_<member>` with per-member
-// grants, Merge rooms for team reads, and isolation between members of one database.
-// All of it is gone: suffixed names made every client resolve its room names first (and
-// `FROM messages` a documented trap), the Merge rooms existed only to undo the
-// splitting, and per-member isolation inside a shared house solved an adversarial
-// problem the product does not have. Separate houses isolate; one house shares.
+// ONE LAYOUT. A house is a database — `mem` unless somebody has a reason — and every
+// member's rooms in it carry the member's name: `mem.alice_messages`, `mem.polat_messages`.
+// A member holds one grant, on the wildcard `mem.<name>_*`, and nothing else in the
+// database. That is the whole access model, and roomNames() below is the only place a
+// table name is produced.
+//
+//   alone on a laptop        mem.polat_*            a house of one
+//   a team on one server     mem.polat_*, mem.alice_*
+//   an agency on a kernel    the same, in the kernel's `mem`
+//
+// Nobody ever holds ALL ON <db>.*. That grant is dynamic — it covers rooms created later —
+// and it is what turned two members in one database into a leak: either could read and
+// re-grant the other's transcripts, measured. The wildcard reaches nothing outside the
+// member's own name: measured, a member cannot create, read, list or re-grant a
+// housemate's rooms, and can read their own grant back with SHOW GRANTS in one line.
+//
+// THIS FILE HAS SAID THREE OTHER THINGS. Shared tables with row policies (0.4.0: policies
+// are permissive and OR'd, a catch-all fails open). Suffixed per-member rooms with Merge
+// rooms over them (0.8.0: removed because clients had to resolve names first and
+// isolation "solved a problem the product did not have" — the second half was wrong).
+// Then a house per member with `ALL ON db.*`, plus a prefixed variant beside it, plus the
+// machinery to keep the two from meeting. All three were special cases of this one.
 //
 // `sessions_v` IS A SAVED QUERY, NOT AN OBJECT — substituted into the same `FROM … AS c`
 // position a view name would occupy, running under the caller's own credential. It was
@@ -38,7 +48,11 @@ const ROOM_TYPES = ['sessions', 'messages', 'tool_calls'];
  * them, the shipper's guards do not require them, and a member who cannot create them
  * still ships normally.
  */
-const META_TYPES = ['house_meta', 'house_events'];
+// `<member>_meta` / `<member>_events` since the one-layout: every row in them is about ONE
+// member (their schema version, their machines, their last ship, their shares), so the old
+// `house_` prefix named the wrong unit. A pre-one-layout house still has `house_meta` /
+// `house_events`; the shipper's legacy guard names the rename.
+const META_TYPES = ['meta', 'events'];
 
 /**
  * What generation of the schema a house is at. Bumped only when existing rooms have to be
@@ -75,7 +89,7 @@ const SUPPORTED_SCHEMAS = [2];
 
 /**
  * The floor a house may set under its writers, recorded by `memhouse migrate` in
- * house_meta['min_writer_schema']. Today it equals SCHEMA_VERSION; a future
+ * meta['min_writer_schema']. Today it equals SCHEMA_VERSION; a future
  * back-compatible generation can hold it one step lower for a grace window.
  */
 const MIN_WRITER_SCHEMA = 2;
@@ -233,15 +247,19 @@ const ROOM_MATERIALIZED = {
   tool_calls: ['user_id'],
 };
 
-function currentParse(table, epochSource = table) {
+function currentParse(table, epochSource = table, physical = null) {
+  // `table` names the ROOM (for the materialized-column lookup); `physical` is what goes
+  // into the FROM, which differs whenever a prefix is in play.
   const extra = (ROOM_MATERIALIZED[table] || ['user_id']).join(', ');
+  const from = physical || table;
+  const epochFrom = physical ? physical.replace(new RegExp(`${table}$`), epochSource) : epochSource;
   return `(
     SELECT *, ${extra}
-    FROM ${table} FINAL
+    FROM ${from} FINAL
     WHERE origin != 'ship'
        OR (session_id, user_id, epoch) IN (
             SELECT session_id, user_id, max(epoch)
-            FROM ${epochSource}
+            FROM ${epochFrom}
             WHERE origin = 'ship'
             GROUP BY session_id, user_id)
   )`;
@@ -302,24 +320,54 @@ const READ_SETTINGS = { final: 1, join_use_nulls: 1 };
  * name it produces. See ship.js's delete, which must BIND the user rather than call
  * currentUser() inside a mutation, where it is not evaluated in the caller's context.
  */
+/**
+ * The table a room type lands in. THE naming rule, and the only copy of it.
+ *
+ * ONE LAYOUT. Every member's rooms carry the member's own name: `mem.alice_messages`,
+ * and `mem.polat_messages` even when polat is the only one in there. A house with one
+ * member is a house of one, not a different kind of house — so there is no second case
+ * here, no prefix to configure, and nothing for an invite file to carry.
+ *
+ * Depends on nothing but the member, so a caller holding only a config can name a table
+ * without a server round-trip. That matters: when the rule lived only inside roomNames(),
+ * callers that could not afford `SELECT currentUser()` spelled tables by hand instead —
+ * eight of them, all swallowing the error — and a house silently had no metadata plane.
+ */
+function physicalRoom(type, user) {
+  if (!user) throw new Error(`physicalRoom(${type}): a room belongs to a member, and none was given`);
+  return `${user}_${type}`;
+}
+
+/** The wildcard every grant to a member is scoped to: `<member>_*`. */
+function roomPattern(user) {
+  if (!user) throw new Error('roomPattern: a member is required');
+  return `${user}_*`;
+}
+
 function roomNames(user) {
-  const out = { member: user, user };
+  if (!user) throw new Error('roomNames: a member is required');
+  const out = { member: user, user, pattern: roomPattern(user) };
+  // Every room name in the codebase comes from physicalRoom() above — through this
+  // function where a caller has the rooms, directly where it has only a member name.
+  const phys = (t) => physicalRoom(t, user);
+  out.physical = {};
+  for (const t of [...ROOM_TYPES, ...META_TYPES]) out.physical[t] = phys(t);
   // The raw table names — for INSERT, for DDL, and for the shipper's own bookkeeping
   // reads, which have to see every epoch to decide which one to write next.
-  for (const t of ROOM_TYPES) out[`${t}_raw`] = t;
+  for (const t of ROOM_TYPES) out[`${t}_raw`] = phys(t);
   // What everything else gets. `sessions` is unfiltered: it is one metadata row per
   // session by construction, latest-wins, and carries no epoch anyone may read.
-  out.sessions = 'sessions';
-  out.messages = currentParse('messages');
+  out.sessions = phys('sessions');
+  out.messages = currentParse('messages', 'messages', phys('messages'));
   // tool_calls takes its epoch from MESSAGES, not from itself. A parse that produces
   // messages but NO tool calls is ordinary — a compaction can remove every assistant turn
   // that called something — and it writes zero rows into this room at the new epoch. Asked
   // for its own max(epoch), the room would answer with the SUPERSEDED epoch and serve the
   // old parse's tool calls beside the new parse's messages. Both rooms are written by the
   // same pass at the same epoch, so messages is the authority for both.
-  out.tool_calls = currentParse('tool_calls', 'messages');
+  out.tool_calls = currentParse('tool_calls', 'messages', phys('tool_calls'));
   // The house's own record of itself — plain names, nothing to filter.
-  for (const t of META_TYPES) { out[t] = t; out[`${t}_raw`] = t; }
+  for (const t of META_TYPES) { out[t] = phys(t); out[`${t}_raw`] = phys(t); }
   out.sessions_v = sessionsRollup(out);
   return out;
 }
@@ -337,7 +385,42 @@ async function resolveRooms(client) {
   return roomNames(await currentUser(client));
 }
 
+/**
+ * The text-index DDL for servers before the tokenizer grammar changed. 25.8 spells a
+ * tokenizer as a quoted name with options — `text(tokenizer = 'ngram', ngram_size = 3)`,
+ * `text(tokenizer = 'default')` — and rejects the function form with "Expected literal";
+ * 26.x spells it as a function — `ngrams(3)`, `splitByNonAlpha` — and rejects the quoted
+ * names as "Unknown tokenizer". Neither parses the other. The template carries the
+ * current grammar; this rewrites a statement to the older one when a server refuses it.
+ * `default` in the old grammar is the non-alphanumeric splitter, which is what
+ * `splitByNonAlpha` names in the new one, so the indexes built are the same.
+ */
+function legacyTextIndexDialect(sql) {
+  return sql
+    .replace(/TYPE text\(tokenizer = ngrams\((\d+)\)\)/g, "TYPE text(tokenizer = 'ngram', ngram_size = $1)")
+    .replace(/TYPE text\(tokenizer = splitByNonAlpha\)/g, "TYPE text(tokenizer = 'default')");
+}
+
+/**
+ * Which text-index grammar a server speaks, from `SELECT version()`. Measured on real
+ * builds: 25.8 and 25.9 want the quoted-name form, 25.10 onwards the function form, and
+ * each rejects the other. Anything unparseable is treated as current; the shipper still
+ * falls back on a grammar refusal, so a wrong guess costs one round-trip, not the install.
+ */
+function textIndexDialectFor(version) {
+  const m = /^(\d+)\.(\d+)/.exec(String(version || '').trim());
+  if (!m) return 'modern';
+  const major = Number(m[1]); const minor = Number(m[2]);
+  return (major < 25 || (major === 25 && minor < 10)) ? 'legacy' : 'modern';
+}
+
+/** True when a server's refusal is the grammar, not a privilege or a real mistake. */
+function isTextIndexGrammarRefusal(message) {
+  return /Expected literal|supports only 'default'|Unknown tokenizer/.test(String(message || ''));
+}
+
 module.exports = {
+  physicalRoom, roomPattern, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor,
   ROOM_TYPES, META_TYPES, SCHEMA_VERSION, SUPPORTED_SCHEMAS, MIN_WRITER_SCHEMA,
   MIGRATIONS, ROOM_KEYS, keyProblem,
   READ_SETTINGS, MEMBER_PIN,

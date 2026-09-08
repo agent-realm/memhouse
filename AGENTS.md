@@ -10,8 +10,14 @@ live in [`~/agent-realm/CLAUDE.md`](../CLAUDE.md) and are not repeated here.
 
 A local shipper parses coding-agent sessions from 17 editors and writes them as typed rows
 into a ClickHouse database the user owns. A **house** is a database; its **rooms** are
-three shared tables (`sessions`, `messages`, `tool_calls`); a **member** owns one house.
-There is no cloud and no LLM anywhere in the write or read path.
+tables, one set per **member** and named for them (`mem.alice_messages`). A member holds
+one grant — `ON mem.alice_*` — and nothing else in the database; nobody is ever granted the
+database itself. `roomNames()` in `memhouse/house/house.js` is the only place a table name
+is produced, and `memhouse/provision.js` is the only description of what a member is
+granted — the live path executes it and `--print-sql` prints it.
+The ClickHouse is whichever one the user points at — local container, their own server,
+or ClickHouse Cloud; memhouse runs no service of its own and proxies nothing. There is no
+LLM anywhere in the write or read path.
 
 `memhouse/DESIGN.md` argues the design. `TERMINOLOGY.md` is the canon for names — if a
 thing has a name there, use it and do not invent another.
