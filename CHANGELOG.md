@@ -21,6 +21,16 @@ migration path is planned work, not a promise the old versions can cash.
   `${MEMHOUSE_BIN:-memhouse}`. `plugins list` shows the binding, `plugins remove` removes
   it, and nothing else in `settings.json` is touched.
 
+## 0.18.1 — 2026-09-08
+
+On the `team` channel. Everything since 0.18.0, none of it reaching `latest` (0.17.0):
+
+- `memhouse instance` — which memhouse this is on one screen; `/mem:house` opens with it.
+- Playbook binding — `plugins install` stamps `MEMHOUSE_HOME`/`MEMHOUSE_BIN` into the
+  playbooks an instance ships, so their skills read that instance's house and binary.
+- Bare `memhouse` beside an `invite-<name>.env` offers to join; `--yes` joins unattended.
+  The invitation guide points the invitee, or their agent, at the sibling credential file.
+
 ## 0.18.0 — 2026-09-08
 
 Published on the `team` channel (`npm install -g memhouse@team`). `latest` stays 0.17.0:

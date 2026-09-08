@@ -1236,6 +1236,10 @@ async function cmdInstall({ interactive }) {
   // deliberately for exactly this reason; install used to do nothing at all.
   if (displaces && shipperHealth().running) {
     const st = (() => { try { return require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { return null; } })();
+    // Same server and database, different user, is a credential swap, not a house move —
+    // "old house" reads as data loss when nothing moved. A drill flagged the conflation.
+    const sameHouse = prior.MEMHOUSE_URL && sameEndpoint(prior.MEMHOUSE_URL, cfg.url) && (!prior.MEMHOUSE_DB || prior.MEMHOUSE_DB === cfg.db);
+    const whatMoved = sameHouse ? 'old credential' : 'old house';
     const viaService = String(shipperHealth().via || '').startsWith('service');
     if (viaService && st) {
       const cmd = st.kind === 'systemd'
@@ -1243,10 +1247,10 @@ async function cmdInstall({ interactive }) {
         : ['launchctl', ['kickstart', '-k', `gui/${process.getuid()}/com.memhouse.shipper`]];
       const r = spawnSync(cmd[0], cmd[1], { stdio: 'pipe', encoding: 'utf-8' });
       console.log(r.status === 0 ? ok('shipper restarted against the new house')
-        : warn('restart the shipper yourself, or it keeps writing to the old house:  memhouse service restart'));
+        : warn(`restart the shipper yourself, or it keeps writing under the ${whatMoved}:  memhouse service restart`));
     } else {
       const pid = pidOf('shipper');
-      if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`stopped the shipper (pid ${pid}) — it was pointed at the old house`)); } catch { /* raced */ } }
+      if (pid) { try { process.kill(pid, 'SIGTERM'); console.log(ok(`stopped the shipper (pid ${pid}) — it was running under the ${whatMoved}`)); } catch { /* raced */ } }
       console.log('  start it against the new one:  memhouse start');
     }
   }
