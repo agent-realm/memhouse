@@ -1179,5 +1179,13 @@ test('unbinding removes only the two keys, and an emptied env block goes with th
   assert.deepStrictEqual(binding.unbindSettings({ hooks: {} }), { hooks: {} }, 'unbinding an unbound file is a no-op');
 });
 
+test('an instance is named by its home, or by MEMHOUSE_NAME', () => {
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse'), 'default');
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse-stage'), 'stage');
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse-team/'), 'team');
+  assert.strictEqual(binding.instanceName('/Users/p/alice-sandbox/memhouse'), 'memhouse');
+  assert.strictEqual(binding.instanceName('/Users/p/.memhouse-stage', 'santiment'), 'santiment');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

@@ -66,4 +66,16 @@ function unbind(dir) {
   return true;
 }
 
-module.exports = { bindSettings, unbindSettings, boundTo, bind, unbind, readSettings, KEYS };
+/**
+ * What an instance is called: MEMHOUSE_NAME if the env file sets one, else its home
+ * directory with the conventional `.memhouse-` prefix removed — `~/.memhouse-stage` is
+ * "stage", `~/.memhouse` is "default", `~/alice-sandbox/memhouse` is "memhouse".
+ */
+function instanceName(home, envName = '') {
+  if (envName) return envName;
+  const base = path.basename(String(home || '').replace(/[\/]+$/, ''));
+  if (base === '.memhouse') return 'default';
+  return base.replace(/^\.memhouse-/, '') || 'default';
+}
+
+module.exports = { bindSettings, unbindSettings, boundTo, bind, unbind, readSettings, KEYS, instanceName };

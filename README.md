@@ -83,6 +83,7 @@ memhouse deploy --local | --down           stand up (or remove) a local house
 memhouse invite <name>                     mint a member + house, hand them one env file
 memhouse members [--db X]                  who is in a house, and what each can reach
 memhouse whoami [--admin]                  which credential is in play, and what it may do
+memhouse instance                          which memhouse this is: home, binary, house, rooms, scope, bindings
 memhouse rooms                             what your rooms are actually called
 memhouse share <user> [--only …|--revoke|--list]
                                            let a housemate read yours, in whole or in part

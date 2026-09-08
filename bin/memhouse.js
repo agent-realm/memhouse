@@ -438,6 +438,7 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              search <terms…>      full-text search across all sessions
              resume <session-id>  print the command that reopens that session in its editor
              sessions-query       print the session rollup SQL for this credential
+             instance             which memhouse this is: home, binary, house, rooms, scope, daemons, bound playbooks
              rooms                what your rooms are actually called (--json)
              members              who is in a house and what each can reach (--db, admin)
              start | stop |       shipper loop + dashboard as background daemons
@@ -3961,6 +3962,54 @@ async function cmdUninstall() {
         console.log(`  this shape; something granted it by hand. Narrow it to their own rooms.`);
       }
       if (!au) console.log('  (run with --admin-user to be sure you are seeing every account)');
+      break;
+    }
+    case 'instance': {
+      // Which memhouse am I talking to? One screen: the instance, its binary, its house,
+      // its rooms, what it ships, its host, its daemons, and which playbooks are bound to
+      // it. A machine can run several instances; this is how they are told apart.
+      const cfg = resolveConfig();
+      const binding = require(path.join(REPO_ROOT, 'memhouse', 'binding'));
+      const scope = require(path.join(REPO_ROOT, 'editors', 'scope'));
+      const hostmod = require(path.join(REPO_ROOT, 'memhouse', 'host.js'));
+      const thisBin = (() => { try { return fs.realpathSync(process.argv[1]); } catch { return process.argv[1]; } })();
+      const name = binding.instanceName(HOME_DIR, readEnvFile().MEMHOUSE_NAME);
+      const host = (() => { try { return hostmod.read(HOME_DIR); } catch { return null; } })();
+      const daemons = { shipper: pidOf('shipper') || null, dashboard: pidOf('dashboard') || null };
+      const realHome = (() => { try { return fs.realpathSync(HOME_DIR); } catch { return HOME_DIR; } })();
+      const cands = new Map();
+      for (const d of scope.parseList(cfg.claudeRoots).map(scope.expandHome)) cands.set(d, d);
+      for (const t of claudeTargets()) cands.set(t.dir, t.dir);
+      const bound = [...cands.keys()].filter((d) => {
+        const b = binding.boundTo(binding.readSettings(d)); if (!b) return false;
+        try { return fs.realpathSync(b.home) === realHome; } catch { return b.home === HOME_DIR; }
+      });
+      let rooms = null; let counts = {};
+      if (cfg.stated && cfg.user) {
+        rooms = roomNames(cfg.user);
+        try {
+          for (const r of await chRows(cfg, `SELECT table, sum(rows) AS n FROM system.parts WHERE active AND database = ${sqlStr(cfg.db)} AND startsWith(table, ${sqlStr(`${cfg.user}_`)}) GROUP BY table`, { database: '' })) counts[r.table] = Number(r.n);
+        } catch { /* unreachable house: rooms still listed, counts absent */ }
+      }
+      const out = {
+        instance: name, home: HOME_DIR, envFile: ENV_FILE, binary: thisBin, version: PKG.version, channel: cfg.channel || null,
+        house: cfg.stated ? { url: cfg.url, db: cfg.db, member: cfg.user, adminCredential: !!cfg.adminUser, adminUser: cfg.adminUser || null } : null,
+        rooms: rooms ? [...ROOM_TYPES, ...META_TYPES].map((t) => ({ table: `${cfg.db}.${rooms.physical[t]}`, rows: counts[rooms.physical[t]] ?? null })) : [],
+        ships: scope.describe({ MEMHOUSE_EDITORS: cfg.editors, MEMHOUSE_CLAUDE_ROOTS: cfg.claudeRoots }),
+        host: host ? host.id : null, daemons: { ...daemons, dashboardUrl: daemons.dashboard ? `http://localhost:${cfg.port}` : null },
+        boundPlaybooks: bound,
+      };
+      if (JSON_OUT) { console.log(JSON.stringify(out, null, 2)); break; }
+      const line = (k, v) => console.log(`  ${k.padEnd(9)} ${v}`);
+      line('instance', `${name}   (${short(HOME_DIR)})`);
+      line('binary', `${short(thisBin)}   ${PKG.version}${cfg.channel ? `   channel ${cfg.channel}` : ''}`);
+      if (!out.house) { line('house', 'none configured — memhouse install'); break; }
+      line('house', `${cfg.url}   db ${cfg.db}   member ${cfg.user}   admin credential: ${cfg.adminUser ? `yes (${cfg.adminUser})` : 'no'}`);
+      line('rooms', out.rooms.map((r) => `${r.table}${r.rows === null ? '' : ` ${r.rows}`}`).join('  ·  '));
+      line('ships', out.ships);
+      line('host', host ? host.id : 'not minted yet (first ship mints it)');
+      line('daemons', `shipper ${daemons.shipper ? `running (pid ${daemons.shipper})` : 'stopped'}   dashboard ${daemons.dashboard ? `running (pid ${daemons.dashboard}) → http://localhost:${cfg.port}` : 'stopped'}`);
+      line('bound', bound.length ? bound.map(short).join(', ') : 'no playbook is bound to this instance — memhouse plugins install claude');
       break;
     }
     case 'rooms': {
