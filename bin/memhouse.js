@@ -3988,7 +3988,10 @@ async function cmdUninstall() {
       if (cfg.stated && cfg.user) {
         rooms = roomNames(cfg.user);
         try {
-          for (const r of await chRows(cfg, `SELECT table, sum(rows) AS n FROM system.parts WHERE active AND database = ${sqlStr(cfg.db)} AND startsWith(table, ${sqlStr(`${cfg.user}_`)}) GROUP BY table`, { database: '' })) counts[r.table] = Number(r.n);
+          // system.tables, not system.parts: a member holds no grant on the latter, and the
+          // former is filtered to what they may see. total_rows is approximate under merges
+          // and exact enough for "is anything in there".
+          for (const r of await chRows(cfg, `SELECT name AS table, total_rows AS n FROM system.tables WHERE database = ${sqlStr(cfg.db)} AND startsWith(name, ${sqlStr(`${cfg.user}_`)})`, { database: '' })) counts[r.table] = Number(r.n);
         } catch { /* unreachable house: rooms still listed, counts absent */ }
       }
       const out = {
