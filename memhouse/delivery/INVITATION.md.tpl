@@ -38,6 +38,10 @@ going on. Do not print its contents — the last line of it is a password.
 {{INSTALL}}
 
 On most Linux distros the global install needs `sudo`; if `npm` says `EACCES`, that is why.
+If you handed this page to an agent and it reports that a permission classifier blocked the
+install (a global `npm install` is exactly what such classifiers stop), run this one line
+yourself in a terminal and tell the agent to continue from step 2 — that is the intended
+split: the person installs software, the agent does the rest.
 `memhouse --version` should print `{{VERSION}}`.
 
 ## 2. Join the house
