@@ -273,14 +273,24 @@ function portOf(u) {
 // "not running" for every correctly service-managed install, and `doctor` fails on a
 // healthy machine. Returns { running, via }.
 function shipperHealth() {
+  // "running" is the pid; whether it is DOING anything is the log. Both, always.
+  const lastPass = (() => {
+    try {
+      const passlog = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'passlog'));
+      const f = path.join(LOG_DIR, 'shipper.log'); const st = fs.statSync(f);
+      const fd = fs.openSync(f, 'r'); const len = Math.min(st.size, 65536); const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, st.size - len); fs.closeSync(fd);
+      return passlog.lastPass(buf.toString('utf-8'));
+    } catch { return { outcome: null }; }
+  })();
   const pid = pidOf('shipper');
-  if (pid) return { running: true, via: `daemon (pid ${pid})` };
+  if (pid) return { running: true, via: `daemon (pid ${pid})`, lastPass };
   try {
     const svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js'));
     const st = svc.status();
-    if (st.installed) return { running: st.running, via: `service (${st.kind})` };
+    if (st.installed) return { running: st.running, via: `service (${st.kind})`, lastPass };
   } catch { /* no service integration on this platform */ }
-  return { running: false, via: null };
+  return { running: false, via: null, lastPass };
 }
 
 // Room routing for the CLI's own queries. The shipper and dashboard resolve rooms through
@@ -1634,7 +1644,12 @@ async function cmdStatus() {
       console.log(`     ${f.writer.padEnd(28)} ${String(f.version || '?').padEnd(8)} last ship ${fleetAge(f.ageMs)}${mark}`);
     }
   }
-  console.log(out.shipper.running ? ok(`shipper: running — ${out.shipper.via}`) : warn('shipper: not running'));
+  {
+    const fail = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'passlog')).describeFailure(out.shipper.lastPass);
+    console.log(!out.shipper.running ? warn('shipper: not running')
+      : fail ? warn(`shipper: running — ${out.shipper.via} — but ${fail}`)
+      : ok(`shipper: running — ${out.shipper.via}`));
+  }
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
   if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${runningPort(cfg)}`);
   // Exit non-zero when the house is unreachable. `status` is what a health check, a
@@ -1981,7 +1996,9 @@ async function cmdDoctor() {
       'that adapter does not extract usage; the messages are stored, the numbers are not');
   } catch { /* a house that cannot be read is already reported above */ }
   const sh = shipperHealth();
-  add(sh.running, `shipper${sh.via ? ` — ${sh.via}` : ''}`, 'memhouse start (or: memhouse service install)');
+  const shFail = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'passlog')).describeFailure(sh.lastPass);
+  add(sh.running && !shFail, `shipper${sh.via ? ` — ${sh.via}` : ''}${shFail ? ` — ${shFail}` : ''}`,
+    shFail ? (sh.lastPass.auth ? 'memhouse stop && memhouse start' : 'read: ~/.memhouse/logs/shipper.log') : 'memhouse start (or: memhouse service install)');
   add(!!pidOf('dashboard'), 'dashboard daemon', 'memhouse start');
   add(fs.existsSync(path.join(REPO_ROOT, 'public', 'index.html')), 'dashboard UI built', 'built automatically by memhouse start');
 
