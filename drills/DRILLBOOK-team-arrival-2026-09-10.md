@@ -72,6 +72,15 @@ strand the other.
   `Authentication failed` — the latter was the 0.18.1 install bug (shipper spawned with the
   pre-rotation password).
 
+## Debrief and read — before the record
+
+For every pilot: (1) **debrief its agent in its own tab** — what it ran, what it guessed,
+what was wrong or contradictory (quoted), what looked failed but was not and the reverse,
+whether it wanted to look outside the folder, where it believes its memory lives.
+(2) **Read its session** — from the house (`<member>_messages` / `<member>_tool_calls`,
+`folder LIKE '%inbox%'`) or the `.jsonl` on the VM — and compare with what it said. A
+relayed summary or a pane snapshot is not a reading.
+
 ## Record
 
 Write `drills/DRILL-<name>-<date>.md`: outcome, findings per repo (memhouse vs the
