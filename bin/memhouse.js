@@ -405,7 +405,9 @@ Setup        onboard              interactive wizard: discover → configure →
                                   --print-sql            print the SQL, run it yourself
                                   with admin: --admin-user --admin-password [--member NAME]
                                   builds house + user + rooms + grants, then verifies as
-                                  the member. The admin credential is never stored.
+                                  the member. The admin credential IS written to the env
+                                  file (mode 600) so invite/members need no flags; delete
+                                  those two lines if you would rather pass it each time.
                                   --env FILE installs from an invite file (see: invite)
              invite <name>        mint a member and write the env file their install needs
                                   (--url [--db NAME] [--out FILE]; --admin-user and
@@ -969,6 +971,16 @@ function startShipperBackground(cfg) {
   console.log('  dashboard (browse / search / analyze):  memhouse start');
 }
 
+// The store is node:sqlite, stable from Node 24. On 22 everything green-lights and the
+// SQLite-backed adapters silently ship nothing — 36 messages went out before anyone noticed.
+// doctor said so; install and onboard did not. Now they refuse, with the same sentence.
+function engineOk() {
+  const major = Number(process.versions.node.split('.')[0]);
+  if (major >= 24) return true;
+  console.log(bad(`node ${process.versions.node} — need >= 24 — node:sqlite is stable there; the SQLite-backed adapters need it`));
+  process.exitCode = 1; return false;
+}
+
 async function cmdInstall({ interactive }) {
   // --env <file>: an INVITE intake. The file carries MEMHOUSE_URL/USER/PASSWORD/DB from
   // `memhouse invite` on the admin's machine; loading it into the environment BEFORE
@@ -985,6 +997,10 @@ async function cmdInstall({ interactive }) {
     // this machine with a file that cannot authenticate on the invitee's.
     const missing = wanted.filter((k) => !parsed[k]);
     if (missing.length) { console.log(bad(`--env ${flags.env} is missing ${missing.join(', ')} — not a complete invite file?`)); return 1; }
+    try {
+      const h = new URL(String(parsed.MEMHOUSE_URL || '')).hostname;
+      if (/^(localhost|127\.0\.0\.1|\[?::1\]?)$/.test(h)) console.log(warn(`${parsed.MEMHOUSE_URL} is loopback — it points at THIS machine; only right if a tunnel or port-forward puts the house here`));
+    } catch { /* not a URL; the missing-fields check above already spoke */ }
     // Clear ambient MEMHOUSE_* so ONLY the file speaks (exported vars normally win over the
     // file; an invite intake is the one place they must not).
     for (const k of ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB', 'MEMHOUSE_PORT']) delete process.env[k];
@@ -1323,7 +1339,8 @@ function printGettingStarted(cfg) {
   console.log('                                     /mem:sql, /mem:access, /mem:admin');
   console.log(`     ${mh} search <terms>         find a past conversation right now`);
   console.log(`     ${mh} doctor                 every line a check mark = healthy`);
-  console.log('  The house keeps shipping as you work; nothing else to do.');
+  if (flags['no-ship'] === true) console.log('  Shipping is OFF (--no-ship). Start it when ready:  memhouse start');
+  else console.log('  The house keeps shipping as you work; nothing else to do.');
 }
 
 async function cmdOnboard() {
@@ -3891,8 +3908,8 @@ async function cmdUninstall() {
     // fall through to HELP: forty lines of help and exit 0 is not what --version means.
     case 'version': console.log(PKG.version); break;
     case 'discover': await cmdDiscover(); break;
-    case 'onboard': process.exitCode = await cmdOnboard(); break;
-    case 'install': process.exitCode = await cmdInstall({ interactive: false }); break;
+    case 'onboard': if (!engineOk()) break; process.exitCode = await cmdOnboard(); break;
+    case 'install': if (!engineOk()) break; process.exitCode = await cmdInstall({ interactive: false }); break;
     case 'setup': {
       // Dual-mode like install: --yes (with any --url/--user/--password/--db/
       // --port overrides, already resolved into cfg) skips every prompt so
