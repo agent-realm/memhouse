@@ -46,4 +46,19 @@ function assertSingleLine(env) {
   }
 }
 
-module.exports = { parse, quoteShell, quoteSystemd, assertSingleLine };
+/**
+ * Which connection values in an env file's text differ from what a process currently holds.
+ * A running shipper was spawned with one credential; `install --env` rotates the password
+ * and rewrites the file, and a member can `memhouse passwd` under a running daemon. In
+ * both cases the FILE is the truth and the process copy is stale. Pure; used by the
+ * shipper (adopt on auth failure) and by install (adopt before spawning).
+ */
+function credentialDrift(text, current = {}) {
+  const file = parse(String(text || ''));
+  const keys = ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB'];
+  const changed = keys.filter((k) => file[k] !== undefined && file[k] !== current[k]);
+  const values = Object.fromEntries(changed.map((k) => [k, file[k]]));
+  return { changed, values };
+}
+
+module.exports = { credentialDrift, parse, quoteShell, quoteSystemd, assertSingleLine };

@@ -1202,5 +1202,16 @@ test('an invite file is recognised by name and read without its secret', () => {
   fs.rmSync(d, { recursive: true });
 });
 
+// ── a rotated credential must reach the process that was spawned with the old one ───────
+test('credentialDrift reports exactly the env-file values a process no longer matches', () => {
+  const envfile = require('../memhouse/envfile');
+  const text = "MEMHOUSE_URL='http://h:1'\nMEMHOUSE_USER='mira'\nMEMHOUSE_PASSWORD='new'\nMEMHOUSE_DB='mem'\n";
+  const d = envfile.credentialDrift(text, { MEMHOUSE_URL: 'http://h:1', MEMHOUSE_USER: 'mira', MEMHOUSE_PASSWORD: 'invite', MEMHOUSE_DB: 'mem' });
+  assert.deepStrictEqual(d, { changed: ['MEMHOUSE_PASSWORD'], values: { MEMHOUSE_PASSWORD: 'new' } });
+  assert.deepStrictEqual(envfile.credentialDrift(text, { MEMHOUSE_URL: 'http://h:1', MEMHOUSE_USER: 'mira', MEMHOUSE_PASSWORD: 'new', MEMHOUSE_DB: 'mem' }).changed, [], 'in sync: nothing to adopt');
+  assert.deepStrictEqual(envfile.credentialDrift('', { MEMHOUSE_PASSWORD: 'x' }).changed, [], 'no file: nothing to adopt');
+  assert.deepStrictEqual(envfile.credentialDrift("MEMHOUSE_PASSWORD='p'", {}).changed, ['MEMHOUSE_PASSWORD'], 'a process with nothing adopts the file');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

@@ -1301,6 +1301,18 @@ async function finishInvite(cfg) {
     }
     if (go) {
       const code = await cmdPasswd({ quiet: true });
+      if (code === 0) {
+        // The rotation rewrote the env FILE. But --env hoisted the invite's values into
+        // process.env, and resolveConfig prefers process.env over the file — so the
+        // shipper spawned a few lines later got the INVITE password, which the rotation
+        // had just killed, and failed every pass with "Authentication failed" while every
+        // fresh CLI call (reading the file) worked. A drill member watched an empty house
+        // for twelve minutes. Adopt what the file now says before anything else is spawned.
+        const drift = envfile.credentialDrift(fs.readFileSync(ENV_FILE, 'utf-8'), process.env);
+        for (const k of drift.changed) process.env[k] = drift.values[k];
+        if (drift.values.MEMHOUSE_PASSWORD !== undefined && flags.password !== undefined) flags.password = drift.values.MEMHOUSE_PASSWORD;
+        if (cfg) cfg.password = process.env.MEMHOUSE_PASSWORD;
+      }
       if (code !== 0) {
         // Rotation failed and its own state may be uncertain — KEEP the invite file (it
         // still carries the password the config was just written from) so nothing is

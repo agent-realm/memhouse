@@ -175,6 +175,12 @@ else
   case "$out" in *installed*) ok "memhouse --yes joins from the nearby invite" ;; *) bad "memhouse --yes did not join" "$(printf '%s' "$out" | grep -i '✗\|error' | head -1)" ;; esac
   [ -f "$D/invite-im_bare.env" ] && bad "  the spent invite file was not removed" || ok "  the spent invite file is gone"
   grep -q "MEMHOUSE_USER='im_bare'" "$H/env" 2>/dev/null && ok "  installed as the invited member" || bad "  env not written as im_bare"
+  # the daemon that join spawned must use the ROTATED password, not the invite's. A drill
+  # member's shipper failed every pass with "Authentication failed" while the CLI worked.
+  sleep 10
+  if grep -q "was rejected by\|Authentication failed" "$H/logs/shipper.log" 2>/dev/null; then
+    grep -q "adopting it and retrying" "$H/logs/shipper.log" && ok "the shipper adopted the rotated credential (recovered)" || bad "the shipper spawned by join holds the INVITE password" "$(grep -m1 'rejected\|Authentication' "$H/logs/shipper.log")"
+  else ok "the shipper spawned by join authenticates with the rotated password"; fi
   ( cd "$D" && MEMHOUSE_HOME="$H" $CLI stop >/dev/null 2>&1 || true )
   # no invite present: bare memhouse falls back to help, not an offer.
   E="$WORK/empty"; mkdir -p "$E"    # a clean dir — earlier cases dropped invite files in $WORK
