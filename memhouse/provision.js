@@ -61,7 +61,10 @@ function plan({ db, member, password = null }) {
     { sql: `CREATE DATABASE IF NOT EXISTS ${db}`, why: 'the house', optional: false },
   ];
   if (password !== null) {
-    steps.push({ sql: `CREATE USER IF NOT EXISTS ${member} IDENTIFIED BY ${sqlString(password)}`, why: 'the member', optional: false });
+    // No IF NOT EXISTS. The live path checks first and refuses an existing user; the printed
+    // plan used to no-op here, apply the grants, and hand out a password the server never saw —
+    // found on a realm that mints its own users. Now it fails loudly on line one instead.
+    steps.push({ sql: `CREATE USER ${member} IDENTIFIED BY ${sqlString(password)}`, why: 'the member — fails if it already exists; then this password is NOT theirs', optional: false });
   }
   steps.push(
     { sql: roomGrant(db, member), why: `their rooms — ${db}.${roomPattern(member)} — and nothing else in the house`, optional: false },
