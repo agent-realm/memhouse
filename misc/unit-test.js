@@ -1202,5 +1202,29 @@ test('an invite file is recognised by name and read without its secret', () => {
   fs.rmSync(d, { recursive: true });
 });
 
+// ── a rotated credential must reach the process that was spawned with the old one ───────
+test('credentialDrift reports exactly the env-file values a process no longer matches', () => {
+  const envfile = require('../memhouse/envfile');
+  const text = "MEMHOUSE_URL='http://h:1'\nMEMHOUSE_USER='mira'\nMEMHOUSE_PASSWORD='new'\nMEMHOUSE_DB='mem'\n";
+  const d = envfile.credentialDrift(text, { MEMHOUSE_URL: 'http://h:1', MEMHOUSE_USER: 'mira', MEMHOUSE_PASSWORD: 'invite', MEMHOUSE_DB: 'mem' });
+  assert.deepStrictEqual(d, { changed: ['MEMHOUSE_PASSWORD'], values: { MEMHOUSE_PASSWORD: 'new' } });
+  assert.deepStrictEqual(envfile.credentialDrift(text, { MEMHOUSE_URL: 'http://h:1', MEMHOUSE_USER: 'mira', MEMHOUSE_PASSWORD: 'new', MEMHOUSE_DB: 'mem' }).changed, [], 'in sync: nothing to adopt');
+  assert.deepStrictEqual(envfile.credentialDrift('', { MEMHOUSE_PASSWORD: 'x' }).changed, [], 'no file: nothing to adopt');
+  assert.deepStrictEqual(envfile.credentialDrift("MEMHOUSE_PASSWORD='p'", {}).changed, ['MEMHOUSE_PASSWORD'], 'a process with nothing adopts the file');
+});
+
+// ── a running shipper whose passes fail must not read as healthy ─────────────────────────
+test('lastPass reads the shipper log: the later of success and failure wins', () => {
+  const { lastPass, describeFailure } = require('../memhouse/shipper/passlog');
+  const okThenFail = '[memhouse] shipped 3 sessions (0 skipped) → 40 msg rows, 2 tool rows in 1.2s\n[memhouse] pass failed: mira: Authentication failed: password is incorrect\n[memhouse] retrying in 16s\n';
+  const f = lastPass(okThenFail);
+  assert.strictEqual(f.outcome, 'failed'); assert.ok(f.auth); assert.match(describeFailure(f), /memhouse stop && memhouse start/);
+  const failThenOk = '[memhouse] pass failed: x\n[memhouse] shipped 170 sessions (0 skipped) → 22448 msg rows, 16245 tool rows in 19.0s\n';
+  assert.deepStrictEqual(lastPass(failThenOk), { outcome: 'ok', sessions: 170, rows: 22448 });
+  assert.strictEqual(describeFailure(lastPass(failThenOk)), null);
+  assert.deepStrictEqual(lastPass(''), { outcome: null }); assert.strictEqual(describeFailure(lastPass('')), null);
+  const other = lastPass('[memhouse] pass failed: fetch failed\n'); assert.strictEqual(other.auth, false); assert.match(describeFailure(other), /memhouse doctor/);
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

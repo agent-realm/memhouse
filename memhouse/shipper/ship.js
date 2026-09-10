@@ -1251,7 +1251,7 @@ async function printStats(client) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  const client = makeClient();
+  let client = makeClient();
   try {
     if (argv.includes('--ensure-schema')) {
       const n = await ensureSchema(client);
@@ -1289,6 +1289,7 @@ async function main() {
           `${r.msgRows} msg rows, ${r.toolRows} tool rows in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       } catch (e) {
         failed = true;
+        var adoptedCredential = false;
         // A connection failure arrives as an AggregateError whose own `message` is empty,
         // so this printed "[memhouse] pass failed:" and nothing else, after 35 lines of
         // driver internals. Dig out a cause and name the fix; `status` and `doctor`
@@ -1299,7 +1300,22 @@ async function main() {
         if (/ECONNREFUSED|fetch failed|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(why + causes.join(' '))) {
           console.error(`[memhouse] ${process.env.MEMHOUSE_URL} did not answer — is the house running?`);
         } else if (/Authentication failed|ACCESS_DENIED|Not enough privileges/i.test(why)) {
-          console.error(`[memhouse] the credential in ${process.env.MEMHOUSE_HOME || '~/.memhouse'}/env was rejected by ${process.env.MEMHOUSE_URL}`);
+          // This process was spawned with one credential; the env FILE may hold a newer one
+          // — `install --env` rotates the invite password and rewrites the file, and
+          // `memhouse passwd` can run under a live daemon. Retrying the dead copy for
+          // 300s a pass while the file beside it is right is what a drill member watched
+          // for twelve minutes. Adopt the file, rebuild the client, retry now.
+          const envPath = require('path').join(process.env.MEMHOUSE_HOME || require('path').join(require('os').homedir(), '.memhouse'), 'env');
+          let drift = { changed: [] };
+          try { drift = require('../envfile').credentialDrift(require('fs').readFileSync(envPath, 'utf-8'), process.env); } catch { /* no file: nothing to adopt */ }
+          if (drift.changed.length) {
+            for (const k of drift.changed) process.env[k] = drift.values[k];
+            client = makeClient();
+            adoptedCredential = true;
+            console.error(`[memhouse] ${envPath} holds a newer ${drift.changed.map((k) => k.replace('MEMHOUSE_', '').toLowerCase()).join('/')} — adopting it and retrying now`);
+          } else {
+            console.error(`[memhouse] the credential this shipper holds was rejected by ${process.env.MEMHOUSE_URL} (and ${envPath} says the same)`);
+          }
         } else if (/does not exist|UNKNOWN_TABLE|UNKNOWN_DATABASE/i.test(why)) {
           console.error('[memhouse] the house is missing a room this pass needed');
         }
@@ -1314,7 +1330,7 @@ async function main() {
       }
       full = false; // --full applies to the first pass only; loop passes stay incremental
       if (loop) {
-        const waitMs = failed ? Math.min(retryMs, intervalSec * 1000) : intervalSec * 1000;
+        const waitMs = failed ? (adoptedCredential ? 1000 : Math.min(retryMs, intervalSec * 1000)) : intervalSec * 1000;
         if (failed) {
           console.error(`[memhouse] retrying in ${Math.round(waitMs / 1000)}s`);
           retryMs = Math.min(retryMs * 2, intervalSec * 1000);
