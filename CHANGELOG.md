@@ -21,6 +21,22 @@ migration path is planned work, not a promise the old versions can cash.
   `${MEMHOUSE_BIN:-memhouse}`. `plugins list` shows the binding, `plugins remove` removes
   it, and nothing else in `settings.json` is touched.
 
+## 0.18.2 — 2026-09-11
+
+On the `team` channel. Two bugs found by a two-member arrival drill on 0.18.1, plus what
+the drill taught:
+
+- **The shipper spawned by `install --env` now holds the rotated password.** It held the
+  invite's, which the rotation had just killed, and failed every pass with
+  "Authentication failed" while every CLI command worked. The shipper also adopts a newer
+  env-file credential on an auth failure instead of backing off on a dead one.
+- **`status` and `doctor` read the shipper log's last pass.** A daemon failing every pass
+  was "running" by pid and green in doctor. Now: `running — but the last pass FAILED — <why>
+  — restart it: memhouse stop && memhouse start`, and a `✗` in doctor.
+- The invitation guide says what to do when an agent's `npm install -g` is blocked by a
+  permission classifier: the person runs step 1, the agent continues from step 2.
+- `drills/DRILLBOOK-team-arrival-2026-09-10.md` and the drill record.
+
 ## 0.18.1 — 2026-09-08
 
 On the `team` channel. Everything since 0.18.0, none of it reaching `latest` (0.17.0):
