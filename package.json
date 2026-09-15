@@ -28,7 +28,8 @@
     "dev": "cd ui && npm run dev",
     "test": "node misc/syntax-check.js && node misc/unit-test.js",
     "test:house": "node misc/house-test.js",
-    "prepack": "cd ui && npm install --no-audit --no-fund && npm run build"
+    "prepack": "cd ui && npm install --no-audit --no-fund && npm run build",
+    "prepublishOnly": "node misc/publish-guard.js"
   },
   "keywords": [
     "memory",
