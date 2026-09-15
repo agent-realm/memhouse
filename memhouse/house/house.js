@@ -309,6 +309,16 @@ function sessionsRollup({ sessions, messages }) {
 // The precomputed rollup's table name. One place, because the migration, the runtime
 // probe and the read layer must all agree on it.
 const SESSION_STATS = 'session_stats';
+// One-layout: like every room, a stat table is named for its member — `<member>_session_stats`
+// — so it sits under the same `<db>.<member>_*` grant the member already holds. No
+// database-level privilege exists in this layout, and none is needed.
+function statTableNames(member) {
+  return {
+    session_stats: physicalRoom(SESSION_STATS, member),
+    model_stats: physicalRoom(MODEL_STATS, member),
+    tool_stats: physicalRoom(TOOL_STATS, member),
+  };
+}
 // The per-(session, model) and per-(session, tool) rollups — what lets the cost, model
 // and tool queries stop scanning the messages/tool_calls rooms entirely. Same refresh
 // mechanism as SESSION_STATS; same fallback rule: absent tables mean the legacy SQL.
@@ -345,11 +355,12 @@ function sessionStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
   const rollup = sessionsRollup(rooms);
   // sessionsRollup wraps itself in parentheses for the FROM position; strip them.
   const body = rollup.replace(/^\s*\(/, '').replace(/\)\s*$/, '');
+  const t = statTableNames(rooms.member).session_stats;
   return [
-    `CREATE TABLE IF NOT EXISTS ${SESSION_STATS} ENGINE = MergeTree `
+    `CREATE TABLE IF NOT EXISTS ${t} ENGINE = MergeTree `
       + `ORDER BY (session_id, user_id) EMPTY AS ${body}`,
-    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${SESSION_STATS}_mv `
-      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${SESSION_STATS} AS ${body}`,
+    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${t}_mv `
+      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${t} AS ${body}`,
   ];
 }
 
@@ -376,11 +387,12 @@ function sessionModelStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
        sum(cache_read_tokens) AS cache_read_tokens, sum(cache_write_tokens) AS cache_write_tokens
 FROM ${rooms.messages} AS m
 GROUP BY session_id, user_id, model`;
+  const t = statTableNames(rooms.member).model_stats;
   return [
-    `CREATE TABLE IF NOT EXISTS ${MODEL_STATS} ENGINE = MergeTree `
+    `CREATE TABLE IF NOT EXISTS ${t} ENGINE = MergeTree `
       + `ORDER BY (session_id, user_id, model) EMPTY AS ${body}`,
-    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${MODEL_STATS}_mv `
-      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${MODEL_STATS} AS ${body}`,
+    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${t}_mv `
+      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${t} AS ${body}`,
   ];
 }
 
@@ -389,11 +401,12 @@ function sessionToolStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
        count() AS calls
 FROM ${rooms.tool_calls} AS tc
 GROUP BY session_id, user_id, tool_name`;
+  const t = statTableNames(rooms.member).tool_stats;
   return [
-    `CREATE TABLE IF NOT EXISTS ${TOOL_STATS} ENGINE = MergeTree `
+    `CREATE TABLE IF NOT EXISTS ${t} ENGINE = MergeTree `
       + `ORDER BY (session_id, user_id, tool_name) EMPTY AS ${body}`,
-    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${TOOL_STATS}_mv `
-      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${TOOL_STATS} AS ${body}`,
+    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${t}_mv `
+      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${t} AS ${body}`,
   ];
 }
 
@@ -487,15 +500,31 @@ async function currentUser(client) {
  * shared read-only that was never migrated at all. Asking the server what exists is the
  * only answer that is correct in all three.
  */
-async function statTables(client) {
+async function statTables(client, member) {
+  const names = statTableNames(member);
+  const wanted = Object.values(names);
   try {
     const rs = await client.query({
       query: `SELECT name FROM system.tables
               WHERE database = currentDatabase()
-                AND name IN ('${SESSION_STATS}', '${MODEL_STATS}', '${TOOL_STATS}')`,
+                AND name IN (${wanted.map((n) => `'${n}'`).join(', ')})`,
       format: 'JSONEachRow',
     });
-    return new Set((await rs.json()).map((r) => r.name));
+    const present = (await rs.json()).map((r) => r.name);
+    // Present is not enough: a refreshable view populates its target on its FIRST
+    // refresh, which is scheduled, not immediate. Between `install` and that refresh the
+    // table exists and is empty — and a dashboard reading it would show a house with no
+    // sessions at all (caught by house-test the first time). An empty stat table reads
+    // as absent, so the inline rollup answers until the table can.
+    const usable = new Set();
+    for (const name of present) {
+      try {
+        const c = await client.query({ query: `SELECT count() AS n FROM ${name}`, format: 'JSONEachRow' });
+        const rows = await c.json();
+        if (Number(rows[0] && rows[0].n) > 0) usable.add(name);
+      } catch { /* unreadable: treat as absent */ }
+    }
+    return usable;
   } catch {
     // No grant on system.tables is not an error — it means "assume none", and the
     // subquery path is always correct.
@@ -503,19 +532,20 @@ async function statTables(client) {
   }
 }
 
-async function hasSessionStats(client) {
-  return (await statTables(client)).has(SESSION_STATS);
+async function hasSessionStats(client, member) {
+  return (await statTables(client, member)).has(statTableNames(member).session_stats);
 }
 
 async function resolveRooms(client) {
   const rooms = roomNames(await currentUser(client));
-  const have = await statTables(client);
-  if (have.has(SESSION_STATS)) rooms.sessions_v = SESSION_STATS;
+  const names = statTableNames(rooms.member);
+  const have = await statTables(client, rooms.member);
+  if (have.has(names.session_stats)) rooms.sessions_v = names.session_stats;
   // Null when absent: the read layer branches to the legacy scan-the-room SQL. Never a
   // token substitution, because the legacy SQL has a different shape, not just a
   // different table name.
-  rooms.model_stats = have.has(MODEL_STATS) ? MODEL_STATS : null;
-  rooms.tool_stats = have.has(TOOL_STATS) ? TOOL_STATS : null;
+  rooms.model_stats = have.has(names.model_stats) ? names.model_stats : null;
+  rooms.tool_stats = have.has(names.tool_stats) ? names.tool_stats : null;
   return rooms;
 }
 
@@ -560,6 +590,6 @@ module.exports = {
   READ_SETTINGS, MEMBER_PIN,
   installCommand, assertUsableName,
   sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,
-  SESSION_STATS, MODEL_STATS, TOOL_STATS, hasSessionStats, statTables,
+  SESSION_STATS, MODEL_STATS, TOOL_STATS, statTableNames, hasSessionStats, statTables,
   sessionStatsStatements, sessionModelStatsStatements, sessionToolStatsStatements,
 };

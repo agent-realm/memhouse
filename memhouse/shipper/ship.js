@@ -62,7 +62,10 @@ const selfUpdate = require('../self-update');
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
   resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN, createStatement,
-  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor } = require('../house/house');
+  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor,
+  sessionStatsStatements, sessionModelStatsStatements, sessionToolStatsStatements,
+  statTableNames,
+} = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
 // events would otherwise roll out to nobody.
@@ -462,6 +465,36 @@ async function ensureSchema(client) {
       if (/ALREADY_EXISTS|already exists/i.test(m)) { continue; } // lost a create race — the winner made it
       throw e;
     }
+  }
+  // The precomputed rollups — additive, so they belong here and not in a migration (see
+  // migrate.js's rule). Three plain tables plus the refreshable views that fill them;
+  // the read layer probes for them at startup and falls back to the inline rollup when
+  // they are absent, so a denied CREATE here degrades to slow, never to wrong. Built from
+  // the SAME rollup text the read layer would otherwise run, so the two cannot drift.
+  const statStmts = [
+    ...sessionStatsStatements(rooms), ...sessionModelStatsStatements(rooms), ...sessionToolStatsStatements(rooms),
+  ];
+  for (const q of statStmts) {
+    try {
+      await client.command({
+        query: q,
+        // 26.x defaults the flag on; 25.x wants it stated. Query-scoped, like the
+        // text-index flag above.
+        clickhouse_settings: { async_insert: 0, allow_experimental_refreshable_materialized_view: 1 },
+      });
+    } catch (e) {
+      const m = e && e.message ? e.message : String(e);
+      if (/Not enough privileges|ACCESS_DENIED/i.test(m)) { denied++; continue; }
+      if (/ALREADY_EXISTS|already exists/i.test(m)) { continue; }
+      throw e;
+    }
+  }
+  // Kick the first population now rather than waiting for the schedule: a refreshable
+  // view's first refresh lands at its next interval boundary, and until then the read
+  // layer (correctly) ignores the empty table and runs the slow rollup. Best effort —
+  // the schedule gets there on its own, this just makes install/update fast at once.
+  for (const mv of Object.values(statTableNames(rooms.member)).map((t) => `${t}_mv`)) {
+    try { await client.command({ query: `SYSTEM REFRESH VIEW ${mv}` }); } catch { /* no grant, or not there */ }
   }
   if (denied) {
     // In a SHARED house this is the designed state, not a shortfall: the operator creates
