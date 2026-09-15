@@ -57,7 +57,9 @@ APW_A=$(pwof "$MEMHOUSE_HOME/env")
 out=$($CLI ship --ensure-schema 2>&1)
 printf '%s' "$out" | grep -qi "needed rights" && bad "ensure-schema hit a privilege wall — the member should hold CREATE TABLE on her pattern" "$(printf '%s' "$out" | head -2)" || ok "ensure-schema created her rooms with her own credential"
 tbl=$(A "SELECT arrayStringConcat(arraySort(groupArray(name)), ' ') FROM system.tables WHERE database='mem' AND name LIKE 'alice%' FORMAT TSV" | tr -d '\n')
-[ "$tbl" = "alice_events alice_messages alice_meta alice_sessions alice_tool_calls" ] && ok "  all five rooms exist, named for her" || bad "  rooms: $tbl"
+# Five rooms plus the three stat tables the dashboard reads (session_stats & co, filled by
+# the shipper — see house.js statBodies), all under her pattern.
+[ "$tbl" = "alice_events alice_messages alice_meta alice_session_model_stats alice_session_stats alice_session_tool_stats alice_sessions alice_tool_calls" ] && ok "  all five rooms and three stat tables exist, named for her" || bad "  rooms: $tbl"
 out=$($CLI rooms --json 2>&1)
 printf '%s' "$out" | grep -q '"pattern": "alice_\*"' && ok "memhouse rooms names the pattern" || bad "rooms --json" "$(printf '%s' "$out" | head -3)"
 

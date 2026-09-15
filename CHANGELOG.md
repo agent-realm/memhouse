@@ -21,6 +21,30 @@ migration path is planned work, not a promise the old versions can cash.
   `${MEMHOUSE_BIN:-memhouse}`. `plugins list` shows the binding, `plugins remove` removes
   it, and nothing else in `settings.json` is touched.
 
+- **The dashboard reads precomputed rollups.** Every dashboard aggregate used to rebuild
+  the session rollup — `<member>_sessions FINAL` joined to the current parse of
+  `<member>_messages`, 23 aggregate expressions, grouped over the whole house — on every
+  query, and the cost, model and tool queries scanned the message and tool rooms on top.
+  On a 714k-message house one such query read 1.4M rows and held 117 MiB; a page load was
+  4–10 seconds. Three tables per member now hold the rollups —
+  `<member>_session_stats`, `<member>_session_model_stats`, `<member>_session_tool_stats`
+  — and the dashboard reads those (a few thousand rows). A page load is ~250 ms.
+  **Filled by the shipper at the end of every pass, not by a materialized view:** a
+  refreshable view swaps its target through a temporary table and needs
+  `CREATE TABLE … ON <db>.*`, the database-wide grant this layout exists to withhold
+  (measured on 25.8). Each refresh is a complete snapshot stamped with one `refreshed_at`;
+  reads take the newest generation; a one-day TTL retires the rest. Created by `ship
+  --ensure-schema` under the member's own `<db>.<member>_*` grant — so `memhouse install`
+  and `memhouse update` both do it, and a house without them (or with empty, not yet
+  refreshed ones) falls back to the inline rollup — slow, never wrong.
+- **Every endpoint issues its reads in one round trip.** `/api/dashboard-stats` awaited
+  nine queries in sequence; two thirds of what the browser waited for was network.
+- **`/api/chats` prices the page, not the house.** The cost query priced all sessions to
+  decorate fifty.
+- Two latent ordering bugs fixed: the session list's `ORDER BY` was not a total order
+  (paginated pages could repeat or skip a row on a timestamp tie), and top-N cuts resolved
+  count ties by arrival order. Both tiebreak deterministically now.
+
 ## 0.18.2 — 2026-09-11
 
 On the `team` channel. Two bugs found by a two-member arrival drill on 0.18.1, plus what

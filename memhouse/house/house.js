@@ -306,9 +306,11 @@ function sessionsRollup({ sessions, messages }) {
   )`;
 }
 
-// The precomputed rollup's table name. One place, because the migration, the runtime
-// probe and the read layer must all agree on it.
+// The precomputed rollups' table names. One place, because the shipper that fills them,
+// the runtime probe and the read layer must all agree.
 const SESSION_STATS = 'session_stats';
+const MODEL_STATS = 'session_model_stats';
+const TOOL_STATS = 'session_tool_stats';
 // One-layout: like every room, a stat table is named for its member — `<member>_session_stats`
 // — so it sits under the same `<db>.<member>_*` grant the member already holds. No
 // database-level privilege exists in this layout, and none is needed.
@@ -319,95 +321,100 @@ function statTableNames(member) {
     tool_stats: physicalRoom(TOOL_STATS, member),
   };
 }
-// The per-(session, model) and per-(session, tool) rollups — what lets the cost, model
-// and tool queries stop scanning the messages/tool_calls rooms entirely. Same refresh
-// mechanism as SESSION_STATS; same fallback rule: absent tables mean the legacy SQL.
-const MODEL_STATS = 'session_model_stats';
-const TOOL_STATS = 'session_tool_stats';
 
 /**
- * The DDL that materializes the rollup, as [target, view].
+ * The precomputed rollups — the tables the dashboard reads instead of rebuilding the
+ * session rollup on every query. Measured on a 714k-message house: 1,413,624 rows read
+ * per query became ~1,250, and a page load went from 4–10 seconds to ~250 ms.
  *
- * A REFRESHABLE materialized view, not an ordinary one, and the distinction is not a
- * preference — an ordinary MV is an insert trigger, and all three of this schema's
- * defining properties break it:
+ * REFRESHED BY THE SHIPPER, NOT BY A MATERIALIZED VIEW — and that is forced, not chosen.
+ * The obvious tool is a refreshable materialized view (`REFRESH EVERY 5 MINUTE TO t`),
+ * which is exactly what the 0.17 line uses. It cannot exist in this layout: a refreshable
+ * view swaps its target atomically through a temporary table with a generated name, so
+ * ClickHouse demands `SELECT, INSERT, CREATE TABLE, DROP TABLE ON <db>.*` — the whole
+ * database — and a one-layout member holds `<db>.<member>_*` and nothing else, on
+ * purpose. Measured on 25.8: the CREATE is refused with exactly that message, and the
+ * grant that would satisfy it is the one this layout exists to withhold.
  *
- *   DUPLICATES. The rooms are ReplacingMergeTree; the engine collapses re-inserted rows
- *   at MERGE time, long after a trigger has already added them to a sum(). On a real
- *   house that is 1,226,770 stored rows for 685,649 real ones — token totals ~1.8x high,
- *   with nothing to indicate it.
+ * (An ordinary insert-trigger MV is wrong for a different reason: it counts every
+ * ReplacingMergeTree version the merge has not collapsed yet, cannot see the epoch
+ * filter, and cannot join.)
  *
- *   EPOCHS. A trigger firing at insert cannot know a later parse will supersede the rows
- *   it is aggregating, so superseded parses would stay in the totals forever.
+ * So the shipper runs the rollup itself, once at the end of every pass — the same
+ * cadence a view would have had — and INSERTs the result stamped with one
+ * `refreshed_at`. Every insert is a complete snapshot, a GENERATION; the read layer
+ * takes only the newest generation. Nothing is deleted, nothing is swapped, nothing
+ * needs a privilege beyond INSERT and SELECT on the member's own rooms. A TTL of one day
+ * keeps old generations from accumulating (288 a day at the default cadence), and the
+ * sorting key leads with `refreshed_at` so reading the newest one is one index range,
+ * not a scan.
  *
- *   THE JOIN. A trigger fires on one source table; the rollup joins sessions to messages.
- *
- * A refreshable view has none of those problems because it is not a trigger: it runs
- * THIS ALREADY-CORRECT QUERY on a schedule and atomically swaps the target. FINAL, the
- * epoch filter and the join all work exactly as they do in the subquery, because it IS
- * the subquery. The price is staleness bounded by the interval — and the shipper's own
- * default cadence is 300s, so a 5-minute refresh adds no lag to data arriving every 5.
- *
- * The target's columns are inferred with EMPTY AS, so the table and the rollup cannot
- * drift: change sessionsRollup and the next migration rebuilds the table to match.
+ * Built from the SAME rollup text the read layer would otherwise run, so the two
+ * cannot drift; column types are inferred with EMPTY AS for the same reason.
  */
-function sessionStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
-  const rollup = sessionsRollup(rooms);
+const STAT_TTL = 'TTL toDateTime(refreshed_at) + INTERVAL 1 DAY';
+
+function statBodies(rooms) {
   // sessionsRollup wraps itself in parentheses for the FROM position; strip them.
-  const body = rollup.replace(/^\s*\(/, '').replace(/\)\s*$/, '');
-  const t = statTableNames(rooms.member).session_stats;
-  return [
-    `CREATE TABLE IF NOT EXISTS ${t} ENGINE = MergeTree `
-      + `ORDER BY (session_id, user_id) EMPTY AS ${body}`,
-    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${t}_mv `
-      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${t} AS ${body}`,
-  ];
-}
-
-/**
- * The two fine-grained rollups, same shape as sessionStatsStatements.
- *
- * MODEL_STATS one row per (session, user, source, folder, model), token sums included.
- * Every model/cost aggregate the dashboard runs is a sum or argMax over these rows —
- * a few thousand of them — instead of a scan of the full messages room. The ORPHAN
- * (any-token) predicates in the read layer survive unchanged: a message row with zero
- * tokens contributes zero to every sum, so filtering it out before summing and summing
- * over everything produce the same number.
- *
- * TOOL_STATS one row per (session, user, source, folder, tool_name) with the call
- * count. NOTE the epoch source: currentParse(tool_calls, 'messages') — the tool room
- * takes its epoch from MESSAGES, because a parse that keeps its messages but emits no
- * tool calls writes nothing here at the new epoch, and this room's own max(epoch)
- * would resurrect the superseded parse's calls.
- */
-function sessionModelStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
-  const body = `SELECT session_id, user_id, any(source) AS source, any(folder) AS folder, model,
+  const rollup = sessionsRollup(rooms).replace(/^\s*\(/, '').replace(/\)\s*$/, '');
+  return {
+    session_stats: {
+      key: '(refreshed_at, session_id, user_id)',
+      body: rollup,
+    },
+    // One row per (session, user, model) with the message count and the four token sums.
+    // Every model/cost aggregate the dashboard runs is a sum or argMax over these rows —
+    // a few thousand — instead of a scan of the full messages room. The read layer's
+    // any-token predicates survive unchanged: a zero-token row contributes zero to every
+    // sum, so filtering before summing and summing over everything agree.
+    model_stats: {
+      key: '(refreshed_at, session_id, user_id, model)',
+      body: `SELECT session_id, user_id, any(source) AS source, any(folder) AS folder, model,
        count() AS msgs,
        sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
        sum(cache_read_tokens) AS cache_read_tokens, sum(cache_write_tokens) AS cache_write_tokens
 FROM ${rooms.messages} AS m
-GROUP BY session_id, user_id, model`;
-  const t = statTableNames(rooms.member).model_stats;
-  return [
-    `CREATE TABLE IF NOT EXISTS ${t} ENGINE = MergeTree `
-      + `ORDER BY (session_id, user_id, model) EMPTY AS ${body}`,
-    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${t}_mv `
-      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${t} AS ${body}`,
-  ];
-}
-
-function sessionToolStatsStatements(rooms, { intervalMinutes = 5 } = {}) {
-  const body = `SELECT session_id, user_id, any(source) AS source, any(folder) AS folder, tool_name,
+GROUP BY session_id, user_id, model`,
+    },
+    // One row per (session, user, tool_name) with the call count. NOTE the epoch source:
+    // rooms.tool_calls is currentParse(tool_calls, 'messages') — the tool room takes its
+    // epoch from MESSAGES, because a parse that keeps its messages but emits no tool calls
+    // writes nothing at the new epoch, and this room's own max(epoch) would resurrect the
+    // superseded parse's calls.
+    tool_stats: {
+      key: '(refreshed_at, session_id, user_id, tool_name)',
+      body: `SELECT session_id, user_id, any(source) AS source, any(folder) AS folder, tool_name,
        count() AS calls
 FROM ${rooms.tool_calls} AS tc
-GROUP BY session_id, user_id, tool_name`;
-  const t = statTableNames(rooms.member).tool_stats;
-  return [
-    `CREATE TABLE IF NOT EXISTS ${t} ENGINE = MergeTree `
-      + `ORDER BY (session_id, user_id, tool_name) EMPTY AS ${body}`,
-    `CREATE MATERIALIZED VIEW IF NOT EXISTS ${t}_mv `
-      + `REFRESH EVERY ${intervalMinutes} MINUTE TO ${t} AS ${body}`,
-  ];
+GROUP BY session_id, user_id, tool_name`,
+    },
+  };
+}
+
+/** The CREATE statements — additive, idempotent, run by ensureSchema. */
+function statCreateStatements(rooms) {
+  const names = statTableNames(rooms.member);
+  const bodies = statBodies(rooms);
+  return Object.keys(bodies).map((k) =>
+    `CREATE TABLE IF NOT EXISTS ${names[k]} ENGINE = MergeTree ORDER BY ${bodies[k].key} ${STAT_TTL} `
+    + `EMPTY AS SELECT now64(3) AS refreshed_at, * FROM (${bodies[k].body})`);
+}
+
+/**
+ * The refresh — one INSERT per table, one generation per call. All three carry the same
+ * `refreshed_at` so a reader never mixes a session_stats generation with a model_stats
+ * one. Run by the shipper after every pass and by --ensure-schema.
+ */
+function statRefreshStatements(rooms, at = 'now64(3)') {
+  const names = statTableNames(rooms.member);
+  const bodies = statBodies(rooms);
+  return Object.keys(bodies).map((k) =>
+    `INSERT INTO ${names[k]} SELECT ${at} AS refreshed_at, * FROM (${bodies[k].body})`);
+}
+
+/** The read-side source for one stat table: its newest generation, and nothing else. */
+function latestGeneration(table) {
+  return `(SELECT * FROM ${table} WHERE refreshed_at = (SELECT max(refreshed_at) FROM ${table}))`;
 }
 
 /**
@@ -511,11 +518,10 @@ async function statTables(client, member) {
       format: 'JSONEachRow',
     });
     const present = (await rs.json()).map((r) => r.name);
-    // Present is not enough: a refreshable view populates its target on its FIRST
-    // refresh, which is scheduled, not immediate. Between `install` and that refresh the
-    // table exists and is empty — and a dashboard reading it would show a house with no
-    // sessions at all (caught by house-test the first time). An empty stat table reads
-    // as absent, so the inline rollup answers until the table can.
+    // Present is not enough: a table exists from the moment ensureSchema creates it and
+    // holds nothing until the first refresh lands. A dashboard reading it then would show
+    // a house with no sessions at all (caught by house-test the first time). An empty
+    // stat table reads as absent, so the inline rollup answers until the table can.
     const usable = new Set();
     for (const name of present) {
       try {
@@ -540,12 +546,12 @@ async function resolveRooms(client) {
   const rooms = roomNames(await currentUser(client));
   const names = statTableNames(rooms.member);
   const have = await statTables(client, rooms.member);
-  if (have.has(names.session_stats)) rooms.sessions_v = names.session_stats;
+  if (have.has(names.session_stats)) rooms.sessions_v = latestGeneration(names.session_stats);
   // Null when absent: the read layer branches to the legacy scan-the-room SQL. Never a
   // token substitution, because the legacy SQL has a different shape, not just a
   // different table name.
-  rooms.model_stats = have.has(names.model_stats) ? names.model_stats : null;
-  rooms.tool_stats = have.has(names.tool_stats) ? names.tool_stats : null;
+  rooms.model_stats = have.has(names.model_stats) ? latestGeneration(names.model_stats) : null;
+  rooms.tool_stats = have.has(names.tool_stats) ? latestGeneration(names.tool_stats) : null;
   return rooms;
 }
 
@@ -591,5 +597,5 @@ module.exports = {
   installCommand, assertUsableName,
   sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,
   SESSION_STATS, MODEL_STATS, TOOL_STATS, statTableNames, hasSessionStats, statTables,
-  sessionStatsStatements, sessionModelStatsStatements, sessionToolStatsStatements,
+  statCreateStatements, statRefreshStatements, latestGeneration,
 };
