@@ -6,6 +6,36 @@ OpenCode, whatever comes next. `CLAUDE.md` points here; this file is the canonic
 Constellation-wide rules (worktrees, branch naming, never pushing to `ramazanpolat/*`)
 live in [`~/agent-realm/CLAUDE.md`](../CLAUDE.md) and are not repeated here.
 
+
+## Release lines — read before tagging, publishing, or merging a release
+
+memhouse ships two lines to two audiences. They share a repo, not a branch, and nothing
+moves between them by itself.
+
+| line | git branch | npm dist-tag | versions | who installs it |
+|---|---|---|---|---|
+| zeo | `release/0.17` | `latest` | 0.17.x | `npm install -g memhouse` — zeo.memhouse.io members |
+| santiment team | `main` (default) | `team` | 0.18.x | `npm install -g memhouse@team` — the one-layout houses |
+
+Rules, each learned once:
+
+- **Tag on the line's branch, publish from the tag, from the primary checkout.** A 0.17.1 was
+  built on `master` (the retired default) and published from a worktree: the branch and the
+  registry disagreed for a day, and the package lost its `gitHead`. `misc/publish-guard.js`
+  runs as `prepublishOnly` and refuses a publish whose version, `--tag`, branch, or HEAD tag
+  disagree with this table. If you need a new line (0.19.x), edit the table **and** the
+  guard's `LINES` in the same commit.
+- **A fix lands on one line.** Porting to the other is a deliberate merge or cherry-pick with
+  its own CHANGELOG entry, never assumed. The one-layout (0.18) renamed every room to
+  `<member>_*`; anything touching room names ports with care (`house/HOUSE.md`).
+- **`memhouse update` follows the channel a machine was installed from** (`MEMHOUSE_CHANNEL`),
+  so a zeo machine never receives a team build by accident, and vice versa.
+- **`master` is retired.** It was the pre-0.18 default; `main` is the default now. Do not
+  branch from it, tag on it, or push to it.
+- **One owner per line at a time.** Before releasing, check `ListAgents`/herdr for another
+  session on the same repo and agree who cuts it; the release record lives in `CHANGELOG.md`
+  on the line's branch and in `drills/`.
+
 ## What memhouse is
 
 A local shipper parses coding-agent sessions from 17 editors and writes them as typed rows
