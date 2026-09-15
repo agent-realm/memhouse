@@ -42,9 +42,9 @@ out=$(inv bob --member-password bpw --out "$WORK/bob.env")
 printf '%s' "$out" | grep -q "invite written" && ok "bob invited beside her" || bad "invite bob" "$(printf '%s' "$out" | tail -2)"
 n=$(A "SELECT count() FROM system.grants WHERE user_name='alice' AND database='mem' AND table IS NULL FORMAT TSV" | tr -d '\n')
 [ "$n" = "0" ] && ok "alice holds nothing database-wide" || bad "alice holds a database-wide grant ($n rows)"
-n=$(A "SELECT count() FROM system.grants WHERE user_name='alice' AND database='mem' AND is_wildcard = 0 FORMAT TSV" | tr -d '\n')
+n=$(A "SELECT count() FROM system.grants WHERE user_name='alice' AND database='mem' AND NOT endsWith(table, '_') FORMAT TSV" | tr -d '\n')
 [ "$n" = "0" ] && ok "  and no per-table grants — the pattern is the whole grant" || bad "  per-table grants present ($n)"
-pat=$(A "SELECT DISTINCT table FROM system.grants WHERE user_name='alice' AND database='mem' AND is_wildcard = 1 FORMAT TSV" | tr -d '\n')
+pat=$(A "SELECT DISTINCT table FROM system.grants WHERE user_name='alice' AND database='mem' AND endsWith(table, '_') FORMAT TSV" | tr -d '\n')
 [ "$pat" = "alice_" ] && ok "  the pattern is alice_*" || bad "  unexpected pattern '$pat'"
 A "SHOW GRANTS FOR alice FORMAT TSV" | grep -q "ON mem.alice_\* TO alice WITH GRANT OPTION" && ok "  SHOW GRANTS says so in one line — what a colleague verifies" || bad "  SHOW GRANTS does not show the pattern" "$(A "SHOW GRANTS FOR alice FORMAT TSV" | head -2)"
 
