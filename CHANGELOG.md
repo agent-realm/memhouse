@@ -4,6 +4,33 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## 0.17.1 — 2026-09-15
+
+- **The dashboard reads precomputed rollups.** Every dashboard aggregate used to
+  rebuild the session rollup — `sessions FINAL` joined to the current parse of
+  `messages`, 23 aggregate expressions, grouped over the whole house — on every
+  query, and the cost, model and tool queries scanned the `messages` and `tool_calls`
+  rooms on top. On a 714k-message house one such query read 1.4M rows and held
+  117 MiB; a page load was 4–10 seconds. Three refreshable materialized views now
+  keep `session_stats`, `session_model_stats` and `session_tool_stats` — the same
+  queries, run once every 5 minutes into flat tables — and the dashboard reads those
+  (1,254–5,772 rows). A page load is ~250 ms. Refreshable rather than incremental on
+  purpose: an insert-trigger view counts ReplacingMergeTree's duplicate versions,
+  cannot see the epoch filter, and cannot join; the refreshable one runs the exact
+  `FINAL` query the dashboard trusted before.
+- **Every endpoint issues its reads in one round trip.** `/api/dashboard-stats` awaited
+  nine queries in sequence; two thirds of what the browser waited for was network.
+- **`/api/chats` prices the page, not the house.** The cost query priced all sessions
+  to decorate fifty.
+- **`memhouse install` and `memhouse update` create the rollups.** Additive, no
+  migration, no ALTER; a house without them (or with empty, not-yet-refreshed ones)
+  falls back to the inline rollup — slow, never wrong. `update` runs the schema pass
+  already, so an existing house gains them on its next update.
+- Two latent ordering bugs fixed: the session list's `ORDER BY` was not a total order
+  (paginated pages could repeat or skip a row on a timestamp tie), and top-N cuts
+  resolved count ties by arrival order (the same house showed a different tenth tool on
+  consecutive loads). Both tiebreak deterministically now.
+
 ## 0.17.0 — 2026-08-25
 
 - **`memhouse share` — partial sharing, by row policy.** A share used to be all or
