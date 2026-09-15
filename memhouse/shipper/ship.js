@@ -62,7 +62,9 @@ const selfUpdate = require('../self-update');
 const selfSnap = selfUpdate.snapshot(__filename);
 const {
   resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN, createStatement,
-  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor } = require('../house/house');
+  SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor,
+  statCreateStatements, statRefreshStatements, statTableNames,
+} = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
 // events would otherwise roll out to nobody.
@@ -463,6 +465,24 @@ async function ensureSchema(client) {
       throw e;
     }
   }
+  // The precomputed rollups — additive, so they belong here and not in a migration (see
+  // migrate.js's rule). Three plain tables the shipper fills after every pass; the read
+  // layer probes for them at startup and falls back to the inline rollup when they are
+  // absent or empty, so a denied CREATE here degrades to slow, never to wrong. Why they
+  // are shipper-filled and not materialized views: house.js, above statBodies.
+  for (const q of statCreateStatements(rooms)) {
+    try {
+      await client.command({ query: q, clickhouse_settings: { async_insert: 0 } });
+    } catch (e) {
+      const m = e && e.message ? e.message : String(e);
+      if (/Not enough privileges|ACCESS_DENIED/i.test(m)) { denied++; continue; }
+      if (/ALREADY_EXISTS|already exists/i.test(m)) { continue; }
+      throw e;
+    }
+  }
+  // First generation now, so install and update are fast at once instead of after the
+  // next pass. Best effort: a denied CREATE above means these fail too, quietly.
+  await refreshStats(client, rooms);
   if (denied) {
     // In a SHARED house this is the designed state, not a shortfall: the operator creates
     // each member's rooms during `invite` precisely so the member cannot — a member who
@@ -1051,6 +1071,38 @@ async function loadStoredParse(client, rooms, id, uid, epoch) {
   return { hashes, tools };
 }
 
+/**
+ * Recompute the three stat tables — one generation, one INSERT each, all stamped with the
+ * same refreshed_at. Runs at the end of every ship pass, which is exactly the cadence a
+ * refreshable view would have had, and after --ensure-schema. Best effort: a house whose
+ * tables were never created (a denied CREATE) fails every INSERT here, and the read layer
+ * is already on the inline rollup.
+ */
+async function refreshStats(client, rooms) {
+  // One timestamp for all three, taken once — three now64() calls would be three
+  // generations, and the read layer would pair session_stats from one with model_stats
+  // from another.
+  let at;
+  try {
+    const rs = await client.query({ query: 'SELECT toString(now64(3)) AS t', format: 'JSONEachRow' });
+    at = `toDateTime64('${(await rs.json())[0].t}', 3, 'UTC')`;
+  } catch { return 0; }
+  let done = 0;
+  for (const q of statRefreshStatements(rooms, at)) {
+    try {
+      await client.command({ query: q, clickhouse_settings: { ...READ_SETTINGS, async_insert: 0 } });
+      done++;
+    } catch (e) {
+      const m = e && e.message ? e.message : String(e);
+      if (!/Not enough privileges|ACCESS_DENIED|UNKNOWN_TABLE|doesn't exist|does not exist/i.test(m)) {
+        console.error(`[memhouse] stats refresh: ${m.split('\n')[0]}`);
+      }
+      return done;
+    }
+  }
+  return done;
+}
+
 // One shipping pass. Incremental unless opts.full: a chat is skipped when the house
 // already has it at least as fresh (last_updated_at) and at least as large
 // (extra.bubbleCount) — both readable without parsing the chat.
@@ -1198,6 +1250,9 @@ async function runShip(client, opts = {}) {
     for (const r of rows.toolRows) { r.epoch = epoch; await push('tool_calls', scrub(r)); toolRows++; }
   }
   for (const table of Object.keys(batches)) await flush(table);
+  // The dashboard's tables, recomputed from what this pass just wrote. Skipped on a pass
+  // that shipped nothing: the previous generation is still exact.
+  if (sessions > 0) await refreshStats(client, rooms);
   // Anything that only failed while reading messages — the sink is reset by the
   // next getAllChats(), so unreported here means never reported at all.
   reportAdapterErrors(warned);
@@ -1352,7 +1407,7 @@ async function main() {
   }
 }
 
-module.exports = { runShip, ensureSchema, templateColumns, decideEpoch };
+module.exports = { runShip, ensureSchema, refreshStats, templateColumns, decideEpoch };
 
 if (require.main === module) {
   main().catch((e) => {
