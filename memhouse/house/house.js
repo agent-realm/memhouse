@@ -447,7 +447,21 @@ async function statTables(client) {
                 AND name IN ('${SESSION_STATS}', '${MODEL_STATS}', '${TOOL_STATS}')`,
       format: 'JSONEachRow',
     });
-    return new Set((await rs.json()).map((r) => r.name));
+    const present = (await rs.json()).map((r) => r.name);
+    // Present is not enough: a refreshable view populates its target on its FIRST
+    // refresh, which is scheduled, not immediate. Between `install` and that refresh the
+    // table exists and is empty — and a dashboard reading it would show a house with no
+    // sessions at all (caught by house-test the first time). An empty stat table reads
+    // as absent, so the inline rollup answers until the table can.
+    const usable = new Set();
+    for (const name of present) {
+      try {
+        const c = await client.query({ query: `SELECT count() AS n FROM ${name}`, format: 'JSONEachRow' });
+        const rows = await c.json();
+        if (Number(rows[0] && rows[0].n) > 0) usable.add(name);
+      } catch { /* unreadable: treat as absent */ }
+    }
+    return usable;
   } catch {
     // No grant on system.tables is not an error — it means "assume none", and the
     // subquery path is always correct.
