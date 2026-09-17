@@ -1252,6 +1252,26 @@ test('claude adapter: folded subagent turns carry the agent id, description, typ
   assert.deepStrictEqual(folded.map((m) => m._agent.turn), [0, 1], 'turn counts within the subagent');
   assert.strictEqual(folded[0]._agent.id, aid); assert.strictEqual(folded[0]._agent.description, 'Analyze 26.7 feature PRs'); assert.strictEqual(folded[0]._agent.type, 'general-purpose');
   const names = claude.subagentNames(path.join(proj, `${sid}.jsonl`)); assert.deepStrictEqual([...names.keys()], [aid], 'agentId joined to the Agent tool call through tool_use_id');
+  // the other way a parent names a fork: the async task notification
+  const bid = 'b9b9b9b9b9b9b9b9b';
+  fs.appendFileSync(path.join(proj, `${sid}.jsonl`), JSON.stringify({ type: 'assistant', uuid: 'a2', sessionId: sid, timestamp: '2026-09-15T10:01:00Z', cwd: '/x', message: { role: 'assistant', model: 'm', content: [ { type: 'tool_use', id: 'toolu_2', name: 'Agent', input: { description: 'Drill: member joins', subagent_type: 'general-purpose', prompt: 'x' } } ], usage: {} } }) + '\n'
+    + JSON.stringify({ type: 'user', uuid: 'u3', sessionId: sid, timestamp: '2026-09-15T10:02:00Z', cwd: '/x', message: { role: 'user', content: `<task-notification>\n<task-id>${bid}</task-id>\n<tool-use-id>toolu_2</tool-use-id>\n<status>completed</status>\n</task-notification>` } }) + '\n');
+  const names2 = claude.subagentNames(path.join(proj, `${sid}.jsonl`));
+  assert.strictEqual(names2.get(bid) && names2.get(bid).description, 'Drill: member joins', 'a fork named only by its task notification is still named');
+  // Workflow-run agents live one level deeper and were never folded before
+  const wf = path.join(sub, 'workflows', 'wf_1234abcd-9f0'); fs.mkdirSync(wf, { recursive: true }); const wid = 'c0c0c0c0c0c0c0c0c';
+  fs.writeFileSync(path.join(wf, 'journal.jsonl'), JSON.stringify({ type: 'started', key: 'v2:x', agentId: wid }) + '\n');
+  fs.writeFileSync(path.join(wf, `agent-${wid}.meta.json`), JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: '1' }));
+  fs.writeFileSync(path.join(wf, `agent-${wid}.jsonl`), [
+    { type: 'user', uuid: 'w1', sessionId: sid, agentId: wid, isSidechain: true, timestamp: '2026-09-15T10:03:00Z', cwd: '/x', message: { role: 'user', content: 'Decompose the paperless-ngx setup into steps' } },
+    { type: 'assistant', uuid: 'w2', sessionId: sid, agentId: wid, isSidechain: true, timestamp: '2026-09-15T10:03:05Z', cwd: '/x', message: { role: 'assistant', model: 'm', content: [ { type: 'text', text: 'three steps' } ], usage: {} } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const all = claude.getMessages({ _fullPath: path.join(proj, `${sid}.jsonl`) });
+  const wfTurns = all.filter((m) => m._agent && m._agent.workflow);
+  assert.strictEqual(wfTurns.length, 2, 'the workflow agent is folded');
+  assert.strictEqual(wfTurns[0]._agent.workflow, 'wf_1234abcd-9f0'); assert.strictEqual(wfTurns[0]._agent.type, 'workflow-subagent');
+  assert.strictEqual(wfTurns[0]._agent.description, 'Decompose the paperless-ngx setup into steps', 'an unnamed fork is described by its own first prompt');
+  assert.deepStrictEqual(claude.subagentFiles(sub).map((x) => x.workflow), [null, 'wf_1234abcd-9f0'], 'journal and meta files are not transcripts');
   fs.rmSync(root, { recursive: true });
 });
 

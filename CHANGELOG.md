@@ -12,9 +12,15 @@ migration path is planned work, not a promise the old versions can cash.
   looking for the fork as its own session concluded it was never shipped. Each folded turn
   now carries `extra.agent.{id, description, type, turn}` — the description is what the
   parent's `Agent` call asked for, joined through the tool result that names the agentId.
-  `extra` is not part of the line hash, so nothing already shipped is re-shipped; rows from
-  before this carry `{}` until their session ships again (or `memhouse ship --full`).
-  The plugin reference and `/mem:recall` say how to read a fork.
+  A fork the parent never named — a Workflow-run agent, or an older parent — is described
+  by its own first prompt. `extra` is not part of the line hash, so nothing already shipped
+  is re-shipped; rows from before this carry `{}` until their session ships again (or
+  `memhouse ship --full`). The plugin reference and `/mem:recall` say how to read a fork.
+- **Workflow-run agents ship.** Agents spawned by the Workflow tool live one level deeper,
+  `<session>/subagents/workflows/wf_<id>/agent-<id>.jsonl`, and the fold never looked
+  there: on two real playbooks, 99 of 164 forks had never reached the house. They fold like
+  the rest, with `extra.agent.workflow` naming the run. Sessions with them ship a new epoch
+  on their next pass (their text changes); the journal and meta files are not transcripts.
 
 - **Bare `memhouse` beside an invite offers to process it.** With an `invite-<name>.env` in
   the current directory, `memhouse` with no command reads what it promises — house, member,

@@ -260,18 +260,47 @@ function getMessages(chat) {
   // after the parent's turns, so nothing is lost and subagents are never
   // double-counted as standalone sessions.
   const subagentsDir = path.join(filePath.replace(/\.jsonl$/, ''), 'subagents');
-  try {
-    const files = fs.readdirSync(subagentsDir).filter(f => f.endsWith('.jsonl')).sort();
-    const named = files.length ? subagentNames(filePath) : new Map();
-    for (const f of files) {
-      const id = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
-      const meta = named.get(id) || {};
-      messages.push(...parseSessionFile(path.join(subagentsDir, f), true,
-        { id, description: meta.description || '', type: meta.type || '', file: f }));
+  const subFiles = subagentFiles(subagentsDir);
+  const named = subFiles.length ? subagentNames(filePath) : new Map();
+  for (const { file, workflow } of subFiles) {
+    const id = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
+    const meta = named.get(id) || {};
+    const agent = { id, description: meta.description || '', type: meta.type || (workflow ? 'workflow-subagent' : ''), file: path.basename(file) };
+    if (workflow) agent.workflow = workflow;
+    const turns = parseSessionFile(file, true, agent);
+    // A fork the parent never named (a Workflow-run agent, or a parent from before the
+    // ids were reported) is described by its own first prompt — what it was told to do.
+    if (!agent.description) {
+      const first = turns.find((m) => m.role === 'user');
+      if (first) { const d = String(first.content).replace(/^\[subagent\] /, '').replace(/\s+/g, ' ').trim().slice(0, 160); for (const m of turns) m._agent.description = d; }
     }
-  } catch { /* no subagents for this session */ }
+    messages.push(...turns);
+  }
 
   return messages;
+}
+
+/**
+ * Every subagent transcript under a session, wherever Claude Code put it:
+ *   <session>/subagents/agent-<id>.jsonl                       — Agent tool forks
+ *   <session>/subagents/workflows/wf_<id>/agent-<id>.jsonl     — Workflow-run agents
+ * journal.jsonl and *.meta.json are bookkeeping, not transcripts. Sorted for a stable
+ * fold order. On real data the workflow layer held 100 of 165 forks and shipped none.
+ */
+function subagentFiles(subagentsDir) {
+  const out = [];
+  let names = [];
+  try { names = fs.readdirSync(subagentsDir); } catch { return out; }
+  for (const f of names.sort()) if (f.startsWith('agent-') && f.endsWith('.jsonl')) out.push({ file: path.join(subagentsDir, f), workflow: null });
+  const wfDir = path.join(subagentsDir, 'workflows');
+  let wfs = [];
+  try { wfs = fs.readdirSync(wfDir).filter((d) => d.startsWith('wf_')).sort(); } catch { return out; }
+  for (const wf of wfs) {
+    let files = [];
+    try { files = fs.readdirSync(path.join(wfDir, wf)); } catch { continue; }
+    for (const f of files.sort()) if (f.startsWith('agent-') && f.endsWith('.jsonl')) out.push({ file: path.join(wfDir, wf, f), workflow: wf });
+  }
+  return out;
 }
 
 /**
@@ -294,6 +323,17 @@ function subagentNames(parentFile) {
         const text = typeof c.content === 'string' ? c.content : (Array.isArray(c.content) ? c.content.map((x) => (x && x.text) || '').join('\n') : '');
         const m = /agentId:\s*([0-9a-f]{6,})/i.exec(text);
         if (m) out.set(m[1], byToolUse.get(c.tool_use_id));
+      }
+    }
+    // A background subagent reports through a task notification instead — a user-role
+    // line whose text carries <task-id>agentId</task-id> and <tool-use-id>toolu_…</tool-use-id>.
+    // On real data 30 of 65 forks were named only this way.
+    const flat = typeof (obj.message && obj.message.content) === 'string' ? obj.message.content
+      : content.map((x) => (x && typeof x.text === 'string') ? x.text : '').join('\n');
+    if (flat.includes('<task-notification>')) {
+      for (const block of flat.split('<task-notification>').slice(1)) {
+        const t = /<task-id>([0-9a-f]{6,})<\/task-id>/i.exec(block); const u = /<tool-use-id>(toolu_[A-Za-z0-9]+)<\/tool-use-id>/.exec(block);
+        if (t && u && byToolUse.has(u[1]) && !out.has(t[1])) out.set(t[1], byToolUse.get(u[1]));
       }
     }
   }
@@ -460,4 +500,4 @@ function getMCPServers() {
 // answer to a different question: where this pilot's Claude Code instances live. Two
 // implementations of "find every CLAUDE_CONFIG_DIR" would drift the first time a playbook
 // layout changes, and this is the copy exercised on every single ship.
-module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers, discoverClaudeRoots, subagentNames };
+module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers, discoverClaudeRoots, subagentNames, subagentFiles };

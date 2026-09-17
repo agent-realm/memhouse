@@ -927,7 +927,7 @@ function rowsForChat(chat, host) {
       // Which subagent (Claude Code fork) a folded turn belongs to — id, the description
       // the parent gave it, its type, and the turn's position within that subagent — so
       // one fork's transcript is `WHERE extra.agent.id = '…' ORDER BY seq`. Not hashed.
-      extra: m._agent ? { agent: { id: String(m._agent.id || ''), description: String(m._agent.description || ''), type: String(m._agent.type || ''), turn: Number(m._agent.turn) || 0 } } : {},
+      extra: m._agent ? { agent: { id: String(m._agent.id || ''), description: String(m._agent.description || ''), type: String(m._agent.type || ''), turn: Number(m._agent.turn) || 0, ...(m._agent.workflow ? { workflow: String(m._agent.workflow) } : {}) } } : {},
     };
     // Hash the content fields only (not ts — it is synthesized and may drift).
     row.line_hash = lineHash({
