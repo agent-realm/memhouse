@@ -32,6 +32,12 @@ Rules, each learned once:
   so a zeo machine never receives a team build by accident, and vice versa.
 - **`master` is retired.** It was the pre-0.18 default; `main` is the default now. Do not
   branch from it, tag on it, or push to it.
+- **A token publish is a *staged* publish on this account.** `npm publish` prints
+  `+ memhouse@x.y.z` and the guard says the lines agree, but with 2FA-required publishing
+  the version sits in npm's staging until a person's login supplies proof of presence —
+  `npm view` shows nothing, and a retry says "previously staged". Do not report a release
+  as published until `npm view memhouse dist-tags` shows it. (0.18.3, 2026-09-17: the
+  version went live on the pilot's next `npm login`.)
 - **One owner per line at a time.** Before releasing, check `ListAgents`/herdr for another
   session on the same repo and agree who cuts it; the release record lives in `CHANGELOG.md`
   on the line's branch and in `drills/`.
