@@ -4,7 +4,9 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.3 — 2026-09-17
+
+On the `team` channel.
 
 - **Folded subagent turns say which subagent they came from.** Claude Code forks
   (`<session>/subagents/agent-<id>.jsonl`) were folded into the parent with only a
