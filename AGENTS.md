@@ -38,6 +38,9 @@ Rules, each learned once:
   `npm view` shows nothing, and a retry says "previously staged". Do not report a release
   as published until `npm view memhouse dist-tags` shows it. (0.18.3, 2026-09-17: the
   version went live on the pilot's next `npm login`.)
+- **Which token.** The pilot's publish token lives in the macOS keychain as `npmjs-token`
+  (`~/.pilot-profile/online/npm.md` has the temp-userconfig recipe); `~/.npmrc` may hold a
+  narrower granular token. Either stages; a login releases.
 - **One owner per line at a time.** Before releasing, check `ListAgents`/herdr for another
   session on the same repo and agree who cuts it; the release record lives in `CHANGELOG.md`
   on the line's branch and in `drills/`.
