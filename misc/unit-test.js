@@ -1156,9 +1156,9 @@ test('a tarball or checkout build gets no automatic update', () => {
   const q = channel.pickChannel({ version: '0.18.0-alpha.1', tags: { latest: '0.17.0', team: '0.18.0-alpha.1' } });
   assert.strictEqual(q.channel, 'team', 'a pre-release that IS a published tag follows it');
 });
-test('no registry answer: follow latest without a target, never invent one', () => {
+test('no registry answer: no channel and no target — never guess a line', () => {
   const p = channel.pickChannel({ version: '0.17.0', tags: null });
-  assert.strictEqual(p.channel, 'latest'); assert.strictEqual(p.target, null); assert.match(p.reason, /did not answer/);
+  assert.strictEqual(p.channel, null); assert.strictEqual(p.target, null); assert.match(p.reason, /did not answer/);
 });
 
 // ── a playbook is bound to the instance that installed its plugin ────────────────────────
@@ -1273,6 +1273,18 @@ test('claude adapter: folded subagent turns carry the agent id, description, typ
   assert.strictEqual(wfTurns[0]._agent.description, 'Decompose the paperless-ngx setup into steps', 'an unnamed fork is described by its own first prompt');
   assert.deepStrictEqual(claude.subagentFiles(sub).map((x) => x.workflow), [null, 'wf_1234abcd-9f0'], 'journal and meta files are not transcripts');
   fs.rmSync(root, { recursive: true });
+});
+
+// ── update never crosses release lines on its own ────────────────────────────────────────
+test('pickChannel: an unpinned release stays on its line when its tag has moved on', () => {
+  const { pickChannel } = require('../memhouse/channel');
+  const tags = { latest: '0.17.1', team: '0.18.3' };
+  const moved = pickChannel({ version: '0.18.2', tags });
+  assert.strictEqual(moved.channel, 'team'); assert.strictEqual(moved.target, '0.18.3');
+  const zeo = pickChannel({ version: '0.17.0', tags }); assert.strictEqual(zeo.channel, 'latest'); assert.strictEqual(zeo.target, '0.17.1');
+  const orphan = pickChannel({ version: '0.19.0', tags }); assert.strictEqual(orphan.channel, null); assert.match(orphan.reason, /crossing lines/);
+  assert.strictEqual(pickChannel({ version: '0.18.2', tags: null }).channel, null, 'no registry: no guess');
+  assert.strictEqual(pickChannel({ version: '0.18.2', pinned: 'team', tags }).channel, 'team', 'a pin still wins');
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);

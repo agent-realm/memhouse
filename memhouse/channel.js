@@ -32,8 +32,21 @@ function pickChannel({ version, pinned = null, tags = null }) {
   if (isPrerelease(version)) {
     return { channel: null, target: null, reason: `${version} is on no registry tag — a tarball or checkout build; update it by installing a newer tarball, or pin a channel: memhouse update --channel <tag>` };
   }
-  return { channel: 'latest', target: t.latest || null, reason: tags ? 'following latest' : 'following latest (registry did not answer)' };
+  // A release that matches no tag any more (the tag moved on) stays on ITS LINE: the tag
+  // whose target shares this version's major.minor. Falling back to `latest` moved a
+  // 0.18.2 team member to 0.17.1 — a different house layout — on her first update.
+  const line = lineOf(version);
+  const sameLine = Object.entries(t).filter(([, v]) => lineOf(v) === line).map(([k]) => k);
+  if (sameLine.length) {
+    const k = sameLine.includes('latest') ? 'latest' : sameLine[0];
+    return { channel: k, target: t[k], reason: `following '${k}' — the tag on the ${line}.x line this install is on` };
+  }
+  if (!tags) return { channel: null, target: null, reason: 'the registry did not answer — cannot tell which line to follow; retry, or: memhouse update --channel <tag>' };
+  return { channel: null, target: null, reason: `${version} is on the ${line}.x line and no registry tag points at ${line}.x — crossing lines is a decision: memhouse update --channel <tag>` };
 }
+
+/** "0.18" of "0.18.2" — the line a version belongs to. */
+function lineOf(v) { const m = /^(\d+)\.(\d+)/.exec(String(v || '')); return m ? `${m[1]}.${m[2]}` : ''; }
 
 /** The registry's dist-tags, or null when it cannot be reached. Abbreviated document, small. */
 async function fetchTags(fetchImpl = globalThis.fetch) {
@@ -47,4 +60,4 @@ async function fetchTags(fetchImpl = globalThis.fetch) {
   } catch { return null; }
 }
 
-module.exports = { pickChannel, fetchTags, isPrerelease };
+module.exports = { pickChannel, fetchTags, isPrerelease, lineOf };

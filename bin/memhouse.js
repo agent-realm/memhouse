@@ -1013,8 +1013,13 @@ async function cmdInstall({ interactive }) {
     } catch { /* not a URL; the missing-fields check above already spoke */ }
     // Clear ambient MEMHOUSE_* so ONLY the file speaks (exported vars normally win over the
     // file; an invite intake is the one place they must not).
-    for (const k of ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB', 'MEMHOUSE_PORT']) delete process.env[k];
+    for (const k of ['MEMHOUSE_URL', 'MEMHOUSE_USER', 'MEMHOUSE_PASSWORD', 'MEMHOUSE_DB', 'MEMHOUSE_PORT', 'MEMHOUSE_CHANNEL', 'MEMHOUSE_EDITORS', 'MEMHOUSE_CLAUDE_ROOTS']) delete process.env[k];
     for (const k of wanted) process.env[k] = parsed[k];
+    // The invite also carries what the inviter's house is ON: its channel (a `team` house
+    // is 0.18.x, published under `team`). Dropping it wrote an env with no pin, and the
+    // member's first `memhouse update` followed `latest` — zeo's 0.17 line — and
+    // downgraded a working team install onto the wrong layout. A flag still wins.
+    for (const k of ['MEMHOUSE_CHANNEL', 'MEMHOUSE_EDITORS', 'MEMHOUSE_CLAUDE_ROOTS']) if (parsed[k]) process.env[k] = parsed[k];
     console.log(ok(`using the invite file ${String(flags.env)} (nothing persisted until the install proves out)`));
     _inviteFileToShred = path.resolve(String(flags.env));
     _inviteWantsRotate = parsed.MEMHOUSE_INVITE === '1';

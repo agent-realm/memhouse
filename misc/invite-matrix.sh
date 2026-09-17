@@ -158,7 +158,7 @@ fi
 # ── bare `memhouse` beside an invite file offers to process it ────────────────────────
 # The invitee's own path: an invite-<name>.env in the current directory, and bare memhouse.
 D="$WORK/inbox"; mkdir -p "$D"
-( cd "$D" && $CLI invite im_bare --url "$URL" --allow-local --admin-user "$ADM" --admin-password "$ADMPW" --out "$D/invite-im_bare.env" >/dev/null 2>&1 )
+( cd "$D" && MEMHOUSE_CHANNEL=team $CLI invite im_bare --url "$URL" --allow-local --admin-user "$ADM" --admin-password "$ADMPW" --out "$D/invite-im_bare.env" >/dev/null 2>&1 )
 if [ ! -f "$D/invite-im_bare.env" ]; then
   bad "could not stage an invite file for the bare-memhouse case"
 else
@@ -175,6 +175,9 @@ else
   case "$out" in *installed*) ok "memhouse --yes joins from the nearby invite" ;; *) bad "memhouse --yes did not join" "$(printf '%s' "$out" | grep -i '✗\|error' | head -1)" ;; esac
   [ -f "$D/invite-im_bare.env" ] && bad "  the spent invite file was not removed" || ok "  the spent invite file is gone"
   grep -q "MEMHOUSE_USER='im_bare'" "$H/env" 2>/dev/null && ok "  installed as the invited member" || bad "  env not written as im_bare"
+  # the invite carried the inviter's channel; the joined env must keep it — or the member's first
+  # `memhouse update` follows `latest` onto the other line (a 0.18 member was downgraded to 0.17.1)
+  grep -q "^MEMHOUSE_CHANNEL='team'" "$H/env" 2>/dev/null && ok "  the joined env keeps the invite's channel (team)" || bad "  the joined env lost the invite's channel"
   # the daemon that join spawned must use the ROTATED password, not the invite's. A drill
   # member's shipper failed every pass with "Authentication failed" while the CLI worked.
   sleep 10

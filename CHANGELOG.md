@@ -4,6 +4,18 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`memhouse update` never crosses release lines on its own.** An unpinned 0.18.2 whose
+  `team` tag had moved to 0.18.3 matched no tag, and the picker fell back to `latest` —
+  zeo's 0.17.1, a different house layout. A real member was downgraded on her first update.
+  The picker now follows the tag on the install's own major.minor line, and when no tag is
+  on that line, or the registry does not answer, it stops and says so; `--channel` is the
+  only way across.
+- **`install --env` keeps the invite's channel, editors and roots.** The hoist copied only
+  URL/USER/PASSWORD/DB, so a joined env had no `MEMHOUSE_CHANNEL` even though the invite
+  carried one. The invite matrix asserts the joined env keeps it.
+
 ## 0.18.3 — 2026-09-17
 
 On the `team` channel.
