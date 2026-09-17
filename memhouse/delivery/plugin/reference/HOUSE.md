@@ -92,6 +92,21 @@ wrong rooms. Say whose memory an answer came from.
 
 ## Schema
 
+**Subagents (forks) live inside their parent session.** Claude Code writes them to
+`<session>/subagents/agent-<id>.jsonl` (Agent tool) and
+`<session>/subagents/workflows/wf_<id>/agent-<id>.jsonl` (Workflow runs); the shipper folds them into the parent with
+`is_subagent = 1` and stamps *which* one in `extra.agent`. Looking for a fork as its own
+session finds nothing — look inside the parent:
+
+```sql
+-- the subagents a session spawned
+SELECT toString(extra.agent.id) AS agent, any(toString(extra.agent.description)) AS asked_to, count() AS turns
+FROM messages WHERE session_id = '<sid>' AND is_subagent GROUP BY agent   -- toString: a JSON path cannot be a GROUP BY key
+-- one subagent's transcript, in order
+SELECT seq, role, substring(text, 1, 2000) FROM messages
+WHERE session_id = '<sid>' AND extra.agent.id = '<agent>' ORDER BY seq
+```
+
 **`messages`** — one row per turn.
 
 | column | meaning |
@@ -102,6 +117,8 @@ wrong rooms. Say whose memory an answer came from.
 | `host` | the machine, `<hostname>-<8 hex>` — random per install, not derived |
 | `ts` | when the turn happened (`DateTime64(3,'UTC')`) |
 | `role` | `user`, `assistant`, `system` |
+| `is_subagent` | 1 for a turn that a Claude Code **subagent** (a fork) produced; folded into the parent session after the parent's own turns. Subagents are never separate sessions. |
+| `extra` | JSON. For a subagent turn: `extra.agent.id`, `extra.agent.description` (what the parent asked it to do, else the fork's own first prompt), `extra.agent.type` (`general-purpose`, `workflow-subagent`, …), `extra.agent.turn` (position within that subagent), and `extra.agent.workflow` (`wf_…`) when a Workflow run spawned it. Empty `{}` otherwise, and on rows shipped before 0.18.3. |
 | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | usage; **empty for several adapters** — see below |
 | `text` | the turn, **truncated at 50,000 chars** |
 | `text_ngram`, `text_word` | `MATERIALIZED lower(text)`, carrying the text indexes |

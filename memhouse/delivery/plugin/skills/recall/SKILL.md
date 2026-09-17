@@ -112,6 +112,11 @@ Beyond the three in the reference:
 
 - **Ranking is yours.** There is no relevance score in the store. `hits` plus recency is
   the whole of it — say so rather than implying the top row is "the best match".
+- **A subagent (fork) is not a session.** Its turns are inside the parent session with
+  `is_subagent = 1` and `extra.agent.id` / `extra.agent.description` saying which one; the
+  reference has the two queries. "Find the fork that did X" → search `messages` as usual,
+  then group the hits by `toString(extra.agent.id)` — never conclude it was not shipped because no
+  session carries its name.
 - **Tool *results* are not stored.** "What did that command print" is unanswerable from
   the house; only the invocation and its arguments survive.
 - **`memhouse search`** exists as a CLI, but it joins your terms into ONE literal phrase

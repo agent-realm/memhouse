@@ -195,11 +195,19 @@ function cleanPrompt(prompt) {
 // Parse one Claude session .jsonl into the adapter's message shape. When
 // `isSubagent` is set, each message is tagged `[subagent]` so folded subagent turns
 // are clearly attributed in the transcript.
-function parseSessionFile(filePath, isSubagent) {
+function parseSessionFile(filePath, isSubagent, agent = null) {
   const messages = [];
   let lines;
   try { lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean); } catch { return messages; }
   const tag = isSubagent ? '[subagent] ' : '';
+  // A folded subagent turn used to carry only the `[subagent]` tag: the house held the
+  // turns but not WHICH subagent said them, so one fork's transcript could not be isolated,
+  // cited, or told apart from a sibling's. An agent looking for the fork as its own session
+  // concluded it was never shipped. Every turn now carries the agent's id, the description
+  // the parent gave it, and its position within that subagent — in `extra`, which is not
+  // part of the line hash, so nothing already shipped is re-shipped for this.
+  let turn = 0;
+  const stamp = (m) => { if (agent) { m._agent = { ...agent, turn: turn++ }; } return m; };
 
   for (const line of lines) {
     let obj;
@@ -223,19 +231,19 @@ function parseSessionFile(filePath, isSubagent) {
 
     if (obj.type === 'user' && obj.message) {
       const content = extractContent(obj.message.content);
-      if (content) messages.push({ role: 'user', content: tag + content, _ts: at });
+      if (content) messages.push(stamp({ role: 'user', content: tag + content, _ts: at }));
     } else if (obj.type === 'assistant' && obj.message) {
       const { text, toolCalls } = extractAssistantContent(obj.message.content);
       const usage = obj.message.usage;
-      if (text) messages.push({
+      if (text) messages.push(stamp({
         role: 'assistant', content: tag + text, _model: obj.message.model,
         _inputTokens: usage?.input_tokens, _outputTokens: usage?.output_tokens,
         _cacheRead: usage?.cache_read_input_tokens, _cacheWrite: usage?.cache_creation_input_tokens,
         _toolCalls: toolCalls, _ts: at,
-      });
+      }));
     } else if (obj.type === 'system') {
       const text = typeof obj.message?.content === 'string' ? obj.message.content : '';
-      if (text) messages.push({ role: 'system', content: tag + text, _ts: at });
+      if (text) messages.push(stamp({ role: 'system', content: tag + text, _ts: at }));
     }
   }
   return messages;
@@ -252,12 +260,84 @@ function getMessages(chat) {
   // after the parent's turns, so nothing is lost and subagents are never
   // double-counted as standalone sessions.
   const subagentsDir = path.join(filePath.replace(/\.jsonl$/, ''), 'subagents');
-  try {
-    const files = fs.readdirSync(subagentsDir).filter(f => f.endsWith('.jsonl')).sort();
-    for (const f of files) messages.push(...parseSessionFile(path.join(subagentsDir, f), true));
-  } catch { /* no subagents for this session */ }
+  const subFiles = subagentFiles(subagentsDir);
+  const named = subFiles.length ? subagentNames(filePath) : new Map();
+  for (const { file, workflow } of subFiles) {
+    const id = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
+    const meta = named.get(id) || {};
+    const agent = { id, description: meta.description || '', type: meta.type || (workflow ? 'workflow-subagent' : ''), file: path.basename(file) };
+    if (workflow) agent.workflow = workflow;
+    const turns = parseSessionFile(file, true, agent);
+    // A fork the parent never named (a Workflow-run agent, or a parent from before the
+    // ids were reported) is described by its own first prompt — what it was told to do.
+    if (!agent.description) {
+      const first = turns.find((m) => m.role === 'user');
+      if (first) { const d = String(first.content).replace(/^\[subagent\] /, '').replace(/\s+/g, ' ').trim().slice(0, 160); for (const m of turns) m._agent.description = d; }
+    }
+    messages.push(...turns);
+  }
 
   return messages;
+}
+
+/**
+ * Every subagent transcript under a session, wherever Claude Code put it:
+ *   <session>/subagents/agent-<id>.jsonl                       — Agent tool forks
+ *   <session>/subagents/workflows/wf_<id>/agent-<id>.jsonl     — Workflow-run agents
+ * journal.jsonl and *.meta.json are bookkeeping, not transcripts. Sorted for a stable
+ * fold order. On real data the workflow layer held 100 of 165 forks and shipped none.
+ */
+function subagentFiles(subagentsDir) {
+  const out = [];
+  let names = [];
+  try { names = fs.readdirSync(subagentsDir); } catch { return out; }
+  for (const f of names.sort()) if (f.startsWith('agent-') && f.endsWith('.jsonl')) out.push({ file: path.join(subagentsDir, f), workflow: null });
+  const wfDir = path.join(subagentsDir, 'workflows');
+  let wfs = [];
+  try { wfs = fs.readdirSync(wfDir).filter((d) => d.startsWith('wf_')).sort(); } catch { return out; }
+  for (const wf of wfs) {
+    let files = [];
+    try { files = fs.readdirSync(path.join(wfDir, wf)); } catch { continue; }
+    for (const f of files.sort()) if (f.startsWith('agent-') && f.endsWith('.jsonl')) out.push({ file: path.join(wfDir, wf, f), workflow: wf });
+  }
+  return out;
+}
+
+/**
+ * What the parent called each subagent. The parent's `Agent` tool_use carries the
+ * description and subagent_type; the tool_result that answers it names the agentId
+ * ("agentId: <id>"). Join the two through tool_use_id → a map agentId → {description, type}.
+ * Best effort: a parent that predates the ids, or a truncated line, just yields no name.
+ */
+function subagentNames(parentFile) {
+  const byToolUse = new Map(); const out = new Map();
+  let lines = [];
+  try { lines = fs.readFileSync(parentFile, 'utf-8').split('\n').filter(Boolean); } catch { return out; }
+  for (const line of lines) {
+    let obj; try { obj = JSON.parse(line); } catch { continue; }
+    const content = obj.message && Array.isArray(obj.message.content) ? obj.message.content : [];
+    for (const c of content) {
+      if (c && c.type === 'tool_use' && c.name === 'Agent' && c.id) {
+        byToolUse.set(c.id, { description: String((c.input && c.input.description) || ''), type: String((c.input && c.input.subagent_type) || '') });
+      } else if (c && c.type === 'tool_result' && c.tool_use_id && byToolUse.has(c.tool_use_id)) {
+        const text = typeof c.content === 'string' ? c.content : (Array.isArray(c.content) ? c.content.map((x) => (x && x.text) || '').join('\n') : '');
+        const m = /agentId:\s*([0-9a-f]{6,})/i.exec(text);
+        if (m) out.set(m[1], byToolUse.get(c.tool_use_id));
+      }
+    }
+    // A background subagent reports through a task notification instead — a user-role
+    // line whose text carries <task-id>agentId</task-id> and <tool-use-id>toolu_…</tool-use-id>.
+    // On real data 30 of 65 forks were named only this way.
+    const flat = typeof (obj.message && obj.message.content) === 'string' ? obj.message.content
+      : content.map((x) => (x && typeof x.text === 'string') ? x.text : '').join('\n');
+    if (flat.includes('<task-notification>')) {
+      for (const block of flat.split('<task-notification>').slice(1)) {
+        const t = /<task-id>([0-9a-f]{6,})<\/task-id>/i.exec(block); const u = /<tool-use-id>(toolu_[A-Za-z0-9]+)<\/tool-use-id>/.exec(block);
+        if (t && u && byToolUse.has(u[1]) && !out.has(t[1])) out.set(t[1], byToolUse.get(u[1]));
+      }
+    }
+  }
+  return out;
 }
 
 function extractContent(content) {
@@ -420,4 +500,4 @@ function getMCPServers() {
 // answer to a different question: where this pilot's Claude Code instances live. Two
 // implementations of "find every CLAUDE_CONFIG_DIR" would drift the first time a playbook
 // layout changes, and this is the copy exercised on every single ship.
-module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers, discoverClaudeRoots };
+module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers, discoverClaudeRoots, subagentNames, subagentFiles };
