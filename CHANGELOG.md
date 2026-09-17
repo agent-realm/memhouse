@@ -4,7 +4,9 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.4 — 2026-09-17
+
+On the `team` channel. Found by the operator's own second machine on its first `update`.
 
 - **`memhouse update` never crosses release lines on its own.** An unpinned 0.18.2 whose
   `team` tag had moved to 0.18.3 matched no tag, and the picker fell back to `latest` —
