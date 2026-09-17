@@ -1226,5 +1226,34 @@ test('lastPass reads the shipper log: the later of success and failure wins', ()
   const other = lastPass('[memhouse] pass failed: fetch failed\n'); assert.strictEqual(other.auth, false); assert.match(describeFailure(other), /memhouse doctor/);
 });
 
+// ── a folded subagent turn knows which subagent it came from ─────────────────────────────
+test('claude adapter: folded subagent turns carry the agent id, description, type and turn', () => {
+  const os = require('os');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mh-sub-')); const proj = path.join(root, 'projects', '-x'); fs.mkdirSync(proj, { recursive: true });
+  const sid = '11111111-1111-1111-1111-111111111111'; const aid = 'a4485f448a3dffa16';
+  const parent = [
+    { type: 'user', uuid: 'u1', sessionId: sid, timestamp: '2026-09-15T10:00:00Z', cwd: '/x', message: { role: 'user', content: 'analyze the PRs' } },
+    { type: 'assistant', uuid: 'a1', sessionId: sid, timestamp: '2026-09-15T10:00:05Z', cwd: '/x', message: { role: 'assistant', model: 'm', content: [ { type: 'text', text: 'spawning' }, { type: 'tool_use', id: 'toolu_1', name: 'Agent', input: { description: 'Analyze 26.7 feature PRs', subagent_type: 'general-purpose', prompt: 'You are analyzing' } } ], usage: { input_tokens: 1, output_tokens: 1 } } },
+    { type: 'user', uuid: 'u2', sessionId: sid, timestamp: '2026-09-15T10:00:09Z', cwd: '/x', message: { role: 'user', content: [ { type: 'tool_result', tool_use_id: 'toolu_1', content: `Async agent launched successfully. agentId: ${aid} (internal ID)` } ] } },
+  ];
+  fs.writeFileSync(path.join(proj, `${sid}.jsonl`), parent.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const sub = path.join(proj, sid, 'subagents'); fs.mkdirSync(sub, { recursive: true });
+  const agentLines = [
+    { type: 'user', uuid: 's1', sessionId: sid, agentId: aid, isSidechain: true, timestamp: '2026-09-15T10:00:06Z', cwd: '/x', message: { role: 'user', content: 'You are analyzing' } },
+    { type: 'assistant', uuid: 's2', sessionId: sid, agentId: aid, isSidechain: true, timestamp: '2026-09-15T10:00:07Z', cwd: '/x', message: { role: 'assistant', model: 'm', content: [ { type: 'text', text: 'found three PRs' } ], usage: { input_tokens: 2, output_tokens: 2 } } },
+  ];
+  fs.writeFileSync(path.join(sub, `agent-${aid}.jsonl`), agentLines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const claude = require('../editors/claude');
+  const msgs = claude.getMessages({ _fullPath: path.join(proj, `${sid}.jsonl`) });
+  const own = msgs.filter((m) => !m._agent); const folded = msgs.filter((m) => m._agent);
+  assert.strictEqual(own.length, 2, 'parent turns are unmarked (a tool_result-only user line has no text and is not a turn)');
+  assert.strictEqual(folded.length, 2, 'both subagent turns folded');
+  assert.ok(folded.every((m) => m.content.startsWith('[subagent] ')), 'the text tag is unchanged (line_hash stability)');
+  assert.deepStrictEqual(folded.map((m) => m._agent.turn), [0, 1], 'turn counts within the subagent');
+  assert.strictEqual(folded[0]._agent.id, aid); assert.strictEqual(folded[0]._agent.description, 'Analyze 26.7 feature PRs'); assert.strictEqual(folded[0]._agent.type, 'general-purpose');
+  const names = claude.subagentNames(path.join(proj, `${sid}.jsonl`)); assert.deepStrictEqual([...names.keys()], [aid], 'agentId joined to the Agent tool call through tool_use_id');
+  fs.rmSync(root, { recursive: true });
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

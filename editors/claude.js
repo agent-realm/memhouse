@@ -195,11 +195,19 @@ function cleanPrompt(prompt) {
 // Parse one Claude session .jsonl into the adapter's message shape. When
 // `isSubagent` is set, each message is tagged `[subagent]` so folded subagent turns
 // are clearly attributed in the transcript.
-function parseSessionFile(filePath, isSubagent) {
+function parseSessionFile(filePath, isSubagent, agent = null) {
   const messages = [];
   let lines;
   try { lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean); } catch { return messages; }
   const tag = isSubagent ? '[subagent] ' : '';
+  // A folded subagent turn used to carry only the `[subagent]` tag: the house held the
+  // turns but not WHICH subagent said them, so one fork's transcript could not be isolated,
+  // cited, or told apart from a sibling's. An agent looking for the fork as its own session
+  // concluded it was never shipped. Every turn now carries the agent's id, the description
+  // the parent gave it, and its position within that subagent — in `extra`, which is not
+  // part of the line hash, so nothing already shipped is re-shipped for this.
+  let turn = 0;
+  const stamp = (m) => { if (agent) { m._agent = { ...agent, turn: turn++ }; } return m; };
 
   for (const line of lines) {
     let obj;
@@ -223,19 +231,19 @@ function parseSessionFile(filePath, isSubagent) {
 
     if (obj.type === 'user' && obj.message) {
       const content = extractContent(obj.message.content);
-      if (content) messages.push({ role: 'user', content: tag + content, _ts: at });
+      if (content) messages.push(stamp({ role: 'user', content: tag + content, _ts: at }));
     } else if (obj.type === 'assistant' && obj.message) {
       const { text, toolCalls } = extractAssistantContent(obj.message.content);
       const usage = obj.message.usage;
-      if (text) messages.push({
+      if (text) messages.push(stamp({
         role: 'assistant', content: tag + text, _model: obj.message.model,
         _inputTokens: usage?.input_tokens, _outputTokens: usage?.output_tokens,
         _cacheRead: usage?.cache_read_input_tokens, _cacheWrite: usage?.cache_creation_input_tokens,
         _toolCalls: toolCalls, _ts: at,
-      });
+      }));
     } else if (obj.type === 'system') {
       const text = typeof obj.message?.content === 'string' ? obj.message.content : '';
-      if (text) messages.push({ role: 'system', content: tag + text, _ts: at });
+      if (text) messages.push(stamp({ role: 'system', content: tag + text, _ts: at }));
     }
   }
   return messages;
@@ -254,10 +262,42 @@ function getMessages(chat) {
   const subagentsDir = path.join(filePath.replace(/\.jsonl$/, ''), 'subagents');
   try {
     const files = fs.readdirSync(subagentsDir).filter(f => f.endsWith('.jsonl')).sort();
-    for (const f of files) messages.push(...parseSessionFile(path.join(subagentsDir, f), true));
+    const named = files.length ? subagentNames(filePath) : new Map();
+    for (const f of files) {
+      const id = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
+      const meta = named.get(id) || {};
+      messages.push(...parseSessionFile(path.join(subagentsDir, f), true,
+        { id, description: meta.description || '', type: meta.type || '', file: f }));
+    }
   } catch { /* no subagents for this session */ }
 
   return messages;
+}
+
+/**
+ * What the parent called each subagent. The parent's `Agent` tool_use carries the
+ * description and subagent_type; the tool_result that answers it names the agentId
+ * ("agentId: <id>"). Join the two through tool_use_id → a map agentId → {description, type}.
+ * Best effort: a parent that predates the ids, or a truncated line, just yields no name.
+ */
+function subagentNames(parentFile) {
+  const byToolUse = new Map(); const out = new Map();
+  let lines = [];
+  try { lines = fs.readFileSync(parentFile, 'utf-8').split('\n').filter(Boolean); } catch { return out; }
+  for (const line of lines) {
+    let obj; try { obj = JSON.parse(line); } catch { continue; }
+    const content = obj.message && Array.isArray(obj.message.content) ? obj.message.content : [];
+    for (const c of content) {
+      if (c && c.type === 'tool_use' && c.name === 'Agent' && c.id) {
+        byToolUse.set(c.id, { description: String((c.input && c.input.description) || ''), type: String((c.input && c.input.subagent_type) || '') });
+      } else if (c && c.type === 'tool_result' && c.tool_use_id && byToolUse.has(c.tool_use_id)) {
+        const text = typeof c.content === 'string' ? c.content : (Array.isArray(c.content) ? c.content.map((x) => (x && x.text) || '').join('\n') : '');
+        const m = /agentId:\s*([0-9a-f]{6,})/i.exec(text);
+        if (m) out.set(m[1], byToolUse.get(c.tool_use_id));
+      }
+    }
+  }
+  return out;
 }
 
 function extractContent(content) {
@@ -420,4 +460,4 @@ function getMCPServers() {
 // answer to a different question: where this pilot's Claude Code instances live. Two
 // implementations of "find every CLAUDE_CONFIG_DIR" would drift the first time a playbook
 // layout changes, and this is the copy exercised on every single ship.
-module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers, discoverClaudeRoots };
+module.exports = { name, labels, getChats, getMessages, getUsage, getArtifacts, getMCPServers, discoverClaudeRoots, subagentNames };
