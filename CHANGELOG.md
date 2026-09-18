@@ -4,6 +4,22 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`memhouse convert` — an operator moves a pre-one-layout house to the one layout.**
+  Before 0.18 each member owned a database (`polat.messages`, `ALL ON polat.*`). `convert`
+  finds every such member, renames their five rooms into `mem.<name>_*` in one atomic
+  statement (nothing copied), swaps the database-wide grant for the one wildcard, carries
+  whole-house shares and row policies to the new names, drops the 0.17.1 refreshable
+  views (the shipper fills stats in the one layout), records an event in the member's
+  events room, and drops the emptied database. `--dry-run`/`--print-sql` show the plan;
+  `--guides --out DIR` renders `MEMHOUSE-UPGRADE-<member>.md` per member.
+- **A member's env repairs itself after the move.** `memhouse update` and the shipper's
+  startup both notice that `<db>.messages` is gone and `mem.<name>_messages` exists, and
+  rewrite `MEMHOUSE_DB=mem`; `doctor` names it. So the member's whole upgrade is one
+  command. Rehearsed by `misc/convert-matrix.sh`: a real 0.17.1-built house on 26.7,
+  converted, shares intact, isolation intact, the member's old env adopted, 24/24.
+
 ## 0.18.4 — 2026-09-17
 
 On the `team` channel. Found by the operator's own second machine on its first `update`.

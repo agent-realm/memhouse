@@ -453,6 +453,8 @@ Data         ship                 one incremental pass (--full | --loop [sec])
              instance             which memhouse this is: home, binary, house, rooms, scope, daemons, bound playbooks
              rooms                what your rooms are actually called (--json)
              members              who is in a house and what each can reach (--db, admin)
+             convert              operator: move a pre-one-layout house (a database per member) to the one layout
+                                  (--admin-user/--admin-password, --member, --print-sql, --dry-run, --guides --out DIR)
              start | stop |       shipper loop + dashboard as background daemons
              share <user>         let someone read this house (--only project=… |
                                   session=… | host=… | source=… | folder=… | since=… |
@@ -2000,6 +2002,10 @@ async function cmdDoctor() {
         : `token capture: ${zero.map((r) => `${r.source} (${r.n} messages)`).join(', ')} ship ZERO tokens — their cost shows as $0, not as unknown`,
       'that adapter does not extract usage; the messages are stored, the numbers are not');
   } catch { /* a house that cannot be read is already reported above */ }
+  try {
+    const moved = await adoptMovedHouse(cfg, { fix: false });
+    if (moved === 'moved') add(false, `rooms moved to mem.${physicalRoom('messages', cfg.user).replace(/_messages$/, '')}_* — this env still says MEMHOUSE_DB=${cfg.db}`, 'memhouse update   (rewrites the env and restarts the shipper)');
+  } catch { /* connection problems are reported above */ }
   const sh = shipperHealth();
   const shFail = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'passlog')).describeFailure(sh.lastPass);
   add(sh.running && !shFail, `shipper${sh.via ? ` — ${sh.via}` : ''}${shFail ? ` — ${shFail}` : ''}`,
@@ -2221,6 +2227,10 @@ async function cmdUpdate() {
     }
   }
   console.log(ok('files updated'));
+  // The house may have been converted to the one layout since this machine last ran:
+  // the member's rooms moved from <name>.* to mem.<name>_*. Fix the env here, before the
+  // shipper restarts, or its first pass refuses the old address forever.
+  try { await adoptMovedHouse(resolveConfig()); } catch { /* doctor will say */ }
 
   // Refresh the Claude plugin wherever it is ALREADY installed, so `update` keeps the
   // skills in lockstep with the package instead of leaving a stale `/mem:*` behind. Only
@@ -3417,6 +3427,30 @@ async function cmdWhoami() {
  * declined. Never touches the file's password: what it shows is the user, the house and
  * the server, which the guide beside the file shows too.
  */
+/**
+ * After the operator converted the house to the one layout, a member's env still says
+ * MEMHOUSE_DB=<their name>. Their rooms now live in `mem` as <name>_*. Detect that and
+ * rewrite the env: the member's `memhouse update` is the moment it happens, and doctor
+ * names it. Returns 'moved' (env rewritten), 'current', or 'unknown' (could not tell).
+ */
+async function adoptMovedHouse(cfg, { fix = true, quiet = false } = {}) {
+  if (!cfg.stated || !cfg.user) return 'unknown';
+  const mine = physicalRoom('messages', cfg.user);
+  let rows;
+  try {
+    rows = await chRows(cfg, `SELECT database, name FROM system.tables WHERE (database = ${sqlStr(cfg.db)} AND name IN ('messages', ${sqlStr(mine)})) OR (database = 'mem' AND name = ${sqlStr(mine)})`, { database: '' });
+  } catch { return 'unknown'; }
+  const has = (d, n) => rows.some((r) => r.database === d && r.name === n);
+  if (has(cfg.db, mine)) return 'current';
+  if (cfg.db !== 'mem' && has('mem', mine) && !has(cfg.db, 'messages')) {
+    if (!fix) return 'moved';
+    writeEnvFile({ ...cfg, db: 'mem' });
+    if (!quiet) console.log(ok(`your rooms moved: ${cfg.db}.messages is now mem.${mine} — ${short(ENV_FILE)} now says MEMHOUSE_DB=mem`));
+    return 'moved';
+  }
+  return 'current';
+}
+
 async function offerInvite() {
   const inv = require(path.join(REPO_ROOT, 'memhouse', 'invitefile'));
   // The current directory only. The guide says "from the directory holding the file", and
@@ -4012,6 +4046,82 @@ async function cmdUninstall() {
       // carries FINAL and join_use_nulls itself, so the note is provenance, not a warning.
       if (!JSON_OUT) console.log(`-- memhouse rollup for '${r.member}' — self-contained (FINAL + join_use_nulls).`);
       console.log(r.sessions_v);
+      break;
+    }
+    case 'convert': {
+      // Operator: move a pre-one-layout house (a database per member) to the one layout.
+      // Discovers members by their databases, plans per member, executes as admin, records
+      // an event in each member's new events room. --print-sql shows the plan; --dry-run
+      // discovers and plans without touching anything; --guides <dir> renders
+      // MEMHOUSE-UPGRADE.md per member for the operator to hand out.
+      const convert = require(path.join(REPO_ROOT, 'memhouse', 'convert'));
+      const db = flags.db && flags.db !== true ? String(flags.db) : 'mem';
+      const au = flags['admin-user'] && flags['admin-user'] !== true ? String(flags['admin-user']) : (cfg.adminUser || null);
+      const ap = flags['admin-password'] && flags['admin-password'] !== true ? String(flags['admin-password']) : (cfg.adminPassword || '');
+      if (!au) { console.log(bad('convert needs an admin credential: --admin-user/--admin-password (or the one this instance keeps)')); process.exitCode = 1; break; }
+      const who = { ...cfg, user: au, password: ap };
+      const only = flags.member && flags.member !== true ? String(flags.member) : null;
+      // Candidates: a user whose own database holds `messages` and who has no rooms in `db` yet.
+      const cands = await chRows(who, `SELECT u.name AS member FROM system.users u WHERE u.name IN (SELECT database FROM system.tables WHERE name = 'messages') AND u.name NOT IN (SELECT replaceRegexpOne(name, '_messages$', '') FROM system.tables WHERE database = ${sqlStr(db)} AND name LIKE '%\\_messages') ORDER BY u.name`, { database: '' });
+      const members = cands.map((r) => r.member).filter((m) => !only || m === only);
+      if (!members.length) { console.log(ok(only ? `'${only}' has nothing to convert` : 'nothing to convert — no member still owns a database of their own')); break; }
+      console.log(ok(`${members.length} member(s) to convert into '${db}': ${members.join(', ')}`));
+      const plans = [];
+      for (const m of members) {
+        const shares = (await chRows(who, `SELECT DISTINCT user_name FROM system.grants WHERE access_type = 'SELECT' AND database = ${sqlStr(m)} AND (table = '' OR table IS NULL) AND user_name != ${sqlStr(m)}`, { database: '' })).map((r) => ({ reader: r.user_name }));
+        const policies = (await chRows(who, `SELECT name, table, select_filter AS filter, apply_to_list AS readers FROM system.row_policies WHERE database = ${sqlStr(m)}`, { database: '' })).map((r) => ({ name: r.name, table: r.table, filter: r.filter, readers: Array.isArray(r.readers) ? r.readers : [] }));
+        plans.push({ member: m, shares, policies, steps: convert.planMember({ member: m, db, shares, policies }) });
+      }
+      if (flags['print-sql'] === true || flags['dry-run'] === true) {
+        console.log(`CREATE DATABASE IF NOT EXISTS ${db};`);
+        for (const p of plans) console.log(`\n-- ${p.member}: ${p.shares.length} share(s), ${p.policies.length} row polic${p.policies.length === 1 ? 'y' : 'ies'}\n${convert.render(p.steps)}`);
+        if (flags['dry-run'] === true) console.log(`\n${warn('dry run — nothing executed')}`);
+        break;
+      }
+      if (flags.yes !== true && process.stdin.isTTY) {
+        const a = (await ask(`Convert ${members.length} member(s) now? Renames are instant and reversible only by renaming back. (yes/no)`, 'no')).toLowerCase();
+        if (a !== 'yes' && a !== 'y') { console.log('  nothing done.'); break; }
+      }
+      await ch(who, `CREATE DATABASE IF NOT EXISTS ${db}`, { database: '' });
+      let converted = 0;
+      for (const p of plans) {
+        let failed = null;
+        for (const st of p.steps) {
+          if (st.when === 'empty') {
+            const left = await chRows(who, `SELECT count() AS n FROM system.tables WHERE database = ${sqlStr(p.member)}`, { database: '' });
+            if (Number(left[0] && left[0].n) !== 0) { console.log(warn(`  ${p.member}: database kept — ${left[0].n} unexpected table(s) remain in it`)); continue; }
+          }
+          try { await ch(who, st.sql, { database: '' }); }
+          catch (e) {
+            const m = (e && e.message ? e.message : String(e)).split('\n')[0];
+            if (st.optional) { console.log(warn(`  ${p.member}: skipped — ${st.why}: ${m}`)); continue; }
+            failed = `${st.why}: ${m}`; break;
+          }
+        }
+        if (failed) { console.log(bad(`${p.member}: stopped — ${failed}`)); console.log('  what already ran stays (renames are visible in system.tables); fix and re-run: memhouse convert --member ' + p.member); process.exitCode = 1; continue; }
+        try {
+          const ev = physicalRoom('events', p.member);
+          const cols = new Set((await chRows(who, `SELECT name FROM system.columns WHERE database = ${sqlStr(db)} AND table = ${sqlStr(ev)} AND default_kind != 'MATERIALIZED'`, { database: '' })).map((r) => r.name)); // actor is MATERIALIZED currentUser()
+          const want = { event_at: 'now64(3)', kind: "'layout'", id: "'one-layout'", status: "'converted'", from_version: "'db-per-member'", to_version: "'one-layout'", actor: sqlStr(au), host: sqlStr(os.hostname()), rows_before: '0', rows_after: '0', detail: sqlStr(`renamed ${p.member}.* → ${db}.${p.member}_*; ${p.shares.length} share(s), ${p.policies.length} row polic(y/ies) carried`) };
+          const use = Object.keys(want).filter((c) => cols.has(c));
+          if (use.length) await ch(who, `INSERT INTO ${db}.${ev} (${use.join(', ')}) VALUES (${use.map((c) => want[c]).join(', ')})`, { database: '' });
+          else console.log(warn(`  ${p.member}: events room has none of the expected columns — no event recorded`));
+        } catch (e) { console.log(warn(`  ${p.member}: event not recorded — ${(e && e.message ? e.message : String(e)).split('\n')[0].slice(0, 120)}`)); }
+        converted++;
+        console.log(ok(`${p.member}: rooms now ${db}.${p.member}_* — ${p.shares.length} share(s) carried${p.policies.length ? `, ${p.policies.length} row polic${p.policies.length === 1 ? 'y' : 'ies'}` : ''}`));
+      }
+      console.log(ok(`${converted}/${members.length} converted`));
+      if (flags.guides) {
+        const outDir = flags.out && flags.out !== true ? String(flags.out) : process.cwd();
+        fs.mkdirSync(outDir, { recursive: true });
+        const tpl = fs.readFileSync(path.join(REPO_ROOT, 'memhouse', 'delivery', 'UPGRADE.md.tpl'), 'utf-8');
+        for (const p of plans) {
+          const rooms = [...ROOM_TYPES, ...META_TYPES].map((t) => `${db}.${physicalRoom(t, p.member)}`).join('\n');
+          const md = tpl.replaceAll('{{NAME}}', p.member).replaceAll('{{URL}}', cfg.url).replaceAll('{{DB}}', db).replaceAll('{{ROOMS}}', rooms)
+            .replaceAll('{{CHANNEL}}', cfg.channel || 'latest').replaceAll('{{OPERATOR}}', os.userInfo().username).replaceAll('{{VERSION}}', PKG.version).replaceAll('{{DATE}}', new Date().toISOString().slice(0, 10));
+          const f = path.join(outDir, `MEMHOUSE-UPGRADE-${p.member}.md`); fs.writeFileSync(f, md); console.log(ok(`guide written: ${short(f)}`));
+        }
+      }
       break;
     }
     case 'members': {

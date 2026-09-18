@@ -1287,5 +1287,28 @@ test('pickChannel: an unpinned release stays on its line when its tag has moved 
   assert.strictEqual(pickChannel({ version: '0.18.2', pinned: 'team', tags }).channel, 'team', 'a pin still wins');
 });
 
+// ── converting a pre-one-layout house is a plan of renames and grants ────────────────────
+test('convert plan: renames the five rooms in one statement, swaps the grant, carries shares and policies, drops the database last only when empty', () => {
+  const convert = require('../memhouse/convert');
+  const steps = convert.planMember({ member: 'polat', shares: [{ reader: 'mir' }], policies: [{ name: 'p1', table: 'messages', filter: "project = 'x'", readers: ['mir'] }] });
+  const sql = steps.map((s) => s.sql);
+  const ren = sql.find((q) => q.startsWith('RENAME TABLE'));
+  assert.ok(ren.includes('polat.messages TO mem.polat_messages') && ren.includes('polat.house_meta TO mem.polat_meta') && ren.includes('polat.house_events TO mem.polat_events'), 'all five rooms, new names');
+  assert.strictEqual((ren.match(/ TO /g) || []).length, 5, 'one atomic RENAME of five pairs');
+  assert.ok(sql.some((q) => q === 'REVOKE ALL ON polat.* FROM polat'));
+  assert.ok(sql.some((q) => q.startsWith('GRANT SELECT, INSERT') && q.includes('ON mem.polat_* TO polat WITH GRANT OPTION')), 'the one-layout wildcard grant');
+  assert.ok(sql.some((q) => q === 'GRANT SELECT ON mem.polat_* TO mir'), 'a whole-house share follows');
+  assert.ok(sql.some((q) => q.startsWith('CREATE ROW POLICY OR REPLACE p1 ON mem.polat_messages FOR SELECT USING project = \'x\' TO mir')), 'a row policy follows to the new room');
+  assert.ok(sql.slice(0, 6).every((q) => q.startsWith('DROP TABLE IF EXISTS polat.session_')), 'the 0.17.1 views and stat tables go first');
+  const last = steps[steps.length - 1]; assert.strictEqual(last.sql, 'DROP DATABASE IF EXISTS polat'); assert.strictEqual(last.when, 'empty');
+  assert.ok(convert.render(steps).includes('-- '), 'render explains every step');
+});
+test('envfile.setKey replaces a key in place or appends it', () => {
+  const { setKey } = require('../memhouse/envfile');
+  const t = "MEMHOUSE_URL='http://h'\nMEMHOUSE_DB='polat'\n";
+  assert.strictEqual(setKey(t, 'MEMHOUSE_DB', 'mem'), "MEMHOUSE_URL='http://h'\nMEMHOUSE_DB='mem'\n");
+  assert.strictEqual(setKey("MEMHOUSE_URL='http://h'", 'MEMHOUSE_DB', 'mem'), "MEMHOUSE_URL='http://h'\nMEMHOUSE_DB='mem'\n");
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

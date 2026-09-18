@@ -200,7 +200,7 @@ function toInt(v) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function makeClient() {
+function makeClient(override = {}) {
   // No house-shaped default. `memhouse` spawns this with the resolved config in the
   // environment, so a missing MEMHOUSE_URL here means the shipper was started some other
   // way — a stale service unit, a hand-rolled cron, a copied command — and the old
@@ -224,7 +224,7 @@ function makeClient() {
     url: process.env.MEMHOUSE_URL,
     username: process.env.MEMHOUSE_USER,
     password: process.env.MEMHOUSE_PASSWORD || '',
-    database: process.env.MEMHOUSE_DB || process.env.MEMHOUSE_USER, // house defaults to the user's own name
+    database: override.database || process.env.MEMHOUSE_DB || process.env.MEMHOUSE_USER, // house defaults to the user's own name
     // gzip the INSERT body. Measured on a real house behind a Cloudflare tunnel: a
     // 2000-row batch was ~27 MB of JSON and the insert spent 76s in NetworkReceive alone
     // (index build was 0.8s, CPU 1.1s) — the upload, not ClickHouse, was the whole cost.
@@ -1310,6 +1310,27 @@ async function printStats(client) {
 async function main() {
   const argv = process.argv.slice(2);
   let client = makeClient();
+  // The operator may have converted the house to the one layout since this env was
+  // written: the member's rooms moved from <name>.* to mem.<name>_*. Adopt that here —
+  // rewrite the env, point this process at `mem` — instead of refusing the old address on
+  // every pass until someone runs `memhouse update`.
+  try {
+    const me = process.env.MEMHOUSE_USER; const db = process.env.MEMHOUSE_DB || me;
+    if (me && db !== 'mem') {
+      const mine = `${me}_messages`;
+      // Probe through `system`: after a conversion the env's database no longer exists, and a
+      // session defaulting to it is refused before any query runs.
+      const probe = makeClient({ database: 'system' });
+      const rs = await probe.query({ query: `SELECT database, name FROM system.tables WHERE (database = '${db.replace(/'/g, "\\'")}' AND name IN ('messages', '${mine}')) OR (database = 'mem' AND name = '${mine}')`, format: 'JSONEachRow' });
+      const rows = await rs.json(); const has = (d, n) => rows.some((r) => r.database === d && r.name === n);
+      if (!has(db, mine) && !has(db, 'messages') && has('mem', mine)) {
+        const envPath = require('path').join(process.env.MEMHOUSE_HOME || require('path').join(require('os').homedir(), '.memhouse'), 'env');
+        try { const fs = require('fs'); fs.writeFileSync(envPath, require('../envfile').setKey(fs.readFileSync(envPath, 'utf-8'), 'MEMHOUSE_DB', 'mem')); } catch { /* env not writable: this process still adopts */ }
+        process.env.MEMHOUSE_DB = 'mem'; client = makeClient();
+        console.error(`[memhouse] your rooms moved: ${db}.messages is now mem.${mine} — env now says MEMHOUSE_DB=mem`);
+      }
+    }
+  } catch { /* unreachable or unreadable: the pass will say */ }
   try {
     if (argv.includes('--ensure-schema')) {
       const n = await ensureSchema(client);
