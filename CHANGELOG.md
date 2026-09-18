@@ -4,7 +4,9 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.5 — 2026-09-18
+
+The first release on **one line**: published to `latest` and `team` alike. zeo was converted to the one layout the same evening with `memhouse convert` (six members, every row count identical before and after, shares carried).
 
 - **One release line.** With zeo converted to the one layout there is no 0.17 line to keep:
   `latest` now points at the same 0.18.x build as `team` (kept as an alias), the publish
