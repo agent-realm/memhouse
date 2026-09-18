@@ -61,4 +61,11 @@ function credentialDrift(text, current = {}) {
   return { changed, values };
 }
 
-module.exports = { credentialDrift, parse, quoteShell, quoteSystemd, assertSingleLine };
+/** The env file text with one key set (replaced in place, or appended). Pure. */
+function setKey(text, key, value) {
+  const line = `${key}='${String(value).replace(/'/g, "'\\''")}'`;
+  const re = new RegExp(`^${key}=.*$`, 'm');
+  return re.test(text) ? text.replace(re, line) : `${text.replace(/\n*$/, '')}\n${line}\n`;
+}
+
+module.exports = { setKey, credentialDrift, parse, quoteShell, quoteSystemd, assertSingleLine };
