@@ -6,6 +6,10 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **One release line.** With zeo converted to the one layout there is no 0.17 line to keep:
+  `latest` now points at the same 0.18.x build as `team` (kept as an alias), the publish
+  guard and `AGENTS.md` say so, and `release/0.17` is retired.
+
 - **`memhouse convert` — an operator moves a pre-one-layout house to the one layout.**
   Before 0.18 each member owned a database (`polat.messages`, `ALL ON polat.*`). `convert`
   finds every such member, renames their five rooms into `mem.<name>_*` in one atomic

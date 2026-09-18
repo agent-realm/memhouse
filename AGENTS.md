@@ -9,13 +9,12 @@ live in [`~/agent-realm/CLAUDE.md`](../CLAUDE.md) and are not repeated here.
 
 ## Release lines — read before tagging, publishing, or merging a release
 
-memhouse ships two lines to two audiences. They share a repo, not a branch, and nothing
-moves between them by itself.
+memhouse shipped two lines while zeo ran the pre-0.18 layout. Since its conversion there
+is one line; the rules below are kept because a second line can happen again.
 
 | line | git branch | npm dist-tag | versions | who installs it |
 |---|---|---|---|---|
-| zeo | `release/0.17` | `latest` | 0.17.x | `npm install -g memhouse` — zeo.memhouse.io members |
-| santiment team | `main` (default) | `team` | 0.18.x | `npm install -g memhouse@team` — the one-layout houses |
+| the one line | `main` (default) | `latest`, and `team` as an alias | 0.18.x | everyone — `npm install -g memhouse` (zeo was converted to the one layout with `memhouse convert`; `release/0.17` is retired) |
 
 Rules, each learned once:
 
