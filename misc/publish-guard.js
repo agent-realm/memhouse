@@ -4,8 +4,8 @@
 //
 // The lines (also in AGENTS.md § Release lines — keep the two in step):
 //   npm tag  →  branch         →  versions
-//   latest   →  release/0.17   →  0.17.x   (zeo)
-//   team     →  main           →  0.18.x   (santiment)
+//   latest   →  main   →  0.18.x   (everyone; zeo converted to the one layout)
+//   team     →  main   →  0.18.x   (alias kept for `npm install -g memhouse@team`)
 //
 // A 0.17.1 was once built and tagged on `master` and published to `latest` by an agent
 // that had not seen the table. Nothing broke, but the branch and the registry disagreed
@@ -14,8 +14,10 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+// One line since the zeo conversion: `latest` and `team` are two names for the same build
+// from main. `team` stays as an alias so `npm install -g memhouse@team` keeps working.
 const LINES = {
-  latest: { branch: 'release/0.17', minor: '0.17' },
+  latest: { branch: 'main', minor: '0.18' },
   team: { branch: 'main', minor: '0.18' },
 };
 
