@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.7 — 2026-09-19
 
 - **`status` and `doctor` say when an update is out.** `update --check` always existed and
   nobody ran it: a member sat four days behind the release that fixed the very thing they
