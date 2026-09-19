@@ -658,14 +658,18 @@ test('the identity is written once and then never moves', () => {
 });
 
 test('two machines that look identical still get different ids', () => {
-  // THE bug in the derived scheme: two laptops with the same default hostname on the same
-  // platform and arch hashed to one id, so their sessions merged into a single apparent
-  // host and neither could be told from the other.
-  const a = tmpHome(), b = tmpHome();
-  try {
-    assert.notStrictEqual(hostjs.identity(a).id, hostjs.identity(b).id,
-      'identical machines must not collide — the fingerprint is random, not derived');
-  } finally { for (const h of [a, b]) fsx.rmSync(h, { recursive: true, force: true }); }
+  // THE bug in the FIRST derived scheme: two laptops with the same default hostname on the
+  // same platform and arch hashed to one id, so their sessions merged into a single
+  // apparent host. The fingerprint is derived again — but from the machine's OWN id
+  // (IOPlatformUUID / machine-id), which two laptops never share, and hostname, platform
+  // and arch feed nothing. Two homes on ONE machine now deliberately agree, so the old
+  // way of staging this (two temp homes) no longer stages two machines; the raw id does.
+  assert.notStrictEqual(hostjs.machineFingerprint('uuid-of-laptop-A'), hostjs.machineFingerprint('uuid-of-laptop-B'),
+    'different machines must not collide');
+  assert.strictEqual(hostjs.machineFingerprint('uuid-of-laptop-A'), hostjs.machineFingerprint('uuid-of-laptop-A'),
+    'and the same machine must agree with itself');
+  assert.match(hostjs.machineFingerprint('uuid-of-laptop-A'), /^[0-9a-f]{32}$/);
+  assert.ok(!hostjs.machineFingerprint('uuid-of-laptop-A').includes('uuid'), 'the raw id is hashed, never stored');
 });
 
 test('renaming the machine does not split its history', () => {
@@ -1308,6 +1312,25 @@ test('envfile.setKey replaces a key in place or appends it', () => {
   const t = "MEMHOUSE_URL='http://h'\nMEMHOUSE_DB='polat'\n";
   assert.strictEqual(setKey(t, 'MEMHOUSE_DB', 'mem'), "MEMHOUSE_URL='http://h'\nMEMHOUSE_DB='mem'\n");
   assert.strictEqual(setKey("MEMHOUSE_URL='http://h'", 'MEMHOUSE_DB', 'mem'), "MEMHOUSE_URL='http://h'\nMEMHOUSE_DB='mem'\n");
+});
+
+// ── the same machine keeps its identity across reinstalls ────────────────────────────────
+test('host fingerprint is derived from the machine, stable across a wiped home', () => {
+  const host = require('../memhouse/host');
+  const os2 = require('os');
+  const a = fs.mkdtempSync(path.join(os2.tmpdir(), 'mh-h1-')); const b = fs.mkdtempSync(path.join(os2.tmpdir(), 'mh-h2-'));
+  const first = host.identity(a); const second = host.identity(b); // two homes = a wipe and reinstall
+  const raw = host.stableMachineId();
+  if (raw) {
+    assert.strictEqual(first.fingerprint, second.fingerprint, 'same machine, same fingerprint');
+    assert.strictEqual(first.id, second.id, 'and therefore the same host id');
+    assert.ok(!first.fingerprint.includes(raw) && !first.id.includes(raw.slice(0, 8)), 'the raw machine id is not recoverable from what is stored');
+    assert.match(host.machineFingerprint(), /^[0-9a-f]{32}$/);
+  } else {
+    assert.notStrictEqual(first.fingerprint, second.fingerprint, 'no machine id available: random, and honest about it');
+  }
+  assert.ok(fs.existsSync(host.filePath(a)), 'host.json is still written');
+  fs.rmSync(a, { recursive: true }); fs.rmSync(b, { recursive: true });
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
