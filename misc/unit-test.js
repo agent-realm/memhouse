@@ -1333,5 +1333,21 @@ test('host fingerprint is derived from the machine, stable across a wiped home',
   fs.rmSync(a, { recursive: true }); fs.rmSync(b, { recursive: true });
 });
 
+test('fleet: a writer silent past the cutoff is retired, not a standing warning', () => {
+  const DAY = 24 * 3600 * 1000; const RETIRED = 14 * DAY;
+  const fleet = [
+    { writer: 'polat@a', ageMs: 3 * 60000, verdict: 'ok' },
+    { writer: 'polat@b', ageMs: 4 * DAY, verdict: 'stale' },
+    { writer: 'default@c', ageMs: 30 * DAY, verdict: 'legacy' },
+    { writer: 'polat@d', ageMs: 31 * DAY, verdict: 'legacy' },
+  ];
+  const retired = fleet.filter((f) => f.ageMs !== null && f.ageMs > RETIRED);
+  const live = fleet.filter((f) => !retired.includes(f));
+  assert.deepStrictEqual(retired.map((f) => f.writer), ['default@c', 'polat@d'], 'both month-silent writers retire');
+  assert.deepStrictEqual(live.map((f) => f.writer), ['polat@a', 'polat@b'], 'the stale-but-recent one stays visible');
+  assert.strictEqual(live.filter((f) => f.verdict !== 'ok').length, 1, 'only a LIVE non-ok writer colours the headline');
+  assert.ok(fleet.filter((f) => f.verdict === 'legacy').every((f) => retired.includes(f)), 'a live pre-0.10 writer would still warn — these are simply not live');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

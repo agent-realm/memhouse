@@ -1642,13 +1642,29 @@ async function cmdStatus() {
   if (out.connected && !out.messages) console.log(ok(`house: empty — ${out.sessions} sessions, 0 messages (nothing shipped yet)`));
   else if (out.connected) console.log(ok(`house: ${out.sessions} sessions, ${out.messages} messages (freshest ingest ${out.freshest} UTC)`));
   if (out.fleet && out.fleet.length) {
-    const badOnes = out.fleet.filter((f) => f.verdict !== 'ok');
-    console.log((badOnes.length ? warn : ok)(`fleet: ${out.fleet.length} writer(s) known to this house`));
-    for (const f of out.fleet) {
+    // A writer appears in this list because it has rows — the list is GROUP BY over the
+    // messages, not a registry — so a machine that was re-identified (before host ids were
+    // derived from the machine) stays here forever, and cannot be tidied away without
+    // deleting its sessions. Retired writers are therefore folded into one line instead of
+    // shouting a permanent warning: they are history, not a fleet to maintain. `--all`
+    // prints every one. A writer is RETIRED when it has been silent past the cutoff; a
+    // pre-0.10 writer that is still active keeps its warning, because that one can still bite.
+    const RETIRED_MS = 14 * 24 * 3600 * 1000;
+    const retired = out.fleet.filter((f) => f.ageMs !== null && f.ageMs > RETIRED_MS);
+    const shown = flags.all === true ? out.fleet : out.fleet.filter((f) => !retired.includes(f));
+    const live = out.fleet.filter((f) => !retired.includes(f));
+    const badOnes = live.filter((f) => f.verdict !== 'ok');
+    console.log((badOnes.length ? warn : ok)(`fleet: ${live.length} active writer(s)${retired.length ? `, ${retired.length} retired` : ''}`));
+    for (const f of shown) {
       const mark = f.verdict === 'legacy' ? '  ⚠ pre-0.10 — upgrade it (or revoke its mutation grants); its re-ships delete retained parses'
         : f.verdict === 'outdated' ? '  ⚠ supports an older schema — refusing every pass until updated'
           : f.verdict === 'stale' ? '  • stale' : '';
-      console.log(`     ${f.writer.padEnd(28)} ${String(f.version || '?').padEnd(8)} last ship ${fleetAge(f.ageMs)}${mark}`);
+      const tag = retired.includes(f) ? '  · retired' : mark;
+      console.log(`     ${f.writer.padEnd(28)} ${String(f.version || '?').padEnd(8)} last ship ${fleetAge(f.ageMs)}${tag}`);
+    }
+    if (retired.length && flags.all !== true) {
+      const oldest = fleetAge(Math.max(...retired.map((f) => f.ageMs)));
+      console.log(`     ${String(`${retired.length} retired writer(s)`).padEnd(28)} ${' '.padEnd(8)} silent ${oldest} and longer — their sessions are still here:  memhouse status --all`);
     }
   }
   {

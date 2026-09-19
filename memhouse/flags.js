@@ -17,7 +17,7 @@ const COMMAND_FLAGS = {
   whoami: ['admin'],
   share: ['only', 'revoke', 'list'],
   discover: [], stats: [], stop: [], doctor: [], 'sessions-query': [], rooms: [], instance: [], members: ['db','admin-user','admin-password'], convert: ['url','db','admin-user','admin-password','member','print-sql','dry-run','guides','out'],
-  status: [], start: [],
+  status: ['all'], start: [],
   onboard: ['url', 'user', 'password', 'db', 'port', 'no-ship', 'target', 'house-port', 'tag', 'local'],
   install: ['url', 'user', 'password', 'db', 'port', 'no-ship', 'env', 'print-sql', 'member',
     'member-password', 'admin-user', 'admin-password', 'ensure-schema', 'rotate-password', 'force',
