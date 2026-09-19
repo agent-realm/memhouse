@@ -60,4 +60,27 @@ async function fetchTags(fetchImpl = globalThis.fetch) {
   } catch { return null; }
 }
 
-module.exports = { pickChannel, fetchTags, isPrerelease, lineOf };
+/**
+ * Is this install behind its channel? Pure — the caller supplies the tags, so nothing here
+ * reaches the network and `status` stays offline-safe.
+ *
+ * Only a strictly newer target counts: a prerelease, a version ahead of the tag, or a
+ * registry that did not answer all return null, because "unknown" must never read as
+ * "you are behind" on a health screen someone gates on.
+ *
+ * @returns {{target: string, channel: string}|null}
+ */
+function behind({ version, pinned = null, tags = null }) {
+  if (!tags) return null;
+  const pick = pickChannel({ version, pinned, tags });
+  if (!pick.target || pick.target === version) return null;
+  const n = (v) => String(v).split('-')[0].split('.').map(Number);
+  const [a, b] = [n(pick.target), n(version)];
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] || 0) > (b[i] || 0)) return { target: pick.target, channel: pick.channel };
+    if ((a[i] || 0) < (b[i] || 0)) return null;
+  }
+  return null;
+}
+
+module.exports = { behind, pickChannel, fetchTags, isPrerelease, lineOf };
