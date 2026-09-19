@@ -2248,6 +2248,21 @@ async function cmdUpdate() {
   // shipper restarts, or its first pass refuses the old address forever.
   try { await adoptMovedHouse(resolveConfig()); } catch { /* doctor will say */ }
 
+  // Bring the house to the schema the NEW code expects, before any daemon restarts.
+  // A release that adds rooms (0.18.3's stat tables) used to land after the restart, so
+  // the freshly started shipper failed its first passes with "has no <member>_sessions…",
+  // `status` quoted that failure, and the dashboard served a page whose every request
+  // 500'd — all of it self-healing eventually, all of it alarming meanwhile. Two real
+  // members hit this within an hour of each other. The new binary owns the new schema, so
+  // it runs it here, in the one moment the daemons are already down.
+  {
+    const r = spawnSync(process.execPath, [path.join(REPO_ROOT, 'memhouse', 'shipper', 'ship.js'), '--ensure-schema'],
+      { env: childEnv(resolveConfig()), encoding: 'utf-8', stdio: 'pipe', timeout: 120000 });
+    const said = `${r.stdout || ''}${r.stderr || ''}`.trim().split('\n').filter((l) => l.includes('[memhouse]')).pop();
+    if (r.status === 0) console.log(ok(`house schema current${said ? ` — ${said.replace('[memhouse] ', '')}` : ''}`));
+    else console.log(warn(`could not bring the house to this version's schema — the daemons start anyway; run: memhouse doctor${said ? `\n  ${said}` : ''}`));
+  }
+
   // Refresh the Claude plugin wherever it is ALREADY installed, so `update` keeps the
   // skills in lockstep with the package instead of leaving a stale `/mem:*` behind. Only
   // dirs that already have it are touched — update never installs the plugin somewhere new.
@@ -4123,6 +4138,17 @@ async function cmdUninstall() {
           if (use.length) await ch(who, `INSERT INTO ${db}.${ev} (${use.join(', ')}) VALUES (${use.map((c) => want[c]).join(', ')})`, { database: '' });
           else console.log(warn(`  ${p.member}: events room has none of the expected columns — no event recorded`));
         } catch (e) { console.log(warn(`  ${p.member}: event not recorded — ${(e && e.message ? e.message : String(e)).split('\n')[0].slice(0, 120)}`)); }
+        // The rooms moved, but the house also needs what THIS version adds — the
+        // per-member stat tables the dashboard reads. `ensureSchema` makes them, and a
+        // plain `ship` never calls it, so leaving them to the member meant a dashboard
+        // that scanned millions of rows (or 500'd) until someone happened to run
+        // `ship --ensure-schema`. Create them here, as the admin, while we are already
+        // holding the member's rooms in mind.
+        try {
+          const st = convert.statTables(db, p.member);
+          for (const sql of st) await ch(who, sql, { database: '' });
+          if (st.length) console.log(ok(`  ${p.member}: dashboard tables created (${st.length})`));
+        } catch (e) { console.log(warn(`  ${p.member}: dashboard tables not created — their first ship will do it: ${(e && e.message ? e.message : String(e)).split('\n')[0].slice(0, 90)}`)); }
         converted++;
         console.log(ok(`${p.member}: rooms now ${db}.${p.member}_* — ${p.shares.length} share(s) carried${p.policies.length ? `, ${p.policies.length} row polic${p.policies.length === 1 ? 'y' : 'ies'}` : ''}`));
       }

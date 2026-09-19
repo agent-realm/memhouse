@@ -27,23 +27,54 @@ const config = {
   database: process.env.MEMHOUSE_DB || process.env.MEMHOUSE_USER, // house defaults to the user's own name
 };
 
+/**
+ * The house may have moved under this process: the operator converts a pre-one-layout
+ * house and the member's rooms go from `<name>.*` to `mem.<name>_*`, while this server
+ * still holds the database its env named at boot. The shipper and `update` learned to
+ * adopt that; the dashboard did not, so every endpoint answered 500 behind a page that
+ * simply looked blank. Checked once at startup, cheap, and never fatal.
+ *
+ * @returns {Promise<'current'|'moved'|'unknown'>}
+ */
+async function adoptMovedHouse() {
+  const me = config.username;
+  if (!me || config.database === 'mem') return 'current';
+  const probe = createClient({ ...clientOptions(), database: 'system' });
+  try {
+    const rs = await probe.query({
+      query: `SELECT database, name FROM system.tables WHERE (database = {old:String} AND name IN ('messages', {mine:String})) OR (database = 'mem' AND name = {mine:String})`,
+      query_params: { old: config.database, mine: `${me}_messages` },
+      format: 'JSONEachRow',
+    });
+    const rows = await rs.json();
+    const has = (d, n) => rows.some((r) => r.database === d && r.name === n);
+    if (has(config.database, `${me}_messages`) || has(config.database, 'messages')) return 'current';
+    if (!has('mem', `${me}_messages`)) return 'unknown';
+    console.log(`[memhouse] rooms moved: ${config.database}.messages is now mem.${me}_messages — reading house 'mem'`);
+    config.database = 'mem';
+    _client = null; // rebuilt with the new database on the next call
+    return 'moved';
+  } catch { return 'unknown'; }
+  finally { try { await probe.close(); } catch { /* nothing to close */ } }
+}
+
 let _client = null;
-function getClient() {
-  if (_client) return _client;
-  _client = createClient({
-    // See the note in shipper/ship.js: the driver's ERROR-level dump lands ahead of every
-    // message we print, so a handled refusal reads like a crash. MEMHOUSE_DEBUG=1 restores it.
+function clientOptions() {
+  return {
     log: { level: process.env.MEMHOUSE_DEBUG ? ClickHouseLogLevel.DEBUG : ClickHouseLogLevel.OFF },
     url: config.url,
     username: config.username,
     password: config.password,
     database: config.database,
     request_timeout: 60000,
-    clickhouse_settings: {
-      ...READ_SETTINGS,
-      output_format_json_quote_64bit_integers: 0,
-    },
-  });
+    clickhouse_settings: { ...READ_SETTINGS, output_format_json_quote_64bit_integers: 0 },
+  };
+}
+function getClient() {
+  if (_client) return _client;
+  // See the note in shipper/ship.js: the driver's ERROR-level dump lands ahead of every
+  // message we print, so a handled refusal reads like a crash. MEMHOUSE_DEBUG=1 restores it.
+  _client = createClient(clientOptions());
   return _client;
 }
 
@@ -1101,7 +1132,7 @@ async function schema() {
   };
 }
 
-module.exports = {
+module.exports = { adoptMovedHouse,
   getClient, config,
   getOverview, getDailyActivity, getDashboardStats,
   getChats, countChats, getChat,
