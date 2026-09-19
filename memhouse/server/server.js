@@ -435,6 +435,8 @@ app.get('*', (req, res) => {
 });
 
 if (require.main === module) {
+  // Before serving: has the house moved under us? (see queries.adoptMovedHouse)
+  qy.adoptMovedHouse().catch(() => {});
   app.listen(PORT, HOST, () => {
     console.log(`[memhouse] dashboard → http://localhost:${PORT} (house '${qy.config.database}' @ ${qy.config.url.replace(/\/\/.*@/, '//')})`
       + (HOST !== '127.0.0.1' ? ` [bound to ${HOST} — remotely reachable]` : ''));

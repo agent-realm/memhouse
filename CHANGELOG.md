@@ -6,6 +6,19 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **An upgrade no longer leaves a broken window.** `update` restarted the daemons before
+  bringing the house to the new schema, so a release that adds rooms (0.18.3's stat
+  tables) produced failed passes, a `status` quoting them, and a dashboard whose every
+  request 500'd behind a page that merely looked blank — until something happened to run
+  `ship --ensure-schema`. Two real members hit this within an hour. `update` now ensures
+  the schema in the one moment the daemons are already down, and says so.
+- **A converted house is complete when `convert` finishes.** It moved the rooms but left
+  the dashboard's per-member stat tables to `ensureSchema`, which a plain `ship` never
+  calls. `convert` creates them per member as the admin; the matrix asserts it.
+- **The dashboard adopts a moved house.** The shipper and `update` learned this in 0.18.4;
+  the server did not, so after a conversion it answered 500 from the database its env
+  named at boot. It now checks once at startup and switches to `mem`, saying which.
+
 - **A machine keeps its host identity across reinstalls.** The fingerprint was
   `randomBytes(16)` living only in `host.json`, so wiping `MEMHOUSE_HOME` — an
   `uninstall --full-removal`, a reset, a re-imaged laptop — brought the same physical

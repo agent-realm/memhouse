@@ -53,6 +53,12 @@ case "$out" in *"your rooms moved"*) ok "the shipper adopted the moved house on 
 grep -q "^MEMHOUSE_DB='mem'" "$H/env" && ok "  env rewritten to MEMHOUSE_DB=mem" || bad "  env not rewritten"
 case "$out" in *"shipped "*) ok "  and the pass shipped into mem" ;; *) bad "  pass did not ship" "$(printf '%s' "$out" | grep -E 'failed' | head -1)";; esac
 out=$(MEMHOUSE_HOME="$H" $NEW instance 2>&1); case "$out" in *"db mem"*"member cm_polat"*) ok "  instance: house mem, member cm_polat" ;; *) bad "  instance wrong" "$(printf '%s' "$out" | grep house)";; esac
+# ── the converted house is COMPLETE: the dashboard's tables exist, nobody had to run a command ──
+for t in session_stats session_model_stats session_tool_stats; do
+  [ "$(A "SELECT count() FROM system.tables WHERE database='mem' AND name='cm_polat_$t' FORMAT TSV" | tr -d '\n')" = 1 ] \
+    && ok "convert created cm_polat_$t" || bad "convert left cm_polat_$t to a command nobody runs"
+done
+
 # ── the guides ───────────────────────────────────────────────────────────────────────
 for m in cm_polat cm_mir; do
   g="$WORK/guides/MEMHOUSE-UPGRADE-$m.md"

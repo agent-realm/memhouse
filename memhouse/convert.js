@@ -57,4 +57,19 @@ function render(steps) {
   return steps.map((s) => `-- ${s.why}${s.optional ? ' (optional)' : ''}${s.when ? ` (only when ${s.when})` : ''}\n${s.sql};`).join('\n');
 }
 
-module.exports = { planMember, render, LEGACY, STAT_VIEWS, STAT_TABLES };
+/**
+ * The CREATE statements for a member's dashboard tables, in the one layout. `convert` runs
+ * these so a converted house is complete the moment it is converted — the alternative was
+ * a dashboard with nothing precomputed until someone ran `ship --ensure-schema` by hand.
+ * Same source of truth the shipper uses, so the two cannot drift.
+ */
+function statTables(db, member) {
+  const house = require('./house/house');
+  // statCreateStatements builds unqualified names (the member runs it inside their own
+  // house); convert runs as the admin with no default database, so qualify every name.
+  return house.statCreateStatements(house.roomNames(member))
+    .map((sql) => sql.replace(/\b(CREATE TABLE IF NOT EXISTS |FROM )(?!\()/g, (m0) => m0)
+      .replace(new RegExp(`\\b(${member}_(?:session_stats|session_model_stats|session_tool_stats|sessions|messages|tool_calls|meta|events))\\b`, 'g'), `${db}.$1`));
+}
+
+module.exports = { planMember, render, statTables, LEGACY, STAT_VIEWS, STAT_TABLES };
