@@ -4,7 +4,9 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.6 — 2026-09-19
+
+The upgrade path itself, and a machine that stays the same machine.
 
 - **An upgrade no longer leaves a broken window.** `update` restarted the daemons before
   bringing the house to the new schema, so a release that adds rooms (0.18.3's stat
