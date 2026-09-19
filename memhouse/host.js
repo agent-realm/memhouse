@@ -54,6 +54,59 @@ function read(home = homeDir()) {
 }
 
 /**
+ * A fingerprint of THIS MACHINE, not of this install.
+ *
+ * It used to be `randomBytes(16)`, which lives only in host.json — so wiping MEMHOUSE_HOME
+ * (`uninstall --full-removal`, a reset, a new laptop image) made the same physical machine
+ * come back as a stranger. One MacBook read as three writers in the fleet list, each
+ * holding a slice of the same machine's history.
+ *
+ * Now it is derived from a stable per-machine id — IOPlatformUUID on macOS,
+ * /etc/machine-id (or the D-Bus one) on Linux, MachineGuid on Windows — hashed with a
+ * fixed salt so the raw hardware id never leaves the machine and cannot be recovered from
+ * a row. Same machine, same fingerprint, reinstall after reinstall. Where no such id can
+ * be read, it falls back to random: an identity that is merely unstable is far better than
+ * one that collides, and the fallback is recorded so callers can say which happened.
+ *
+ * @returns {string} 32 hex characters
+ */
+function machineFingerprint(raw = stableMachineId()) {
+  const SALT = 'memhouse/host/v1'; // versioned: changing it re-identifies every machine
+  return raw
+    ? crypto.createHash('sha256').update(`${SALT}:${raw}`).digest('hex').slice(0, 32)
+    : crypto.randomBytes(16).toString('hex');
+}
+
+/** The OS's own machine id, or null when it cannot be read. Never stored, never shipped. */
+function stableMachineId() {
+  const run = (cmd, args) => {
+    try {
+      const r = require('child_process').execFileSync(cmd, args, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 });
+      return String(r || '').trim() || null;
+    } catch { return null; }
+  };
+  try {
+    if (process.platform === 'darwin') {
+      const out = run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice']);
+      const m = out && /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(out);
+      return m ? m[1] : null;
+    }
+    if (process.platform === 'linux') {
+      for (const f of ['/etc/machine-id', '/var/lib/dbus/machine-id']) {
+        try { const v = fs.readFileSync(f, 'utf-8').trim(); if (v) return v; } catch { /* next */ }
+      }
+      return null;
+    }
+    if (process.platform === 'win32') {
+      const out = run('reg', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid']);
+      const m = out && /MachineGuid\s+REG_SZ\s+(\S+)/.exec(out);
+      return m ? m[1] : null;
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+/**
  * The identity of this machine, creating it on first use.
  *
  * Every entry point calls this rather than only `install`, because a checkout can ship
@@ -69,7 +122,7 @@ function identity(home = homeDir()) {
   let rec = read(home);
   if (!rec) {
     rec = {
-      fingerprint: crypto.randomBytes(16).toString('hex'),
+      fingerprint: machineFingerprint(),
       hostname,
       platform: os.platform(),
       arch: os.arch(),
@@ -98,4 +151,4 @@ function identity(home = homeDir()) {
   };
 }
 
-module.exports = { identity, read, filePath, idFrom, FILE };
+module.exports = { identity, read, filePath, idFrom, machineFingerprint, stableMachineId, FILE };

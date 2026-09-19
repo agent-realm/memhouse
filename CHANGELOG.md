@@ -4,6 +4,18 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **A machine keeps its host identity across reinstalls.** The fingerprint was
+  `randomBytes(16)` living only in `host.json`, so wiping `MEMHOUSE_HOME` — an
+  `uninstall --full-removal`, a reset, a re-imaged laptop — brought the same physical
+  machine back as a stranger: one MacBook read as three writers in the fleet list, each
+  holding a slice of one machine's history, and none of them removable without deleting
+  rows. It is now derived from the machine's own id (IOPlatformUUID, `/etc/machine-id`,
+  MachineGuid) hashed with a fixed salt, so the raw id never leaves the machine and cannot
+  be recovered from a row; where none can be read it still falls back to random. An
+  existing `host.json` always wins, so no install in the field changes identity.
+
 ## 0.18.5 — 2026-09-18
 
 The first release on **one line**: published to `latest` and `team` alike. zeo was converted to the one layout the same evening with `memhouse convert` (six members, every row count identical before and after, shares carried).
