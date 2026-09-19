@@ -28,6 +28,7 @@ const {
   SCHEMA_VERSION, MIN_WRITER_SCHEMA, MIGRATIONS, META_TYPES, createStatement,
 } = require(path.join(REPO_ROOT, 'memhouse', 'house', 'house'));
 const envfile = require(path.join(REPO_ROOT, 'memhouse', 'envfile'));
+const chan = require(path.join(REPO_ROOT, 'memhouse', 'channel'));
 const { consumeSecretChunk } = require(path.join(REPO_ROOT, 'memhouse', 'secret-input'));
 const { capabilitiesFrom } = require(path.join(REPO_ROOT, 'memhouse', 'capabilities'));
 const { unknownFlags, allowedFlags, suggestFlag } = require(path.join(REPO_ROOT, 'memhouse', 'flags'));
@@ -1612,6 +1613,7 @@ async function cmdStatus() {
     daemons: { shipper: pidOf('shipper'), dashboard: pidOf('dashboard') },
     dashboard_url: pidOf('dashboard') ? `http://localhost:${runningPort(cfg)}` : null,
     shipper: shipperHealth(),
+      update: null, // filled below from the registry; null when current, offline, or a checkout build
     // Which machine this is, in the rooms' own terms. All of a member's machines write
     // into one set of rooms, so `WHERE host = ...` is how the pilot separates this laptop
     // from the other one — and they cannot type it if nothing ever prints it.
@@ -1628,6 +1630,10 @@ async function cmdStatus() {
     out.messages = Number(m[0]?.msgs || 0);
     out.freshest = m[0]?.freshest || null;
     out.fleet = await fleetState(cfg);
+    // Nobody runs `update --check`. A member sat four days behind a release that fixed the
+    // very thing they were about to hit, with nothing on any screen saying so.
+    try { out.update = chan.behind({ version: PKG.version, pinned: cfg.channel || null, tags: await chan.fetchTags() }); }
+    catch { /* offline: say nothing rather than guess */ }
   } catch (e) { out.connected = false; out.error = netReason(e); }
 
   if (JSON_OUT) { console.log(JSON.stringify(out, null, 2)); return out.connected ? 0 : 1; }
@@ -1673,6 +1679,7 @@ async function cmdStatus() {
       : fail ? warn(`shipper: running — ${out.shipper.via} — but ${fail}`)
       : ok(`shipper: running — ${out.shipper.via}`));
   }
+  if (out.update) console.log(warn(`update available: ${out.update.target} on '${out.update.channel}' — you have ${PKG.version} — run: memhouse update`));
   console.log(out.daemons.dashboard ? ok(`dashboard: running (pid ${out.daemons.dashboard})`) : warn('dashboard: not running'));
   if (out.daemons.dashboard) console.log(`  dashboard → http://localhost:${runningPort(cfg)}`);
   // Exit non-zero when the house is unreachable. `status` is what a health check, a
@@ -2022,6 +2029,12 @@ async function cmdDoctor() {
     const moved = await adoptMovedHouse(cfg, { fix: false });
     if (moved === 'moved') add(false, `rooms moved to mem.${physicalRoom('messages', cfg.user).replace(/_messages$/, '')}_* — this env still says MEMHOUSE_DB=${cfg.db}`, 'memhouse update   (rewrites the env and restarts the shipper)');
   } catch { /* connection problems are reported above */ }
+  {
+    // The same shape doctor gives everything else: what is wrong, and the command.
+    let up = null;
+    try { up = chan.behind({ version: PKG.version, pinned: cfg.channel || null, tags: await chan.fetchTags() }); } catch { /* offline */ }
+    if (up) add(false, `memhouse ${PKG.version} — ${up.target} is out on '${up.channel}'`, 'memhouse update');
+  }
   const sh = shipperHealth();
   const shFail = require(path.join(REPO_ROOT, 'memhouse', 'shipper', 'passlog')).describeFailure(sh.lastPass);
   add(sh.running && !shFail, `shipper${sh.via ? ` — ${sh.via}` : ''}${shFail ? ` — ${shFail}` : ''}`,
@@ -2162,7 +2175,6 @@ function installKind() {
 // Each of those has cost a real machine real sessions. This command owns all three.
 async function cmdUpdate() {
   const { kind, root } = installKind();
-  const chan = require(path.join(REPO_ROOT, 'memhouse', 'channel'));
   const cfg0 = resolveConfig();
   // --channel pins for this run AND every later one: the point of pinning is that the next
   // person to type `memhouse update` does not have to remember it.

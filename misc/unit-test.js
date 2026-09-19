@@ -1349,5 +1349,16 @@ test('fleet: a writer silent past the cutoff is retired, not a standing warning'
   assert.ok(fleet.filter((f) => f.verdict === 'legacy').every((f) => retired.includes(f)), 'a live pre-0.10 writer would still warn — these are simply not live');
 });
 
+test('channel.behind: only a strictly newer target on your own line counts', () => {
+  const { behind } = require('../memhouse/channel');
+  const tags = { latest: '0.18.6', team: '0.18.6' };
+  assert.deepStrictEqual(behind({ version: '0.18.5', tags }), { target: '0.18.6', channel: 'latest' });
+  assert.strictEqual(behind({ version: '0.18.6', tags }), null, 'current: silent');
+  assert.strictEqual(behind({ version: '0.19.0', tags }), null, 'ahead of the tag: silent, never "downgrade available"');
+  assert.strictEqual(behind({ version: '0.18.5', tags: null }), null, 'registry did not answer: silent, never a false alarm');
+  assert.strictEqual(behind({ version: '0.18.5-nightly.1', tags }), null, 'a build on no tag gets no automatic verdict');
+  assert.deepStrictEqual(behind({ version: '0.18.5', pinned: 'team', tags }), { target: '0.18.6', channel: 'team' }, 'a pin is followed');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

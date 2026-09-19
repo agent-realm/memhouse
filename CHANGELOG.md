@@ -4,6 +4,15 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **`status` and `doctor` say when an update is out.** `update --check` always existed and
+  nobody ran it: a member sat four days behind the release that fixed the very thing they
+  were about to hit, with nothing on any screen saying so. `status` now prints one line,
+  `doctor` a `✗` with the command. Silent when current, when the registry does not answer,
+  when this build is ahead of its tag, and for a checkout or tarball on no tag — "unknown"
+  must never read as "you are behind" on a screen someone gates on.
+
 ## 0.18.6 — 2026-09-19
 
 The upgrade path itself, and a machine that stays the same machine.
