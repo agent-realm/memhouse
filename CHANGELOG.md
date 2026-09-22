@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.8 — 2026-09-22
 
 - **A growing session re-ships only its tail.** The shipper re-sent the whole transcript on
   every pass, and ReplacingMergeTree kept every copy as a version — 1.79 copies of the
