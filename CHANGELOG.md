@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.9 — 2026-09-22
 
 - **The Sessions page rendered blank on a house with ~900+ sessions.** It asks for
   `/api/chats?limit=1000`; that returned HTTP 500 with `{"error":""}`, and nothing in the
