@@ -4,6 +4,23 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **The Sessions page rendered blank on a house with ~900+ sessions.** It asks for
+  `/api/chats?limit=1000`; that returned HTTP 500 with `{"error":""}`, and nothing in the
+  dashboard log. Cause: per-chat costs are scoped by passing every id on the page as
+  `{scopeIds:Array(String)}` query parameters, and the driver puts query parameters in the
+  request URI — about 60 bytes per id, twice. Well under ClickHouse's own
+  `http_max_uri_size`, but above what the Cloudflare tunnel in front of a public house
+  accepts: 900 sessions worked, 925 did not. The scope is chunked at 250 now, so the URI
+  stays small whatever the page size; costs are unchanged (byte-identical on a 50-row page),
+  and 1,506 sessions load in 0.56 s.
+- **An error with no message now says something.** The ClickHouse driver reports a
+  transport-level refusal as `new Error('')` — no message, no code, no own keys — which
+  `route()` passed straight through as `{"error":""}`. It now logs the method and path and
+  names the class of failure (a proxy refusing the request: URI too long, body too large,
+  timeout) instead of handing the reader an empty string.
+
 ## 0.18.8 — 2026-09-22
 
 - **A growing session re-ships only its tail.** The shipper re-sent the whole transcript on

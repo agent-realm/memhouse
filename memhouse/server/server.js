@@ -49,7 +49,15 @@ function parseDateOpts(query) {
 
 // Route helper: async handler with the uniform 500 shape.
 const route = (fn) => async (req, res) => {
-  try { await fn(req, res); } catch (err) { res.status(500).json({ error: err.message }); }
+  try { await fn(req, res); } catch (err) {
+    // `{"error":""}` and nothing in the log was the whole diagnosis for a 500 that made the
+    // Sessions page render blank: the ClickHouse driver reports a transport-level refusal as
+    // `new Error('')` — no message, no code, no own keys. An empty error is a dead end for
+    // whoever is looking, so say what we do know: the class of failure and the route.
+    const why = (err && err.message) || (err && err.code) || `${err && err.constructor ? err.constructor.name : 'Error'} with no message — often the server or a proxy in front of it refusing the request (URI too long, body too large, timeout)`;
+    console.error(`[memhouse] ${req.method} ${req.originalUrl} failed: ${why}`);
+    res.status(500).json({ error: String(why) });
+  }
 };
 
 app.get('/api/ping', (req, res) => res.json({ app: 'agentlytics', pid: process.pid }));
