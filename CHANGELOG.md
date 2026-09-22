@@ -4,6 +4,19 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **A growing session re-ships only its tail.** The shipper re-sent the whole transcript on
+  every pass, and ReplacingMergeTree kept every copy as a version — 1.79 copies of the
+  average row on a real house, seven of the worst, all paid for by every `FINAL` read. Rows
+  whose stored `line_hash` matches are now dropped from the send; only new turns travel.
+  Withheld (whole re-ship as before) when a timestamp was interpolated, the host changed,
+  or the folder moved — the three shipped columns the hash cannot see. `--full` is
+  untouched. Measured: an unchanged session writes 0 rows; a session grown by two turns
+  writes 2, where it wrote its entire 24 before. Known limit: a session with folded
+  subagents still forks on growth, because appending a parent turn shifts every subagent
+  row's `seq` — that is the fold order, not this change, and it forked the same way before.
+
 ## 0.18.7 — 2026-09-19
 
 - **`status` and `doctor` say when an update is out.** `update --check` always existed and
