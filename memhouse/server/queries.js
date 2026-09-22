@@ -471,10 +471,24 @@ async function getChats(opts = {}) {
   // Price the fifty rows on the page, not the twelve hundred in the house. This query
   // set was the most expensive thing the dashboard ran — 1,413,624 rows read and 272 MiB
   // per call, three endpoints calling it — and getChats used ~4% of what it asked for.
-  const perChat = await computePerChatCosts(f, {
-    ids: rows.map((r) => String(r.id)),
-    users: rows.map((r) => String(r.user_id)),
-  });
+    // In CHUNKS. The scope travels as `{scopeIds:Array(String)}` query parameters, and the
+    // driver puts query parameters in the REQUEST URI — so a page of N sessions builds a URI
+    // of roughly 60 bytes per id, twice (ids and users). Zeo is reached through a Cloudflare
+    // tunnel, which rejects a URI far below ClickHouse's own 1 MiB `http_max_uri_size`: at
+    // 925 sessions the request came back 500 with an EMPTY message (the driver reports a
+    // transport-level refusal as `new Error('')`), so `/api/chats?limit=1000` — exactly what
+    // the Sessions page asks for — returned 500 and the page rendered blank. 900 worked,
+    // 925 did not. Chunked, the URI stays small whatever the page size, and the per-chunk
+    // results merge because each chunk is disjoint by construction.
+    const COST_SCOPE_CHUNK = 250;
+    const perChat = [];
+    for (let i = 0; i < rows.length; i += COST_SCOPE_CHUNK) {
+      const slice = rows.slice(i, i + COST_SCOPE_CHUNK);
+      perChat.push(...await computePerChatCosts(f, {
+        ids: slice.map((r) => String(r.id)),
+        users: slice.map((r) => String(r.user_id)),
+      }));
+    }
   const costBySession = {};
   const topModelBySession = {};
   for (const r of perChat) {

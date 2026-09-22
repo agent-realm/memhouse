@@ -1428,5 +1428,18 @@ test('channel.behind: only a strictly newer target on your own line counts', () 
   assert.deepStrictEqual(behind({ version: '0.18.5', pinned: 'team', tags }), { target: '0.18.6', channel: 'team' }, 'a pin is followed');
 });
 
+// ── a page of sessions must not build a URI the transport refuses ────────────────────────
+test('getChats chunks the cost scope so the request URI stays small', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'memhouse', 'server', 'queries.js'), 'utf-8');
+  const i = src.indexOf('async function getChats');
+  const body = src.slice(i, src.indexOf('\nasync function', i + 10));
+  assert.match(body, /COST_SCOPE_CHUNK/, 'the scope is chunked');
+  const chunk = Number(/COST_SCOPE_CHUNK = (\d+)/.exec(body)[1]);
+  assert.ok(chunk > 0 && chunk <= 500, `chunk ${chunk} must stay well under the ~900 ids that a tunnel refuses`);
+  // ~60 bytes per id, sent twice (ids + users), plus the query itself.
+  assert.ok(chunk * 60 * 2 < 40000, 'a chunk must fit a conservative proxy URI limit');
+  assert.ok(!/computePerChatCosts\(f, \{\s*ids: rows\.map/.test(body), 'no unchunked call passing every row');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
