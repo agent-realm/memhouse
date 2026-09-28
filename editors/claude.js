@@ -74,13 +74,18 @@ function getChats() {
     } catch { /* no index */ }
 
     // Scan all .jsonl files on disk (some may not be in the index)
-    let files;
-    try { files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')); } catch { continue; }
+    let names;
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    const files = names.filter(f => f.endsWith('.jsonl'));
+    // A session with subagents also has a directory named for it; one without has none, so
+    // this listing is how the mtime check below stays free for the sessions it cannot help.
+    const sessionDirs = new Set(names.filter(f => !f.endsWith('.jsonl')));
 
     for (const file of files) {
       const sessionId = file.replace('.jsonl', '');
       const fullPath = path.join(dir, file);
       const entry = indexed.get(sessionId);
+      const subTouched = sessionDirs.has(sessionId) ? newestSubagentMtime(path.join(dir, sessionId, 'subagents')) : 0;
 
       if (entry) {
         // Use index metadata
@@ -89,7 +94,7 @@ function getChats() {
           composerId: sessionId,
           name: cleanPrompt(entry.firstPrompt),
           createdAt: entry.created ? new Date(entry.created).getTime() : null,
-          lastUpdatedAt: entry.modified ? new Date(entry.modified).getTime() : null,
+          lastUpdatedAt: latest(entry.modified ? new Date(entry.modified).getTime() : null, subTouched),
           mode: 'claude',
           folder: entry.projectPath || decodedFolder,
           encrypted: false,
@@ -107,7 +112,7 @@ function getChats() {
             composerId: sessionId,
             name: meta.firstPrompt ? cleanPrompt(meta.firstPrompt) : null,
             createdAt: meta.timestamp || stat.birthtime.getTime(),
-            lastUpdatedAt: stat.mtime.getTime(),
+            lastUpdatedAt: latest(stat.mtime.getTime(), subTouched),
             mode: 'claude',
             folder: meta.cwd || decodedFolder,
             encrypted: false,
@@ -294,6 +299,22 @@ function getMessages(chat) {
 
   return messages;
 }
+
+/**
+ * When a session was last written, counting its subagents. The shipper's incremental skip
+ * compares `lastUpdatedAt` with what the house recorded, and a subagent writes only its own
+ * file: a background agent that runs on after its parent goes quiet left the parent's mtime
+ * (and the index's `modified`) where they were, so its turns shipped at the parent's next
+ * write, or never. Stat calls only, and only for a session that has a directory.
+ */
+function newestSubagentMtime(subagentsDir) {
+  let newest = 0;
+  for (const { file } of subagentFiles(subagentsDir)) {
+    try { newest = Math.max(newest, fs.statSync(file).mtimeMs); } catch { /* vanished mid-pass */ }
+  }
+  return Math.floor(newest);
+}
+function latest(a, b) { return b && (!a || b > a) ? b : a; }
 
 /**
  * Every subagent transcript under a session, wherever Claude Code put it:

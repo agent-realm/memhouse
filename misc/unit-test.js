@@ -1410,6 +1410,39 @@ test('a session with subagents keeps its epoch and ships only new rows as it gro
   fs.rmSync(root, { recursive: true });
 });
 
+test('a subagent that grows while its parent is quiet moves the session\'s lastUpdatedAt', () => {
+  // The incremental skip compares lastUpdatedAt with the house. It used to be the parent
+  // file's mtime alone, so a background agent writing after its parent went idle was
+  // shipped at the parent's next write, or never.
+  const os = require('os');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mh-mtime-')); const proj = path.join(root, 'projects', '-x'); fs.mkdirSync(proj, { recursive: true });
+  const line = JSON.stringify({ type: 'user', timestamp: '2026-09-29T10:00:00Z', cwd: '/x', message: { role: 'user', content: 'hi' } }) + '\n';
+  const withSubs = '33333333-3333-3333-3333-333333333333'; const plain = '44444444-4444-4444-4444-444444444444';
+  for (const id of [withSubs, plain]) fs.writeFileSync(path.join(proj, `${id}.jsonl`), line);
+  const sub = path.join(proj, withSubs, 'subagents'); const wf = path.join(sub, 'workflows', 'wf_1');
+  fs.mkdirSync(wf, { recursive: true });
+  fs.writeFileSync(path.join(sub, 'agent-aa.jsonl'), line); fs.writeFileSync(path.join(wf, 'agent-bb.jsonl'), line);
+  fs.writeFileSync(path.join(sub, 'journal.jsonl'), line); // bookkeeping, not a transcript
+  const at = (f, sec) => fs.utimesSync(f, sec, sec);
+  const T = 1_790_000_000;
+  at(path.join(proj, `${withSubs}.jsonl`), T); at(path.join(proj, `${plain}.jsonl`), T);
+  at(path.join(sub, 'agent-aa.jsonl'), T - 50); at(path.join(wf, 'agent-bb.jsonl'), T - 40); at(path.join(sub, 'journal.jsonl'), T + 900);
+  const saved = process.env.MEMHOUSE_CLAUDE_ROOTS; process.env.MEMHOUSE_CLAUDE_ROOTS = root;
+  const claude = require('../editors/claude');
+  const last = () => Object.fromEntries(claude.getChats().map((c) => [c.composerId, c.lastUpdatedAt]));
+  try {
+    assert.deepStrictEqual(last(), { [withSubs]: T * 1000, [plain]: T * 1000 }, 'older subagents and bookkeeping files do not move it');
+    at(path.join(sub, 'agent-aa.jsonl'), T + 60);
+    assert.strictEqual(last()[withSubs], (T + 60) * 1000, 'a subagent written after the parent');
+    at(path.join(wf, 'agent-bb.jsonl'), T + 120);
+    assert.strictEqual(last()[withSubs], (T + 120) * 1000, 'a Workflow-run agent counts too');
+    assert.strictEqual(last()[plain], T * 1000, 'a session with no directory is the parent mtime, as before');
+  } finally {
+    if (saved === undefined) delete process.env.MEMHOUSE_CLAUDE_ROOTS; else process.env.MEMHOUSE_CLAUDE_ROOTS = saved;
+    fs.rmSync(root, { recursive: true });
+  }
+});
+
 test('a parse that does not fit the subagent blocks falls back to positional numbering', () => {
   const { buildRows, SUBAGENT_SEQ_BASE, SUBAGENT_SEQ_STRIDE } = require('../memhouse/shipper/ship');
   assert.ok(SUBAGENT_SEQ_BASE + 32949 * SUBAGENT_SEQ_STRIDE - 1 <= 2 ** 32 - 1, 'the last block fits UInt32 (seq is UInt32)');

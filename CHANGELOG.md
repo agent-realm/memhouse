@@ -25,6 +25,14 @@ migration path is planned work, not a promise the old versions can cash.
   subagents are not affected. A parse that does not fit the blocks (a parent past 1e9
   turns, a subagent past 100,000, more than 32,949 subagents) falls back to positional
   numbering, which is correct and merely re-ships whole.
+- **A subagent that runs on after its parent goes quiet is shipped on the next pass.** The
+  incremental skip compared only the parent file's mtime (or the index's `modified`), and a
+  subagent writes only its own file, so a background agent's turns waited for the parent's
+  next write, or were never shipped. A session's `lastUpdatedAt` is now the newest mtime of
+  the parent and every subagent transcript, Workflow-run agents included — stat calls only,
+  and only for sessions that have a subagent directory. After upgrading, a session whose
+  subagents are newer than its parent is re-read once on the first pass, and ships the turns
+  it was missing.
 
 ## 0.18.10 — 2026-10-08
 
