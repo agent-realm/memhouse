@@ -134,8 +134,15 @@ Config file: `~/.memhouse/config.json` (`hiddenProjects`, future prefs).
 - Per-message `ts`: interpolated across the session's `[createdAt, lastUpdatedAt]`
   (adapters don't expose per-message timestamps; monotonic by `seq`; documented
   approximation, refine per-adapter later).
-- `seq` is the message index within the session (0-based). `tool_calls.idx` is the
-  call index within the session. `is_subagent` = message content begins with
+- `seq` is the message's place in the session. The session's own turns are dense from 0;
+  a folded subagent's turns are numbered from their own block,
+  `1,000,000,000 + slot × 100,000 + turn`, where `slot` is the subagent's rank by start
+  time. `tool_calls.idx` is laid out the same way (the session's own calls dense from 0,
+  a subagent's counted within its block). A row's key therefore never depends on how long
+  the parent or any other subagent is, which is what lets a session with subagents ship
+  tail-only; positional numbering moved every subagent row whenever the parent grew. A
+  parse that does not fit the blocks falls back to positional numbering. Readers order by
+  `seq` and count with `count()`; nothing may treat `seq` as dense. `is_subagent` = message content begins with
   `[subagent]` (the fold marker from the Claude adapter).
 - Incremental shipping: read existing `(session_id, last_updated_at, message_count)`
   (FINAL) and skip chats that haven't grown/changed; a full re-ship must remain

@@ -4,6 +4,28 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **A session with subagents ships only its new rows, like any other.** 0.18.8's tail-only
+  shipping did not reach the sessions that grow the most: folded subagent rows were numbered
+  by position after the parent's turns, so one new parent turn moved every one of them, the
+  session forked to a new epoch and re-sent itself whole on every pass. Measured on a real
+  house: 1.07 M message rows written in 24 h against 10.2 M in total, most of them full
+  copies of five sessions, one 6,120-line session stored 60 times in a day. A subagent's
+  rows now sit in a block of their own — `seq = 1,000,000,000 + slot × 100,000 + turn`,
+  `tool_calls.idx` the same — where `slot` is the subagent's rank by start time, so neither
+  the parent growing, a running subagent growing, nor a new subagent appearing moves an
+  existing row. The session's own turns keep `0, 1, 2, …`, so a session without subagents
+  is numbered exactly as before. Readers that `ORDER BY seq` see the parent first, then each
+  subagent contiguous, in the order they started (they were in agent-id order, which is
+  random). `seq` is sparse now: count with `count()`, never `max(seq) + 1`.
+  **Upgrade cost, once:** every stored session with subagents forks exactly one time, the
+  first time it is re-shipped after the upgrade (it grows, or `ship --full`), and is
+  tail-only from then on. The superseded epoch is kept, as every epoch is. Sessions without
+  subagents are not affected. A parse that does not fit the blocks (a parent past 1e9
+  turns, a subagent past 100,000, more than 32,949 subagents) falls back to positional
+  numbering, which is correct and merely re-ships whole.
+
 ## 0.18.10 — 2026-10-08
 
 Release notes: [`docs/releases/v0.18.10.md`](docs/releases/v0.18.10.md), covering what

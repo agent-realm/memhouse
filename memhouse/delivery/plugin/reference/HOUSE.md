@@ -112,12 +112,12 @@ WHERE session_id = '<sid>' AND extra.agent.id = '<agent>' ORDER BY seq
 | column | meaning |
 |---|---|
 | `session_id` | `<source>:<adapter-local id>`, e.g. `claude-code:6b1f…` |
-| `seq` | position in the session, from 0 |
+| `seq` | order within the session. The session's own turns are `0, 1, 2, …`; a subagent's turns sit in their own block, `1,000,000,000 + slot × 100,000 + turn` (slot = the subagent's rank by start time), so `seq` is **sparse** — count rows with `count()`, never `max(seq) + 1` |
 | `source` | editor: `claude-code`, `codex`, `cursor`, … |
 | `host` | the machine, `<hostname>-<8 hex>` — random per install, not derived |
 | `ts` | when the turn happened (`DateTime64(3,'UTC')`) |
 | `role` | `user`, `assistant`, `system` |
-| `is_subagent` | 1 for a turn that a Claude Code **subagent** (a fork) produced; folded into the parent session after the parent's own turns. Subagents are never separate sessions. |
+| `is_subagent` | 1 for a turn that a Claude Code **subagent** (a fork) produced; folded into the parent session after the parent's own turns, each subagent's turns contiguous and the subagents in the order they started. Subagents are never separate sessions. |
 | `extra` | JSON. For a subagent turn: `extra.agent.id`, `extra.agent.description` (what the parent asked it to do, else the fork's own first prompt), `extra.agent.type` (`general-purpose`, `workflow-subagent`, …), `extra.agent.turn` (position within that subagent), and `extra.agent.workflow` (`wf_…`) when a Workflow run spawned it. Empty `{}` otherwise, and on rows shipped before 0.18.3. |
 | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | usage; **empty for several adapters** — see below |
 | `text` | the turn, **truncated at 50,000 chars** |

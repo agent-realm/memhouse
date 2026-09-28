@@ -195,7 +195,7 @@ function cleanPrompt(prompt) {
 // Parse one Claude session .jsonl into the adapter's message shape. When
 // `isSubagent` is set, each message is tagged `[subagent]` so folded subagent turns
 // are clearly attributed in the transcript.
-function parseSessionFile(filePath, isSubagent, agent = null) {
+function parseSessionFile(filePath, isSubagent, agent = null, info = null) {
   const messages = [];
   let lines;
   try { lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean); } catch { return messages; }
@@ -228,6 +228,7 @@ function parseSessionFile(filePath, isSubagent, agent = null) {
     // time simply omit it.
     const _ts = obj.timestamp ? Date.parse(obj.timestamp) : undefined;
     const at = Number.isFinite(_ts) ? _ts : undefined;
+    if (info && info.firstTs === undefined && at !== undefined) info.firstTs = at;
 
     if (obj.type === 'user' && obj.message) {
       const content = extractContent(obj.message.content);
@@ -262,20 +263,34 @@ function getMessages(chat) {
   const subagentsDir = path.join(filePath.replace(/\.jsonl$/, ''), 'subagents');
   const subFiles = subagentFiles(subagentsDir);
   const named = subFiles.length ? subagentNames(filePath) : new Map();
+  const folded = [];
   for (const { file, workflow } of subFiles) {
     const id = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
     const meta = named.get(id) || {};
     const agent = { id, description: meta.description || '', type: meta.type || (workflow ? 'workflow-subagent' : ''), file: path.basename(file) };
     if (workflow) agent.workflow = workflow;
-    const turns = parseSessionFile(file, true, agent);
+    const info = {};
+    const turns = parseSessionFile(file, true, agent, info);
     // A fork the parent never named (a Workflow-run agent, or a parent from before the
     // ids were reported) is described by its own first prompt — what it was told to do.
     if (!agent.description) {
       const first = turns.find((m) => m.role === 'user');
       if (first) { const d = String(first.content).replace(/^\[subagent\] /, '').replace(/\s+/g, ' ').trim().slice(0, 160); for (const m of turns) m._agent.description = d; }
     }
-    messages.push(...turns);
+    folded.push({ key: path.relative(subagentsDir, file), firstTs: info.firstTs, turns });
   }
+  // Each subagent gets a SLOT, and the shipper numbers its rows from that slot rather than
+  // from where they happen to land in this array (see subagentSeq in ship.js). The slot is
+  // the subagent's rank by when it started — the timestamp on its transcript's first line —
+  // because that is the one order a new subagent cannot disturb: it started after every
+  // subagent already on disk, so it ranks last. The file-name order this used to fold in
+  // does not have that property: agent ids are random, so a new fork sorted into the middle
+  // and pushed every later subagent's rows down, and a session with subagents re-shipped
+  // whole on every pass (one 6,120-line session was stored 60 times in a day). A file with
+  // no timestamp yet ranks after every one that has one; the path breaks ties.
+  folded.sort((a, b) => (a.firstTs === undefined) - (b.firstTs === undefined)
+    || (a.firstTs || 0) - (b.firstTs || 0) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  folded.forEach(({ turns }, slot) => { for (const m of turns) m._agent.slot = slot; messages.push(...turns); });
 
   return messages;
 }
@@ -284,8 +299,9 @@ function getMessages(chat) {
  * Every subagent transcript under a session, wherever Claude Code put it:
  *   <session>/subagents/agent-<id>.jsonl                       — Agent tool forks
  *   <session>/subagents/workflows/wf_<id>/agent-<id>.jsonl     — Workflow-run agents
- * journal.jsonl and *.meta.json are bookkeeping, not transcripts. Sorted for a stable
- * fold order. On real data the workflow layer held 100 of 165 forks and shipped none.
+ * journal.jsonl and *.meta.json are bookkeeping, not transcripts. Sorted so the listing is
+ * deterministic; the fold ORDER is set by start time in getMessages, not by this.
+ * On real data the workflow layer held 100 of 165 forks and shipped none.
  */
 function subagentFiles(subagentsDir) {
   const out = [];

@@ -1347,6 +1347,86 @@ test('claude adapter: folded subagent turns carry the agent id, description, typ
   fs.rmSync(root, { recursive: true });
 });
 
+// ── a session with subagents grows tail-only, like any other ─────────────────────────────
+// The defect: subagent rows were numbered by their position after the parent's turns, so
+// one new parent turn moved every one of them, decideEpoch forked the session, and it
+// re-shipped whole on every pass. Each growth case below must keep the epoch and send
+// exactly the new rows — including a new subagent whose FILE NAME sorts before the others.
+test('a session with subagents keeps its epoch and ships only new rows as it grows', () => {
+  const os = require('os');
+  const { rowsForChat, decideEpoch, tailRows, SUBAGENT_SEQ_BASE, SUBAGENT_SEQ_STRIDE } = require('../memhouse/shipper/ship');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mh-seq-')); const proj = path.join(root, 'projects', '-x'); fs.mkdirSync(proj, { recursive: true });
+  const sid = '22222222-2222-2222-2222-222222222222'; const file = path.join(proj, `${sid}.jsonl`);
+  const sub = path.join(proj, sid, 'subagents'); fs.mkdirSync(sub, { recursive: true });
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  const tick = () => new Date(clock += 1000).toISOString();
+  const user = (text) => JSON.stringify({ type: 'user', sessionId: sid, timestamp: tick(), cwd: '/x', message: { role: 'user', content: text } }) + '\n';
+  const asst = (text, tool) => JSON.stringify({ type: 'assistant', sessionId: sid, timestamp: tick(), cwd: '/x', message: { role: 'assistant', model: 'm', content: [ { type: 'text', text }, ...(tool ? [ { type: 'tool_use', id: `toolu_${clock}`, name: tool, input: { n: clock } } ] : []) ], usage: { input_tokens: 1, output_tokens: 1 } } }) + '\n';
+  const append = (f, ...lines) => fs.appendFileSync(f, lines.join(''));
+  const agentFile = (id) => path.join(sub, `agent-${id}.jsonl`);
+  append(file, user('p0'), asst('p1', 'Read'));
+  append(agentFile('m1'), user('m1 task'), asst('m1 reply', 'Grep'));
+  append(file, user('p2'));
+  append(agentFile('z9'), user('z9 task'), asst('z9 reply', 'Bash'));
+  const chat = { source: 'claude-code', composerId: sid, _fullPath: file, folder: '/x', createdAt: clock, lastUpdatedAt: clock };
+  // The house after a pass: exactly what the previous parse wrote, keyed as the room is.
+  const house = { epoch: 0, maxSeq: -1, maxIdx: -1, hashes: new Map(), tools: new Map() };
+  const store = (sent) => {
+    for (const r of sent.msgRows) { house.hashes.set(r.seq, String(r.line_hash)); house.maxSeq = Math.max(house.maxSeq, r.seq); }
+    for (const r of sent.toolRows) { house.tools.set(r.idx, { tool_name: r.tool_name, args: r.args }); house.maxIdx = Math.max(house.maxIdx, r.idx); }
+  };
+  const first = rowsForChat(chat, 'h');
+  // Parent first and dense; each subagent a contiguous block, in the order it started.
+  assert.deepStrictEqual(first.msgRows.map((r) => r.seq), [0, 1, 2, SUBAGENT_SEQ_BASE, SUBAGENT_SEQ_BASE + 1,
+    SUBAGENT_SEQ_BASE + SUBAGENT_SEQ_STRIDE, SUBAGENT_SEQ_BASE + SUBAGENT_SEQ_STRIDE + 1]);
+  assert.deepStrictEqual(first.toolRows.map((r) => r.idx), [0, SUBAGENT_SEQ_BASE, SUBAGENT_SEQ_BASE + SUBAGENT_SEQ_STRIDE]);
+  store(first);
+  const pass = (label, grow, expectText, expectTools) => {
+    grow();
+    const rows = rowsForChat(chat, 'h');
+    const d = decideEpoch(house, rows);
+    assert.deepStrictEqual(d, { epoch: 0, reason: null }, `${label}: the session forked — ${d.reason}`);
+    const sent = tailRows(house, rows);
+    assert.deepStrictEqual(sent.msgRows.map((r) => r.text.split('\n')[0]), expectText, `${label}: sent more (or less) than the new rows`);
+    assert.deepStrictEqual(sent.toolRows.map((r) => r.tool_name), expectTools, `${label}: tool calls`);
+    store(sent);
+    // What the reader sees, ORDER BY seq: parent turns first, each subagent contiguous.
+    return rows.msgRows.slice().sort((a, b) => a.seq - b.seq).map((r) => r.text.split('\n')[0].replace(/^\[subagent\] /, ''));
+  };
+  pass('the parent gains a turn', () => append(file, asst('p3', 'Edit')), ['p3'], ['Edit']);
+  pass('a running subagent gains a turn', () => append(agentFile('m1'), asst('m1 more', 'Read')), ['[subagent] m1 more'], ['Read']);
+  // Named 'a0…', so it sorts FIRST by file name — the case that used to shift everything.
+  const order = pass('a new subagent appears whose file sorts first', () => append(agentFile('a0'), user('a0 task'), asst('a0 reply', 'Write')),
+    ['[subagent] a0 task', '[subagent] a0 reply'], ['Write']);
+  assert.deepStrictEqual(order, ['p0', 'p1', 'p2', 'p3', 'm1 task', 'm1 reply', 'm1 more', 'z9 task', 'z9 reply', 'a0 task', 'a0 reply']);
+  pass('and the parent grows again', () => append(file, user('p4')), ['p4'], []);
+  // A stale layout (0.18.9 numbered subagents by position) forks exactly once: the stored
+  // subagent rows sit at seqs the new parse does not produce.
+  const old = { epoch: 4, maxSeq: 6, maxIdx: 2, hashes: new Map([[0, 'x'], [5, 'y'], [6, 'z']]), tools: new Map() };
+  assert.match(decideEpoch(old, first).reason, /not in the new parse/);
+  // A subagent that vanishes from disk leaves stored rows nothing overwrites: fork, never overwrite.
+  fs.rmSync(agentFile('z9'));
+  assert.match(decideEpoch(house, rowsForChat(chat, 'h')).reason, /2 of them not in the new parse/);
+  fs.rmSync(root, { recursive: true });
+});
+
+test('a parse that does not fit the subagent blocks falls back to positional numbering', () => {
+  const { buildRows, SUBAGENT_SEQ_BASE, SUBAGENT_SEQ_STRIDE } = require('../memhouse/shipper/ship');
+  assert.ok(SUBAGENT_SEQ_BASE + 32949 * SUBAGENT_SEQ_STRIDE - 1 <= 2 ** 32 - 1, 'the last block fits UInt32 (seq is UInt32)');
+  const who = { id: 'claude-code:fit', source: 'claude-code', host: 'h', folder: '', project: '' };
+  const sa = (slot, turn) => ({ role: 'user', content: '[subagent] s', _ts: 2, _agent: { id: 'a', slot, turn } });
+  const msgs = [{ role: 'user', content: 'p', _ts: 1 }, sa(0, 0)];
+  assert.deepStrictEqual(buildRows({}, msgs, who, true).msgRows.map((r) => r.seq), [0, SUBAGENT_SEQ_BASE]);
+  // A turn past the stride, or a slot past the last block, cannot be placed: null, and
+  // rowsForChat then numbers the whole parse by position — correct, merely not tail-only.
+  assert.strictEqual(buildRows({}, [msgs[0], sa(0, SUBAGENT_SEQ_STRIDE)], who, true), null);
+  assert.strictEqual(buildRows({}, [msgs[0], sa(32949, 0)], who, true), null);
+  assert.deepStrictEqual(buildRows({}, [msgs[0], sa(32949, 0)], who, false).msgRows.map((r) => r.seq), [0, 1]);
+  // An adapter that folds nothing is numbered exactly as it always was.
+  const plain = [{ role: 'user', content: 'a', _ts: 1 }, { role: 'assistant', content: 'b', _ts: 2, _toolCalls: [{ name: 'X', args: {} }] }];
+  assert.deepStrictEqual(buildRows({}, plain, who, true), buildRows({}, plain, who, false));
+});
+
 // ── update never crosses release lines on its own ────────────────────────────────────────
 test('pickChannel: an unpinned release stays on its line when its tag has moved on', () => {
   const { pickChannel } = require('../memhouse/channel');

@@ -132,7 +132,7 @@ function hasOwnTs(msg) {
 // documented in DESIGN.md). Real timestamps are NOT necessarily monotonic by seq — a
 // folded subagent transcript is appended after its parent's turns but ran during them.
 // Nothing depends on that: ordering is by `seq`, and started/ended are min/max.
-function messageTs(chat, seq, total, msg) {
+function messageTs(chat, pos, total, msg) {
   const at = Number(msg && msg._ts);
   // Seconds or milliseconds, depending on the format: goose stores seconds, Claude Code
   // and opencode milliseconds. Real epoch-ms is > 1e12 and real epoch-seconds ~1.7e9, so
@@ -141,7 +141,9 @@ function messageTs(chat, seq, total, msg) {
   const start = chat.createdAt || chat.lastUpdatedAt || Date.now();
   const end = chat.lastUpdatedAt || chat.createdAt || start;
   if (total <= 1) return chTs(start);
-  return chTs(start + Math.round((end - start) * (seq / (total - 1))));
+  // `pos` is the message's position in the parse, NOT its seq: a folded subagent's seq
+  // is sparse (see subagentSeq) and would put its interpolated time far past the session.
+  return chTs(start + Math.round((end - start) * (pos / (total - 1))));
 }
 
 /**
@@ -875,6 +877,42 @@ async function loadExisting(client, rooms) {
 // m._toolCalls: matches '[tool-call: Name(' and '[tool-call: Name]' forms.
 const TOOL_CALL_RE = /\[tool-call: ([^(\]]+)/g;
 
+// Where a folded subagent's rows are numbered. A session's own turns keep the dense
+// 0, 1, 2, … they always had; subagent number `slot` (see getMessages in
+// editors/claude.js) owns the block
+//
+//   seq = SUBAGENT_SEQ_BASE + slot * SUBAGENT_SEQ_STRIDE + turn
+//
+// and its tool calls the same block of `idx`, counted within that subagent. So a row's
+// seq depends only on the subagent it belongs to and its position inside it — never on
+// how long the parent is, how long any other subagent is, or how many there are.
+//
+// It used to be the row's position in the whole parse, with subagents folded in after the
+// parent. One new parent turn then moved every subagent row down by one; decideEpoch saw
+// stored rows whose line_hash (which covers seq) no longer matched, forked the session to
+// a new epoch, and re-sent it whole — on every pass, for every session that had ever
+// spawned a subagent. Measured on a real house: 1.07 M message rows in 24 h against 10.2 M
+// in total, most of them full copies of five sessions, one stored 60 times in a day.
+//
+// Decimal so a seq reads at a glance (1,003,000,042 = subagent 3, turn 42), and sized for
+// UInt32: 1e9 parent turns, 32,949 subagents of 100,000 turns each (the largest sessions
+// today hold ~33 k parent lines and 35 subagents). A parse that does not fit falls back to
+// positional numbering, which is correct and merely re-ships whole, as before.
+const SUBAGENT_SEQ_BASE = 1000000000;
+const SUBAGENT_SEQ_STRIDE = 100000;
+const SUBAGENT_SLOTS = Math.floor((2 ** 32 - SUBAGENT_SEQ_BASE) / SUBAGENT_SEQ_STRIDE);
+
+// The block a folded subagent turn belongs to, or null for the session's own turns and for
+// adapters that fold nothing.
+function subagentSlot(m) {
+  const a = m && m._agent;
+  return a && Number.isInteger(a.slot) && Number.isInteger(a.turn) ? a.slot : null;
+}
+function subagentSeq(slot, n) {
+  if (slot < 0 || slot >= SUBAGENT_SLOTS || n < 0 || n >= SUBAGENT_SEQ_STRIDE) return null;
+  return SUBAGENT_SEQ_BASE + slot * SUBAGENT_SEQ_STRIDE + n;
+}
+
 // Build the typed rows for one chat. Returns null when the chat is unreadable
 // (adapter threw — e.g. a partially-written or locked session file): the caller
 // must write NOTHING for it, so the next incremental pass retries. A chat that
@@ -918,19 +956,47 @@ function rowsForChat(chat, host) {
     extra: { bubbleCount: chat.bubbleCount || 0 },
   };
 
+  // Stable numbering first; positional if the parse does not fit it (see subagentSeq).
+  const built = buildRows(chat, messages, { id, source, host, folder, project }, true)
+    || buildRows(chat, messages, { id, source, host, folder, project }, false);
+  // What a complete ship of this session looks like, recorded ON the session row so the
+  // next pass can tell "finished" from "got part way". message_count already carries the
+  // message half; without the tool half a pass that dies between the messages insert and
+  // the tool_calls insert leaves a session that looks finished forever. See loadExisting.
+  session.extra.toolCallCount = built.toolRows.length;
+  return { session, ...built };
+}
+
+// The message and tool_call rows for one parse. `stable` numbers folded subagent rows by
+// their slot (subagentSeq) and returns null if any of them does not fit; otherwise every
+// row is numbered by its position, the pre-0.18.10 scheme. For a session with no subagents
+// the two are identical.
+function buildRows(chat, messages, { id, source, host, folder, project }, stable) {
+  const total = messages.length;
   const msgRows = [];
   const toolRows = [];
-  let idx = 0; // session-wide tool-call index
+  let seqNext = 0; // the session's own turns, dense from 0
+  let idx = 0; // the session's own tool calls, dense from 0
+  const subIdx = new Map(); // slot → tool calls seen so far in that subagent
   // Set as soon as one message has no timestamp of its own. One is enough: the
   // interpolation denominator is the SESSION's length, so a single interpolated row
   // means this session's stored timestamps drift the next time it grows.
   let tsInterpolated = false;
-  for (let seq = 0; seq < total; seq++) {
-    const m = messages[seq];
+  for (let pos = 0; pos < total; pos++) {
+    const m = messages[pos];
+    const slot = stable ? subagentSlot(m) : null;
+    let seq;
+    if (slot === null) {
+      if (stable && seqNext >= SUBAGENT_SEQ_BASE) return null;
+      seq = seqNext++;
+    } else {
+      seq = subagentSeq(slot, m._agent.turn);
+      if (seq === null) return null;
+    }
     if (!hasOwnTs(m)) tsInterpolated = true;
     const raw = typeof m.content === 'string' ? m.content : JSON.stringify(m.content) ?? '';
     const text = truncate(raw, TEXT_MAX);
-    const ts = messageTs(chat, seq, total, m);
+    const ts = messageTs(chat, pos, total, m);
     const row = {
       session_id: id,
       seq,
@@ -973,10 +1039,18 @@ function rowsForChat(chat, host) {
     }
     for (const tc of calls) {
       const args = JSON.stringify(tc.args);
+      let at;
+      if (slot === null) at = idx++;
+      else {
+        const n = subIdx.get(slot) || 0;
+        subIdx.set(slot, n + 1);
+        at = subagentSeq(slot, n);
+        if (at === null) return null;
+      }
       toolRows.push({
         session_id: id,
         seq,
-        idx: idx++,
+        idx: at,
         source,
         host,
         tool_name: tc.name,
@@ -987,12 +1061,7 @@ function rowsForChat(chat, host) {
       });
     }
   }
-  // What a complete ship of this session looks like, recorded ON the session row so the
-  // next pass can tell "finished" from "got part way". message_count already carries the
-  // message half; without the tool half a pass that dies between the messages insert and
-  // the tool_calls insert leaves a session that looks finished forever. See loadExisting.
-  session.extra.toolCallCount = toolRows.length;
-  return { session, msgRows, toolRows, tsInterpolated };
+  return { msgRows, toolRows, tsInterpolated };
 }
 
 /**
@@ -1037,26 +1106,41 @@ function decideEpoch(stored, incoming) {
 
   const maxSeq = Number.isFinite(stored.maxSeq) ? stored.maxSeq : -1;
   const maxIdx = Number.isFinite(stored.maxIdx) ? stored.maxIdx : -1;
-  if (incoming.msgRows.length - 1 < maxSeq) {
-    return bump(`${maxSeq + 1} messages stored, ${incoming.msgRows.length} parsed`);
+  const hashes = stored.hashes || new Map();
+  const tools = stored.tools || new Map();
+
+  // SHRINK is "the house holds a row this parse does not produce", checked per key. It
+  // used to be `parsed - 1 < maxSeq`, which is the same question only while seq is dense
+  // 0..N-1; a folded subagent's rows are numbered from a sparse block (subagentSeq), so a
+  // vanished subagent or a stale pre-0.18.10 numbering leaves stored keys inside the range
+  // that nothing overwrites. The max comparison stays for a caller holding no hashes.
+  const orphans = (have, rows, key, max) => {
+    const want = new Set(rows.map((r) => r[key]));
+    let missing = 0;
+    for (const k of have.keys()) if (!want.has(k)) missing++;
+    const inMax = rows.reduce((a, r) => Math.max(a, r[key]), -1);
+    return { missing, beyond: max > inMax, stored: Math.max(have.size, max + 1) };
+  };
+  const mo = orphans(hashes, incoming.msgRows, 'seq', maxSeq);
+  if (mo.missing || mo.beyond) {
+    return bump(`${mo.stored} messages stored, ${incoming.msgRows.length} parsed${mo.missing ? `, ${mo.missing} of them not in the new parse` : ''}`);
   }
-  if (incoming.toolRows.length - 1 < maxIdx) {
-    return bump(`${maxIdx + 1} tool calls stored, ${incoming.toolRows.length} parsed`);
+  const to = orphans(tools, incoming.toolRows, 'idx', maxIdx);
+  if (to.missing || to.beyond) {
+    return bump(`${to.stored} tool calls stored, ${incoming.toolRows.length} parsed${to.missing ? `, ${to.missing} of them not in the new parse` : ''}`);
   }
 
   // A seq the house does not hold is a gap, not a disagreement — there is nothing there
   // to destroy, so it is not a reason to fork the session.
-  const hashes = stored.hashes || new Map();
   for (const row of incoming.msgRows) {
-    if (row.seq > maxSeq) break;
+    if (row.seq > maxSeq) continue;
     const was = hashes.get(row.seq);
     if (was !== undefined && was !== String(row.line_hash)) {
       return bump(`message ${row.seq} was rewritten`);
     }
   }
-  const tools = stored.tools || new Map();
   for (const row of incoming.toolRows) {
-    if (row.idx > maxIdx) break;
+    if (row.idx > maxIdx) continue;
     const was = tools.get(row.idx);
     if (was !== undefined && (was.tool_name !== row.tool_name || was.args !== row.args)) {
       return bump(`tool call ${row.idx} was rewritten`);
@@ -1084,8 +1168,11 @@ function decideEpoch(stored, incoming) {
  *   folder / project. Denormalized onto every message and tool_call row; a moved or
  *   renamed project has to reach the rows that carry it.
  *
- * `source` cannot change (it is the session_id prefix), `is_subagent` is derived from
- * `text`, and messages' `extra` is always empty — so those three need no check.
+ * `source` cannot change (it is the session_id prefix) and `is_subagent` is derived from
+ * `text`, so neither needs a check. Messages' `extra` carries a folded subagent's
+ * `agent` stamp; its id and turn are fixed by the row's seq, and a description the parent
+ * supplies only later (a background fork named by its task notification) is not worth
+ * re-shipping a session for.
  *
  * When this returns false the session ships whole, exactly as it always has. Pure.
  */
@@ -1541,7 +1628,7 @@ async function main() {
   }
 }
 
-module.exports = { runShip, ensureSchema, refreshStats, templateColumns, decideEpoch, tailRows, tailSafe };
+module.exports = { runShip, ensureSchema, refreshStats, templateColumns, decideEpoch, tailRows, tailSafe, rowsForChat, buildRows, SUBAGENT_SEQ_BASE, SUBAGENT_SEQ_STRIDE };
 
 if (require.main === module) {
   main().catch((e) => {
