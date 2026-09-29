@@ -33,6 +33,12 @@ migration path is planned work, not a promise the old versions can cash.
   and only for sessions that have a subagent directory. After upgrading, a session whose
   subagents are newer than its parent is re-read once on the first pass, and ships the turns
   it was missing.
+- **`memhouse update --no-install` restarts a tarball or nightly install.** It is the command
+  every nightly prints for itself, and on exactly those builds it stopped at "no automatic
+  update for this install" (a tarball is on no registry tag), exited 1, and left the old
+  shipper running the old code in memory. `--no-install` no longer needs a channel: the
+  files are already in place, and the restart, migrations and schema check run. Found while
+  upgrading testbed from 0.18.9 to a nightly of this release.
 
 ## 0.18.10 — 2026-10-08
 

@@ -2264,12 +2264,18 @@ async function cmdUpdate() {
   console.log(`  target     ${pick.target || (tags ? 'nothing to install' : 'unknown — the registry did not answer')}`);
   if (latest && latest === PKG.version && kind !== 'checkout') console.log(ok('already current'));
   if (flags.check) return 0;
-  if (!pick.channel && kind !== 'checkout') {
+  // --no-install asks for the restart and the house checks only; the files are already in
+  // place, so which channel they came from does not matter. Refusing here for want of one
+  // made the command every nightly prints for itself ("memhouse update --no-install")
+  // return 1 on exactly the builds that print it — a tarball is on no registry tag — and
+  // leave the old shipper running the old code.
+  const noInstall = flags['no-install'] === true;
+  if (!pick.channel && kind !== 'checkout' && !noInstall) {
     console.log(warn('no automatic update for this install'));
     console.log(`  ${pick.reason}`);
     return 1;
   }
-  if (pick.channel && !pick.target && kind !== 'checkout') {
+  if (pick.channel && !pick.target && kind !== 'checkout' && !noInstall) {
     console.log(bad(`channel '${pick.channel}' has no version on the registry — nothing to install, nothing changed`));
     return 1;
   }
