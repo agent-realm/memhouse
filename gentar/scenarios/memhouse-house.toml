@@ -33,7 +33,12 @@ curl -fsSLO "$B/$F"
 printf '%s\n' "$S" | grep " $F\$" | sha256sum -c -
 sudo tar -xzf "$F" -C /usr/local --strip-components=1 --no-same-owner
 node --version''',
-  'npm install -g "$WORKSPACE_DIR" 2>&1 | tail -3',
+  # The documented `npm install -g memhouse`, from the tree under test:
+  # pack it as a publish would (prepack builds the UI; the package.json
+  # "files" allowlist decides what ships), then install that tarball.
+  # `npm install -g <folder>` only links the folder and skips its
+  # dependencies (npm 11), so @clickhouse/client was missing.
+  'mkdir -p /tmp/pack && cd /tmp/pack && npm pack "$WORKSPACE_DIR" 2>&1 | tail -1 && npm install -g /tmp/pack/memhouse-*.tgz 2>&1 | tail -3',
   # Documented no-ClickHouse path: loopback house + install + wiring.
   'memhouse deploy --local 2>&1 | tail -15',
   'memhouse status 2>&1 | tail -10',
