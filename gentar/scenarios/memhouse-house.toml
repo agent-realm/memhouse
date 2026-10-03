@@ -3,7 +3,7 @@
 # bench's own Docker daemon (benches are sbx sandboxes with nested Docker,
 # spike-proven), then installs and wires the CLI. Verdicts are sql-count
 # against the live house over HTTP — the gauntlet memory-house matrix's
-# core assertion grammar, ported to the current (0.9.x, shared-rooms)
+# core assertion grammar, ported to the current (0.18.x, one-layout)
 # data model: rooms exist, and attribution is enforced by the server,
 # not claimed by the client.
 #
@@ -34,9 +34,12 @@ command = 'test -f "$HOME/.memhouse/env" && set -a && . "$HOME/.memhouse/env" &&
 contains = "env-wired"
 
 [[verify.commands]]
-# sql-count, live house: the three rooms exist in the house database.
+# sql-count, live house: the member's three rooms exist in the house
+# database, named for the member (<member>_sessions, …; memhouse's
+# physicalRoom(), one layout since df18d5a). Until 2026-10-03 this asked
+# for bare names and went stale unnoticed while gentar's nightly skipped it.
 command = '''set -a; . "$HOME/.memhouse/env"; set +a
-Q="SELECT count() FROM system.tables WHERE database='$MEMHOUSE_DB' AND name IN ('sessions','messages','tool_calls')"
+Q="SELECT count() FROM system.tables WHERE database='$MEMHOUSE_DB' AND name IN ('${MEMHOUSE_USER}_sessions','${MEMHOUSE_USER}_messages','${MEMHOUSE_USER}_tool_calls')"
 curl -s "$MEMHOUSE_URL/?default_format=TSV" -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" --data-binary "$Q"'''
 contains = "3"
 

@@ -2,10 +2,10 @@
 # ClickHouse you own). Oracle = the README's documented install path
 # (`npm install -g memhouse`) run against the MOUNTED CHECKOUT, so the
 # tree under test is what ships, not the registry copy. Assertions
-# prove the README's core claims from the shipped artifacts: the three
-# rooms, and attribution stamped server-side (user_id MATERIALIZED
-# currentUser() — "every row says who wrote it, in a way no client can
-# fake").
+# prove the README's core claims from the shipped artifacts: one grant on
+# the member's own rooms, the three rooms, and attribution stamped
+# server-side (user_id MATERIALIZED currentUser() — "every row says who
+# wrote it, in a way no client can fake").
 
 [scenario]
 name = "memhouse-install"
@@ -26,15 +26,33 @@ steps = [
 command = 'V=$(node -p "require(\"$WORKSPACE_DIR/package.json\").version"); memhouse --version | grep -F "$V" && echo version-floats'
 contains = "version-floats"
 
-[[verify.commands]]
-# README claim: a house is three rooms (sessions, messages, tool_calls).
-command = 'test "$(memhouse install --print-sql | grep -c "CREATE TABLE IF NOT EXISTS")" = 3 && echo three-rooms'
-contains = "three-rooms"
+# Since memhouse's one-layout change (df18d5a, 8ee6f8f) `install
+# --print-sql` prints the member's access plan only (database, user, one
+# grant); a member's rooms are created by their own first `memhouse ship`
+# from the room DDL that ships in the package. The two checks below read
+# each claim where it now lives. They asserted 3 CREATE TABLEs in
+# --print-sql until 2026-10-03 and went stale unnoticed while gentar's
+# nightly skipped this suite.
 
 [[verify.commands]]
-# README claim: user_id is stamped by the server, in every room.
-command = 'test "$(memhouse install --print-sql | grep -c "user_id String MATERIALIZED currentUser()")" = 3 && echo server-stamped'
-contains = "server-stamped"
+# README: "Your rooms are named for you, and one grant covers them" —
+# GRANT … ON mem.<name>_* TO <name>; nobody is granted the whole database.
+command = '''P=$(memhouse install --print-sql); U=$(id -un)
+n=$(printf '%s\n' "$P" | grep -c "^GRANT .* ON mem\.${U}_\* TO ${U} WITH GRANT OPTION;")
+w=$(printf '%s\n' "$P" | grep -c -E "^GRANT .* ON mem\.\* |^GRANT ALL")
+test "$n" = 1 && test "$w" = 0 && echo one-grant-own-rooms'''
+contains = "one-grant-own-rooms"
+
+[[verify.commands]]
+# README: a house's turns live in three rooms (sessions, messages,
+# tool_calls), and user_id is stamped by the server in every one
+# (MATERIALIZED currentUser()), with async inserts pinned off so the stamp
+# cannot be skipped. Read from the room DDL the package ships.
+command = '''T="$(npm root -g)/memhouse/memhouse/house/schema.sql.tpl"
+r=$(grep -c -E "^CREATE TABLE IF NOT EXISTS (sessions|messages|tool_calls)$" "$T")
+s=$(grep -c "user_id String MATERIALIZED currentUser()" "$T")
+test "$r" = 3 && test "$s" = 3 && memhouse install --print-sql | grep -q "ADD SETTING async_insert = 0 CONST" && echo three-rooms-server-stamped'''
+contains = "three-rooms-server-stamped"
 
 [[verify.commands]]
 # The house DDL is qualified and runnable anywhere (no USE) — README
