@@ -21,6 +21,18 @@ tokens = 50000   # accounting headroom for the nightly cap; oracle is no-LLM
 
 [oracle]
 steps = [
+  # README: Node >= 24 (node:sqlite; `memhouse install` refuses older).
+  # The bench template has node 22, so meet the requirement the way a user
+  # would: the official latest v24 build, checked against nodejs.org's
+  # SHA256 list, into /usr/local (ahead of /usr/bin on PATH).
+  '''set -e; cd /tmp
+case $(uname -m) in x86_64) A=x64;; aarch64|arm64) A=arm64;; *) echo "no node build for $(uname -m)"; exit 1;; esac
+B=https://nodejs.org/dist/latest-v24.x; S=$(curl -fsSL "$B/SHASUMS256.txt")
+F=$(printf '%s\n' "$S" | awk -v f="linux-$A.tar.gz" '$2 ~ (f "$") {print $2}')
+curl -fsSLO "$B/$F"
+printf '%s\n' "$S" | grep " $F\$" | sha256sum -c -
+sudo tar -xzf "$F" -C /usr/local --strip-components=1 --no-same-owner
+node --version''',
   'npm install -g "$WORKSPACE_DIR" 2>&1 | tail -3',
   # Documented no-ClickHouse path: loopback house + install + wiring.
   'memhouse deploy --local 2>&1 | tail -15',

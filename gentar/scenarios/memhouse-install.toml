@@ -15,6 +15,18 @@ template = "gentar-bench-v1"   # node + npm present
 
 [oracle]
 steps = [
+  # README: Node >= 24 (node:sqlite; `memhouse install` refuses older).
+  # The bench template has node 22, so meet the requirement the way a user
+  # would: the official latest v24 build, checked against nodejs.org's
+  # SHA256 list, into /usr/local (ahead of /usr/bin on PATH).
+  '''set -e; cd /tmp
+case $(uname -m) in x86_64) A=x64;; aarch64|arm64) A=arm64;; *) echo "no node build for $(uname -m)"; exit 1;; esac
+B=https://nodejs.org/dist/latest-v24.x; S=$(curl -fsSL "$B/SHASUMS256.txt")
+F=$(printf '%s\n' "$S" | awk -v f="linux-$A.tar.gz" '$2 ~ (f "$") {print $2}')
+curl -fsSLO "$B/$F"
+printf '%s\n' "$S" | grep " $F\$" | sha256sum -c -
+sudo tar -xzf "$F" -C /usr/local --strip-components=1 --no-same-owner
+node --version''',
   # Documented one-liner, pointed at the mounted tree. npm packs via the
   # package.json "files" allowlist, so workspace clutter never ships.
   'npm install -g "$WORKSPACE_DIR" 2>&1 | tail -3',
@@ -29,9 +41,9 @@ contains = "version-floats"
 # Since memhouse's one-layout change (df18d5a, 8ee6f8f) `install
 # --print-sql` prints the member's access plan only (database, user, one
 # grant); a member's rooms are created by their own first `memhouse ship`
-# from the room DDL that ships in the package. --member is explicit: the
-# default member is the home directory's name, and the bench's is `root`,
-# which memhouse refuses ("a container artefact, not a person"). The two checks below read
+# from the room DDL that ships in the package. --member is explicit, so
+# the checks do not depend on the bench's home directory name (memhouse's
+# default member). The two checks below read
 # each claim where it now lives. They asserted 3 CREATE TABLEs in
 # --print-sql until 2026-10-03 and went stale unnoticed while gentar's
 # nightly skipped this suite.
