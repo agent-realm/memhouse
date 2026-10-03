@@ -1,0 +1,61 @@
+# Subject: memhouse — a REAL house, end to end. The README's no-ClickHouse
+# path: `memhouse deploy --local` stands up a loopback ClickHouse via the
+# bench's own Docker daemon (benches are sbx sandboxes with nested Docker,
+# spike-proven), then installs and wires the CLI. Verdicts are sql-count
+# against the live house over HTTP — the gauntlet memory-house matrix's
+# core assertion grammar, ported to the current (0.9.x, shared-rooms)
+# data model: rooms exist, and attribution is enforced by the server,
+# not claimed by the client.
+#
+# Heavy tier: pulls the ClickHouse image inside the sandbox. Nightly /
+# dispatch, not gate.
+
+[scenario]
+name = "memhouse-house"
+subject = "memhouse"
+agent = "shell"
+template = "gentar-bench-v1"
+
+[budget]
+tokens = 50000   # accounting headroom for the nightly cap; oracle is no-LLM
+
+[oracle]
+steps = [
+  'npm install -g "$WORKSPACE_DIR" 2>&1 | tail -3',
+  # Documented no-ClickHouse path: loopback house + install + wiring.
+  'memhouse deploy --local 2>&1 | tail -15',
+  'memhouse status 2>&1 | tail -10',
+]
+
+[[verify.commands]]
+# ~/.memhouse/env exists and sources cleanly (its shell form IS the
+# interface — skills and docs `. ~/.memhouse/env`).
+command = 'test -f "$HOME/.memhouse/env" && set -a && . "$HOME/.memhouse/env" && set +a && test -n "$MEMHOUSE_URL" && test -n "$MEMHOUSE_DB" && echo env-wired'
+contains = "env-wired"
+
+[[verify.commands]]
+# sql-count, live house: the three rooms exist in the house database.
+command = '''set -a; . "$HOME/.memhouse/env"; set +a
+Q="SELECT count() FROM system.tables WHERE database='$MEMHOUSE_DB' AND name IN ('sessions','messages','tool_calls')"
+curl -s "$MEMHOUSE_URL/?default_format=TSV" -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" --data-binary "$Q"'''
+contains = "3"
+
+[[verify.commands]]
+# sql-count: attribution is server-side in every room — user_id is a
+# MATERIALIZED column, so no client can claim to be someone else.
+command = '''set -a; . "$HOME/.memhouse/env"; set +a
+Q="SELECT count() FROM system.columns WHERE database='$MEMHOUSE_DB' AND name='user_id' AND default_kind='MATERIALIZED' AND default_expression='currentUser()'"
+curl -s "$MEMHOUSE_URL/?default_format=TSV" -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" --data-binary "$Q"'''
+contains = "3"
+
+[[verify.commands]]
+# sql-count: the house answers as the OS user (whatever the bench runs
+# as — `agent` today) — the stamp fires for real.
+command = '''U=$(id -un); set -a; . "$HOME/.memhouse/env"; set +a
+Q="SELECT currentUser()"
+R=$(curl -s "$MEMHOUSE_URL/?default_format=TSV" -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" --data-binary "$Q")
+test "$R" = "$U" && echo "stamp-live user=$R"'''
+contains = "stamp-live"
+
+[[verify.commands]]
+command = 'memhouse stats 2>&1 | tail -5'
