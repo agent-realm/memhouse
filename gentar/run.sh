@@ -422,7 +422,7 @@ ARENA=${GENTAR_DIR:-$HERE/.arena}
 # error they had not caused. Bump this deliberately: change the default,
 # run your suites, commit the bump as its own change. `main` stays
 # available for anyone tracking the engine on purpose.
-REF=${GENTAR_REF:-v0.9.1}
+REF=${GENTAR_REF:-v0.9.2}
 
 # --review: has this repo outgrown its suites?
 #
@@ -685,6 +685,17 @@ if [ "$LOCAL_BENCH" = 1 ]; then
       exit 2
     fi
   done
+  # sbx in the coordinator has no session bus: it reads the Docker login
+  # from files only. A login held in a desktop keyring (gnome-keyring) is
+  # invisible there, and every bench would fail at PREPARE IMAGE with "no
+  # default account profile set". sbx 0.39 and 0.45 keep each secret as a
+  # folder named by its base64 id; this one is docker/auth/metadata/hub/default.
+  SBX_AUTH="$HOME/.config/com.docker.sandboxes/com.docker.sandboxes-auth/sandboxes-auth"
+  SBX_PROFILE="$SBX_AUTH/ZG9ja2VyL2F1dGgvbWV0YWRhdGEvaHViL2RlZmF1bHQ="
+  if [ "${GENTAR_SBX_AUTH_CHECK:-on}" != off ] && ! ls "$SBX_PROFILE" 2>/dev/null | grep -q .; then
+    echo "GENTAR_BENCH_HOST=local: sbx has no login in files (no default account profile in $SBX_AUTH); a keyring login is invisible to the coordinator. Sign in once as $(id -un) with $ARENA/bin/sbx-file-login (GENTAR_SBX_AUTH_CHECK=off skips this check)" >&2
+    exit 2
+  fi
   export GENTAR_LOCAL_SBX_BIN
   GENTAR_LOCAL_SBX_BIN=$(readlink -f "$SBX_PATH" 2>/dev/null || echo "$SBX_PATH")
   if [ ! -f "$ARENA/compose.local-bench.yml" ]; then
