@@ -1,0 +1,90 @@
+# Subject: memhouse — a REAL house, end to end. The README's no-ClickHouse
+# path: `memhouse deploy --local` stands up a loopback ClickHouse via the
+# bench's own Docker daemon (benches are sbx sandboxes with nested Docker,
+# spike-proven), then installs and wires the CLI. Verdicts are sql-count
+# against the live house over HTTP — the gauntlet memory-house matrix's
+# core assertion grammar, ported to the current (0.18.x, one-layout)
+# data model: rooms exist, and attribution is enforced by the server,
+# not claimed by the client.
+#
+# Heavy tier: pulls the ClickHouse image inside the sandbox. Nightly /
+# dispatch, not gate.
+
+[scenario]
+name = "memhouse-house"
+subject = "memhouse"
+agent = "shell"
+template = "gentar-bench-v1"
+# The bench-free dry-run cannot stand up a house: it would need Docker on
+# the host. Phase 1 reports this suite UNVERIFIED with this reason (gentar
+# >= 0.9.3; an older engine ignores the key); the arena runs it.
+bench_only = "deploys a ClickHouse house through the bench's own Docker (memhouse deploy --local)"
+
+[budget]
+tokens = 50000   # accounting headroom for the nightly cap; oracle is no-LLM
+
+[oracle]
+steps = [
+  # README: Node >= 24 (node:sqlite; `memhouse install` refuses older).
+  # The bench template has node 22, so meet the requirement the way a user
+  # would: the official latest v24 build, checked against nodejs.org's
+  # SHA256 list, into /usr/local (ahead of /usr/bin on PATH).
+  '''set -e; cd /tmp
+case $(uname -m) in x86_64) A=x64;; aarch64|arm64) A=arm64;; *) echo "no node build for $(uname -m)"; exit 1;; esac
+B=https://nodejs.org/dist/latest-v24.x; S=$(curl -fsSL "$B/SHASUMS256.txt")
+F=$(printf '%s\n' "$S" | awk -v f="linux-$A.tar.gz" '$2 ~ (f "$") {print $2}')
+curl -fsSLO "$B/$F"
+printf '%s\n' "$S" | grep " $F\$" | sha256sum -c -
+sudo tar -xzf "$F" -C /usr/local --strip-components=1 --no-same-owner
+node --version''',
+  # The documented `npm install -g memhouse`, from the tree under test:
+  # pack it as a publish would (prepack builds the UI; the package.json
+  # "files" allowlist decides what ships), then install that tarball.
+  # `npm install -g <folder>` only links the folder and skips its
+  # dependencies (npm 11), so @clickhouse/client was missing.
+  # A fresh directory per run, and a failed pack or install fails the step
+  # (a `| tail` hid one: the step passed and memhouse was missing).
+  '''D=$(mktemp -d) && cd "$D"
+npm pack "$WORKSPACE_DIR" > pack.log 2>&1 || { tail -30 pack.log; exit 1; }
+npm install -g "$D"/memhouse-*.tgz > install.log 2>&1 || { tail -30 install.log; exit 1; }
+tail -3 install.log''',
+  # Documented no-ClickHouse path: loopback house + install + wiring.
+  '''L=$(mktemp); memhouse deploy --local > "$L" 2>&1 || { tail -30 "$L"; exit 1; }; tail -15 "$L"''',
+  'memhouse status 2>&1 | tail -10',
+]
+
+[[verify.commands]]
+# ~/.memhouse/env exists and sources cleanly (its shell form IS the
+# interface — skills and docs `. ~/.memhouse/env`).
+command = 'test -f "$HOME/.memhouse/env" && set -a && . "$HOME/.memhouse/env" && set +a && test -n "$MEMHOUSE_URL" && test -n "$MEMHOUSE_DB" && echo env-wired'
+contains = "env-wired"
+
+[[verify.commands]]
+# sql-count, live house: the member's three rooms exist in the house
+# database, named for the member (<member>_sessions, …; memhouse's
+# physicalRoom(), one layout since df18d5a). Until 2026-10-03 this asked
+# for bare names and went stale unnoticed while gentar's nightly skipped it.
+command = '''set -a; . "$HOME/.memhouse/env"; set +a
+Q="SELECT count() FROM system.tables WHERE database='$MEMHOUSE_DB' AND name IN ('${MEMHOUSE_USER}_sessions','${MEMHOUSE_USER}_messages','${MEMHOUSE_USER}_tool_calls')"
+curl -s "$MEMHOUSE_URL/?default_format=TSV" -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" --data-binary "$Q"'''
+contains = "3"
+
+[[verify.commands]]
+# sql-count: attribution is server-side in every room — user_id is a
+# MATERIALIZED column, so no client can claim to be someone else.
+command = '''set -a; . "$HOME/.memhouse/env"; set +a
+Q="SELECT count() FROM system.columns WHERE database='$MEMHOUSE_DB' AND name='user_id' AND default_kind='MATERIALIZED' AND default_expression='currentUser()'"
+curl -s "$MEMHOUSE_URL/?default_format=TSV" -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" --data-binary "$Q"'''
+contains = "3"
+
+[[verify.commands]]
+# sql-count: the house answers as the OS user (whatever the bench runs
+# as — `agent` today) — the stamp fires for real.
+command = '''U=$(id -un); set -a; . "$HOME/.memhouse/env"; set +a
+Q="SELECT currentUser()"
+R=$(curl -s "$MEMHOUSE_URL/?default_format=TSV" -u "$MEMHOUSE_USER:$MEMHOUSE_PASSWORD" --data-binary "$Q")
+test "$R" = "$U" && echo "stamp-live user=$R"'''
+contains = "stamp-live"
+
+[[verify.commands]]
+command = 'memhouse stats 2>&1 | tail -5'

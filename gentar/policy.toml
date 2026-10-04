@@ -1,0 +1,50 @@
+# This repo's run policy — which suites run when. Decided once, at
+# adaptation (AGENTS.md, decision 5); read only by gentar/plan.py, which
+# the kit's workflow asks what to run. Unknown keys are refused, so a typo
+# cannot silently mean a default.
+
+[phase1]
+# Every pull request and every push to the default branch.
+checks = true          # bench-free, GitHub-hosted: dry-run, lint, kit drift
+bench = "off"          # "off": PRs never reach the self-hosted runner.
+                       # "declared": a same-repo PR also runs, on the bench,
+                       # the floor plus the suites its body names on a
+                       # `gentar: a b` line. On a PUBLIC repo that puts PR
+                       # code on your runner — the pilot's call, not a default.
+floor = ["memhouse-install"]   # suites that run on the bench for every push to the
+                       # default branch (and every declared PR): the cheap,
+                       # deterministic guard rails
+# setup = { go = "1.21" }   # toolchains dryrun's prepare() needs on the
+                            # GitHub-hosted runner (go, node, python);
+                            # anything else: gentar/phase1-setup.sh
+# os = ["ubuntu-latest", "macos-latest"]   # where the checks run (default
+                            # ubuntu only). macOS = the dry-run on macOS
+                            # userland (bash 3.2, BSD tools) — real bugs,
+                            # but not a macOS bench. `setup` applies to
+                            # every leg: an old Go (1.21) builds binaries
+                            # current macOS refuses ("missing LC_UUID load
+                            # command") — pin a toolchain both can run.
+
+[phase2]
+# The full regression: every suite this environment can run.
+on = ["dispatch", "arena", "rc"]   # manual dispatch · the `arena` tag · v*-rc* tags
+release_gate = true    # gentar/release-gate.sh refuses a v* release whose
+                       # commit has no green `arena / phase2` job
+max_age_days = 0       # >0: that phase 2 must also be this recent
+
+[check]
+docs = false           # the docs standard, checked by --check (missing, not
+                       # quality): README.md short (what / why / how),
+                       # docs/tutorials/ + docs/guides/, examples/*/README.md,
+                       # AGENTS.md, relative links resolve. AGENTS.md,
+                       # "Before any release". Set false to opt out.
+                       # Off here: gentar's docs standard is gentar's;
+                       # this repo keeps its own docs layout.
+# allow_drift = []     # kit files you have deliberately changed; --check
+                       # then notes the difference instead of failing
+
+# [stage]
+# git = true           # ship git history (commits, tags) into the bench, for
+#                      # suites that clone their own release tags. A fresh .git
+#                      # from a local clone: no remote, no config carried over,
+#                      # so CI's auth header never comes along. Off by default.

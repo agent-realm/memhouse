@@ -1,0 +1,88 @@
+# Subject: memhouse — the memory plane (17-editor ingest into a
+# ClickHouse you own). Oracle = the README's documented install path
+# (`npm install -g memhouse`) run against the MOUNTED CHECKOUT, so the
+# tree under test is what ships, not the registry copy. Assertions
+# prove the README's core claims from the shipped artifacts: one grant on
+# the member's own rooms, the three rooms, and attribution stamped
+# server-side (user_id MATERIALIZED currentUser() — "every row says who
+# wrote it, in a way no client can fake").
+
+[scenario]
+name = "memhouse-install"
+subject = "memhouse"
+agent = "shell"
+template = "gentar-bench-v1"   # node + npm present
+
+[oracle]
+steps = [
+  # README: Node >= 24 (node:sqlite; `memhouse install` refuses older).
+  # The bench template has node 22, so meet the requirement the way a user
+  # would: the official latest v24 build, checked against nodejs.org's
+  # SHA256 list, into /usr/local (ahead of /usr/bin on PATH).
+  '''set -e; cd /tmp
+case $(uname -m) in x86_64) A=x64;; aarch64|arm64) A=arm64;; *) echo "no node build for $(uname -m)"; exit 1;; esac
+B=https://nodejs.org/dist/latest-v24.x; S=$(curl -fsSL "$B/SHASUMS256.txt")
+F=$(printf '%s\n' "$S" | awk -v f="linux-$A.tar.gz" '$2 ~ (f "$") {print $2}')
+curl -fsSLO "$B/$F"
+printf '%s\n' "$S" | grep " $F\$" | sha256sum -c -
+sudo tar -xzf "$F" -C /usr/local --strip-components=1 --no-same-owner
+node --version''',
+  # The documented `npm install -g memhouse`, from the tree under test:
+  # pack it as a publish would (prepack builds the UI; the package.json
+  # "files" allowlist decides what ships), then install that tarball.
+  # `npm install -g <folder>` only links the folder and skips its
+  # dependencies (npm 11), so @clickhouse/client was missing.
+  # A fresh directory per run, and a failed pack or install fails the step
+  # (a `| tail` hid one: the step passed and memhouse was missing).
+  '''D=$(mktemp -d) && cd "$D"
+npm pack "$WORKSPACE_DIR" > pack.log 2>&1 || { tail -30 pack.log; exit 1; }
+npm install -g "$D"/memhouse-*.tgz > install.log 2>&1 || { tail -30 install.log; exit 1; }
+tail -3 install.log''',
+  'command -v memhouse && memhouse --version',
+]
+
+[[verify.commands]]
+# Version floats from the subject's package.json — never hardcoded.
+command = 'V=$(node -p "require(\"$WORKSPACE_DIR/package.json\").version"); memhouse --version | grep -F "$V" && echo version-floats'
+contains = "version-floats"
+
+# Since memhouse's one-layout change (df18d5a, 8ee6f8f) `install
+# --print-sql` prints the member's access plan only (database, user, one
+# grant); a member's rooms are created by their own first `memhouse ship`
+# from the room DDL that ships in the package. --member is explicit, so
+# the checks do not depend on the bench's home directory name (memhouse's
+# default member). The two checks below read
+# each claim where it now lives. They asserted 3 CREATE TABLEs in
+# --print-sql until 2026-10-03 and went stale unnoticed while gentar's
+# nightly skipped this suite.
+
+[[verify.commands]]
+# README: "Your rooms are named for you, and one grant covers them" —
+# GRANT … ON mem.<name>_* TO <name>; nobody is granted the whole database.
+command = '''P=$(memhouse install --print-sql --member gentar) || exit 1; U=gentar
+n=$(printf '%s\n' "$P" | grep -c "^GRANT .* ON mem\.${U}_\* TO ${U} WITH GRANT OPTION;")
+w=$(printf '%s\n' "$P" | grep -c -E "^GRANT .* ON mem\.\* |^GRANT ALL")
+test "$n" = 1 && test "$w" = 0 && echo one-grant-own-rooms'''
+contains = "one-grant-own-rooms"
+
+[[verify.commands]]
+# README: a house's turns live in three rooms (sessions, messages,
+# tool_calls), and user_id is stamped by the server in every one
+# (MATERIALIZED currentUser()), with async inserts pinned off so the stamp
+# cannot be skipped. Read from the room DDL the package ships.
+command = '''T="$(npm root -g)/memhouse/memhouse/house/schema.sql.tpl"
+r=$(grep -c -E "^CREATE TABLE IF NOT EXISTS (sessions|messages|tool_calls)$" "$T")
+s=$(grep -c "user_id String MATERIALIZED currentUser()" "$T")
+test "$r" = 3 && test "$s" = 3 && memhouse install --print-sql --member gentar | grep -q "ADD SETTING async_insert = 0 CONST" && echo three-rooms-server-stamped'''
+contains = "three-rooms-server-stamped"
+
+[[verify.commands]]
+# The house DDL is qualified and runnable anywhere (no USE) — README
+# promises "runs anywhere". A failed --print-sql fails the check (it
+# used to print nothing and pass as "no-use").
+command = 'P=$(memhouse install --print-sql --member gentar) || exit 1; printf "%s\n" "$P" | grep -q "^USE " && echo has-use || echo no-use'
+contains = "no-use"
+
+[[verify.commands]]
+command = 'memhouse --help >/dev/null && echo help-ok'
+contains = "help-ok"
