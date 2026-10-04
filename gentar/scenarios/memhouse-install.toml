@@ -32,7 +32,12 @@ node --version''',
   # "files" allowlist decides what ships), then install that tarball.
   # `npm install -g <folder>` only links the folder and skips its
   # dependencies (npm 11), so @clickhouse/client was missing.
-  'mkdir -p /tmp/pack && cd /tmp/pack && npm pack "$WORKSPACE_DIR" 2>&1 | tail -1 && npm install -g /tmp/pack/memhouse-*.tgz 2>&1 | tail -3',
+  # A fresh directory per run, and a failed pack or install fails the step
+  # (a `| tail` hid one: the step passed and memhouse was missing).
+  '''D=$(mktemp -d) && cd "$D"
+npm pack "$WORKSPACE_DIR" > pack.log 2>&1 || { tail -30 pack.log; exit 1; }
+npm install -g "$D"/memhouse-*.tgz > install.log 2>&1 || { tail -30 install.log; exit 1; }
+tail -3 install.log''',
   'command -v memhouse && memhouse --version',
 ]
 
