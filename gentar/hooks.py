@@ -90,11 +90,17 @@ def _node24(cache: Path) -> Path:
     """The latest official Node 24 for this host, extracted under `cache`."""
     oses = {"Linux": "linux", "Darwin": "darwin"}
     arches = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}
+    here = f"{platform.system()}/{platform.machine()}"
+    if platform.system() not in oses or platform.machine().lower() not in arches:
+        raise RuntimeError(f"no official Node 24 build for {here} (linux or darwin, x64 or arm64)")
     suffix = f"-{oses[platform.system()]}-{arches[platform.machine().lower()]}.tar.gz"
     base = "https://nodejs.org/dist/latest-v24.x"
     sums = urllib.request.urlopen(f"{base}/SHASUMS256.txt", timeout=60).read().decode()
-    digest, name = next(line.split() for line in sums.splitlines()
-                        if line.endswith(suffix) and line.split()[1].startswith("node-v24."))
+    found = [line.split() for line in sums.splitlines()
+             if line.endswith(suffix) and line.split()[1].startswith("node-v24.")]
+    if not found:
+        raise RuntimeError(f"{base}/SHASUMS256.txt lists no Node 24 build for {here}")
+    digest, name = found[0]
     root = cache / name[: -len(".tar.gz")]
     if (root / "bin" / "node").exists():
         return root
@@ -105,6 +111,30 @@ def _node24(cache: Path) -> Path:
     tgz = cache / name
     tgz.write_bytes(data)
     with tarfile.open(tgz) as tf:
-        tf.extractall(cache, filter="data")
+        _extract(tf, cache)
     tgz.unlink()
     return root
+
+
+def _extract(tf: tarfile.TarFile, dest: Path) -> None:
+    """Extract without leaving `dest`. Python 3.12 (and 3.8.17, 3.9.17,
+    3.10.12, 3.11.4) has the "data" filter; older ones get the same rules
+    by hand: no absolute or `..` paths, no links pointing out, no devices."""
+    if hasattr(tarfile, "data_filter"):
+        tf.extractall(dest, filter="data")
+        return
+    base = os.path.realpath(dest)
+    def inside(p):
+        return os.path.realpath(p) == base or os.path.realpath(p).startswith(base + os.sep)
+    for m in tf.getmembers():
+        target = os.path.join(base, m.name)
+        if os.path.isabs(m.name) or not inside(target):
+            raise RuntimeError(f"unsafe path in the Node tarball: {m.name}")
+        if m.issym() and (os.path.isabs(m.linkname)
+                          or not inside(os.path.join(os.path.dirname(target), m.linkname))):
+            raise RuntimeError(f"unsafe link in the Node tarball: {m.name} -> {m.linkname}")
+        if m.islnk() and not inside(os.path.join(base, m.linkname)):
+            raise RuntimeError(f"unsafe hard link in the Node tarball: {m.name}")
+        if m.isdev():
+            raise RuntimeError(f"device file in the Node tarball: {m.name}")
+    tf.extractall(dest)

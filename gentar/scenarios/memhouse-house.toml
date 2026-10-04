@@ -88,3 +88,15 @@ contains = "stamp-live"
 
 [[verify.commands]]
 command = 'memhouse stats 2>&1 | tail -5'
+
+[[verify.commands]]
+# README: `memhouse deploy --down` removes the local house, container and
+# volume. Also this suite's teardown, so it stays LAST (every check above sees
+# the live house): a dry-run on a Docker host (gentar < 0.9.3, or
+# GENTAR_DRYRUN_BENCH_ONLY=run) must not leave a house running there.
+# memhouse-clickhouse and memhouse-data are deploy's fixed names.
+command = '''memhouse stop >/dev/null 2>&1; memhouse deploy --down --yes 2>&1 | tail -2
+c=$(docker ps -a --format '{{.Names}}' | grep -cx memhouse-clickhouse)
+v=$(docker volume ls -q | grep -cx memhouse-data)
+test "$c" = 0 && test "$v" = 0 && echo house-removed'''
+contains = "house-removed"
