@@ -4,16 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>memhouse — agent conversation memory, in one house</title>
-<meta name="description" content="Every coding-agent session on every machine you install it on — across 17 editors — parsed locally, shipped to one typed ClickHouse store, and queryable by you and by your agents. One command to install.">
+<meta name="description" content="Every coding-agent session on every machine you install it on — across 18 coding agents and editors — parsed locally, shipped to one typed ClickHouse store, and queryable by you and by your agents. One command to install.">
 <link rel="canonical" href="https://memhouse.io/">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://memhouse.io/">
 <meta property="og:title" content="memhouse — agent conversation memory, in one house">
-<meta property="og:description" content="17 editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents stop starting from zero.">
+<meta property="og:description" content="18 coding agents and editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents stop starting from zero.">
 <meta property="og:image" content="https://memhouse.io/dashboard.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="memhouse — agent conversation memory, in one house">
-<meta name="twitter:description" content="17 editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents stop starting from zero.">
+<meta name="twitter:description" content="18 coding agents and editors, parsed on your machine, shipped to one typed ClickHouse store. Your agents stop starting from zero.">
 <meta name="theme-color" content="#fe7601">
 <link rel="icon" type="image/png" href="/icon-512.png">
 <link rel="apple-touch-icon" href="/icon-512.png">
@@ -40,7 +40,7 @@
       <img class="on-light" src="/mark.png" alt="MemHouse" width="37" height="28">
       <img class="on-dark" src="/mark-dark.png" alt="MemHouse" width="37" height="28" hidden>
       memhouse
-      <span class="ver">v0.12.7</span>
+      <span class="ver">v0.18.9</span>
     </a>
     <nav class="nav-links">
       <a class="hide-sm" href="#compare">Why</a>
@@ -61,7 +61,7 @@
 <!-- ============ HERO ============ -->
 <section class="hero">
   <div class="wrap">
-    <div class="status"><span class="dot"></span> <b>v0.12.7</b> &middot; 17 editor adapters &middot; MIT</div>
+    <div class="status"><span class="dot"></span> <b>v0.18.9</b> &middot; 16 adapters, 18 apps &middot; MIT</div>
 
     <h1 class="hero-title"><span class="dim">Your agents forget.</span><br><span class="mark">The house remembers.</span></h1>
 
@@ -91,14 +91,14 @@
 
     <div class="tiles">
       <div class="tile a">
-        <div class="v">17</div>
-        <div class="n">editor adapters</div>
-        <div class="s">JSONL and SQLite-backed</div>
+        <div class="v">18</div>
+        <div class="n">apps covered</div>
+        <div class="s">16 adapters, JSONL and SQLite</div>
       </div>
       <div class="tile t">
         <div class="v">3</div>
-        <div class="n">rooms per credential</div>
-        <div class="s">one set per member, or per agent</div>
+        <div class="n">rooms per member</div>
+        <div class="s">yours alone until you share them</div>
       </div>
       <div class="tile i">
         <div class="v">1</div>
@@ -117,7 +117,7 @@
 <!-- ============ EDITORS ============ -->
 <section style="padding:44px 0">
   <div class="wrap">
-    <p class="label" style="text-align:center;margin-bottom:20px">One shipper &middot; seventeen adapters &middot; whatever you switched to last month</p>
+    <p class="label" style="text-align:center;margin-bottom:20px">One shipper &middot; sixteen adapters &middot; whatever you switched to last month</p>
   </div>
   <div class="marquee"><div class="track" id="editor-track"></div></div>
 </section>
@@ -165,7 +165,7 @@
             <td>Coverage</td>
             <td>Whatever one editor wrote</td>
             <td>Whatever exports cleanly to text</td>
-            <td class="me"><b>17 adapters, JSONL <em>and</em> SQLite-backed editors</b></td>
+            <td class="me"><b>16 adapters, JSONL <em>and</em> SQLite-backed editors</b></td>
           </tr>
           <tr>
             <td>Shape of the data</td>
@@ -275,7 +275,7 @@
             <td>—</td>
             <td>One integration catches every agent</td>
             <td>One integration, but only your own app</td>
-            <td class="me"><b>17 adapters to maintain — deliberately paid</b></td>
+            <td class="me"><b>16 adapters to maintain — deliberately paid</b></td>
           </tr>
         </tbody>
       </table>
@@ -289,7 +289,7 @@
       sitting on your disk</b>, and <b>stay out of the path between you and your model</b>.
       If you would rather not run a man-in-the-middle on every prompt you send, that is the trade.
       The repo grades the whole field bet by bet in
-      <a href="https://github.com/agent-realm/memhouse/blob/master/memhouse/COMPETITION.md">COMPETITION.md</a>.
+      <a href="https://github.com/agent-realm/memhouse/blob/main/memhouse/COMPETITION.md">COMPETITION.md</a>.
     </div>
   </div>
 </section>
@@ -309,7 +309,7 @@
         <div class="n">STEP 01</div>
         <h3>Parse on the client</h3>
         <p>
-          The shipper runs all 17 adapters locally — JSONL transcripts <em>and</em> the private SQLite
+          The shipper runs all 16 adapters locally — JSONL transcripts <em>and</em> the private SQLite
           databases Cursor, Zed, Goose, OpenCode and Antigravity keep — and emits typed rows.
           Nothing raw leaves the disk.
         </p>
@@ -318,9 +318,10 @@
         <div class="n">STEP 02</div>
         <h3>Ship into typed rooms</h3>
         <p>
-          <code>messages</code>, <code>sessions</code>, <code>tool_calls</code> as real columns, plus one
-          <code>extra JSON</code> escape hatch so no adapter field is ever lost. Incremental by default;
-          a re-ship of a grown session replaces the stale rows instead of duplicating them.
+          <code>messages</code>, <code>sessions</code>, <code>tool_calls</code> as real columns, in rooms
+          named for you (<code>mem.alice_messages</code>), plus one <code>extra JSON</code> escape hatch so no
+          adapter field is ever lost. Incremental: a grown session ships only its new rows, and a session
+          that changed is written as a new parse beside the old one, never over it.
         </p>
       </div>
       <div class="step">
@@ -340,7 +341,7 @@
   <div class="wrap">
     <p class="label"><span class="k">04</span> &nbsp;/&nbsp; Who it's for</p>
     <h2 class="section-title">One person with six agents. Or six people with sixty.</h2>
-    <p class="section-sub">Same install, same rooms. The only difference is who holds a grant.</p>
+    <p class="section-sub">Same install. Everyone gets rooms of their own; sharing them is one command.</p>
 
     <div class="aud">
       <div class="panel">
@@ -349,8 +350,8 @@
           <h3>One place your whole agent history lives</h3>
           <p>
             You switch editors. You switch machines. You do not switch memory — point each machine at
-            the same house with the same credential and every session lands in the same three rooms,
-            each row tagged with the machine it came from. "How did I fix that" is then one query,
+            the same house with the same credential and every session lands in your rooms, each row
+            tagged with the machine it came from. "How did I fix that" is then one query,
             not an archaeology dig through four app directories on two laptops.
           </p>
           <ul class="list">
@@ -366,16 +367,17 @@
         <div class="panel-body">
           <h3>One house, everyone's memory</h3>
           <p>
-            A team's house is a database — <code>team_a.messages</code>, <code>team_a.sessions</code>,
-            <code>team_a.tool_calls</code> — and every housemate's shipper writes into the
-            <em>same</em> tables with their own credential. The server stamps
-            <code>user_id</code> on every row; the install fingerprint stamps <code>host</code>.
+            A team's house is one ClickHouse database — <code>mem</code> — and every member gets rooms
+            named for them: <code>mem.alice_messages</code>, <code>mem.alice_sessions</code>,
+            <code>mem.alice_tool_calls</code>. One grant on <code>mem.alice_*</code> is all Alice holds, so
+            nobody reads anybody else's memory until it is shared. The server stamps <code>user_id</code>
+            on every row; the machine fingerprint stamps <code>host</code>.
           </p>
           <ul class="list teal">
-            <li><b>Or no DBA at all.</b> <code>memhouse invite alice</code> mints the user, the database and the grants, and writes a portable env file — the admin credential is never stored, and Alice runs one <code>memhouse install --env</code> to be a full owner of her own house.</li>
-            <li><b>The whole team in one dashboard</b>, no configuration — and <code>WHERE user_id = 'alice'</code> is one person.</li>
-            <li><b>The boundary is the database.</b> Groups that should not see each other get separate houses; a house's <code>ALL</code> reaches nothing outside it.</li>
-            <li><b>Read-only shares, without a new account.</b> <code>memhouse share</code> opens a <code>SELECT</code>-only window into your house for a housemate who should see it, not own it.</li>
+            <li><b>No DBA needed.</b> <code>memhouse invite alice</code> creates the user and her grant and writes <code>invite-alice.env</code>. Alice runs <code>memhouse install --env invite-alice.env</code>, which rotates the password to one only she knows and deletes the file. The admin credential is never stored.</li>
+            <li><b>Sharing is explicit.</b> <code>memhouse share bob</code> gives Bob read-only access to your rooms — or a slice of them, <code>--only project=…</code> — and <code>--revoke</code> takes it back.</li>
+            <li><b>Your agents read it too.</b> The <code>/mem</code> skills answer from your rooms and from any rooms shared with you.</li>
+            <li><b>The grant is the boundary.</b> A member's grant covers their own rooms; reading a housemate's takes a share, and only the operator creates users.</li>
           </ul>
         </div>
       </div>
@@ -388,17 +390,17 @@
           Provenance is two columns, and neither can be faked by a client.
           <code>user_id</code> is <code>MATERIALIZED currentUser()</code> — computed by the server
           during the insert, with async inserts pinned off on the user so the stamp cannot be
-          skipped. <code>host</code> is a fingerprint minted once per install, so two laptops with
-          the same hostname stay two machines and renaming one does not split its history.
+          skipped. <code>host</code> is a fingerprint derived from the machine itself, so two laptops
+          with the same hostname stay two machines, renaming one does not split its history, and a
+          reinstall keeps it.
         </p>
         <ul class="list" style="margin-top:16px">
           <li><b>One person:</b> <code>WHERE user_id = 'alice'</code>. <b>One machine:</b>
             <code>WHERE host = 'macbook-4127a95b'</code>. <b>The whole house:</b> no filter.</li>
-          <li><b>Housemates are collaborators.</b> The model is trust inside the house — grants can
-            be narrowed later if a team wants, but separation between groups is a separate house,
-            not machinery inside one.</li>
-          <li><b>Your own history survives a re-ship.</b> Rows carry <code>origin</code>; the
-            shipper's clear binds it, and imported history is never its to delete.</li>
+          <li><b>Members are isolated by default.</b> Each holds a grant on their own rooms only;
+            a housemate's memory is readable after they share it, not before.</li>
+          <li><b>Your history survives every re-ship.</b> The shipper is insert-only, and rows carry
+            <code>origin</code>, so imported history is never its to touch.</li>
         </ul>
       </div>
       <div>
@@ -409,22 +411,23 @@
           person (or each agent) their own credential and the server does the rest.
         </div>
         <div class="term">
-<pre><span class="c"># the fast way — mints user + database + grants, no admin credential stored</span>
-<span class="p">$</span> <span class="k">memhouse invite alice --url https://ch.example.com:8443 \
-    --admin-user root --admin-password *****</span>
-<span class="g">  ✓</span> alice.env written — hand it to alice, she runs:
-<span class="t">    memhouse install --env alice.env</span>
+<pre><span class="c"># the fast way — no admin credential stored anywhere</span>
+<span class="p">$</span> <span class="k">memhouse invite alice --url https://house.example.com</span>
+<span class="g">  ✓</span> invite written: invite-alice.env — hand it to alice, she runs:
+<span class="t">    memhouse install --env invite-alice.env</span>
 
-<span class="c"># or the statements a DBA already knows, by hand</span>
-<span class="p">$</span> <span class="k">CREATE DATABASE team_a;</span>
-<span class="p">$</span> <span class="k">CREATE USER alice IDENTIFIED BY '…';</span>
-<span class="p">$</span> <span class="k">GRANT ALL ON team_a.* TO alice;</span>   <span class="c"># repeat per housemate</span>
+<span class="c"># the grant behind it, if a DBA would rather run it by hand</span>
+<span class="p">$</span> <span class="k">memhouse install --print-sql --member alice</span>
+<span class="t">  GRANT SELECT, INSERT, ALTER, … ON mem.alice_* TO alice …</span>
 
-<span class="c"># everyone ships into the same rooms; the server says who wrote what</span>
-<span class="p">$</span> <span class="k">SELECT user_id, host, count() FROM team_a.messages</span>
-<span class="p">$</span> <span class="k">GROUP BY user_id, host;</span>
-<span class="t">  alice  macbook-4127a95b   64258</span>
-<span class="t">  bob    thinkpad-0fc96a7c  64258</span>
+<span class="c"># let bob read your memory — and take it back</span>
+<span class="p">$</span> <span class="k">memhouse share bob</span>
+<span class="p">$</span> <span class="k">memhouse share bob --revoke</span>
+
+<span class="c"># one member, every machine they ship from</span>
+<span class="p">$</span> <span class="k">SELECT host, count() FROM mem.alice_messages GROUP BY host;</span>
+<span class="t">  macbook-4127a95b   64258</span>
+<span class="t">  thinkpad-0fc96a7c  21907</span>
 </pre>
         </div>
       </div>
@@ -457,13 +460,13 @@
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-        <h3>A credential per person, a database per group</h3>
-        <p>Everyone in a house writes into the same three rooms, and the server stamps every row with who wrote it — attribution no client can fake. Groups that should not see each other get separate houses; a house's <code>ALL</code> reaches nothing outside its own database.</p>
+        <h3>A credential per person, rooms per member</h3>
+        <p>Every member writes into rooms named for them, and the server stamps every row with who wrote it — attribution no client can fake. Housemates read each other's memory only through a share, and a share can be scoped to one project or one session.</p>
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M6 18h8"/><rect x="17" y="10" width="5" height="10" rx="1.5"/></svg>
         <h3>Two laptops, one memory</h3>
-        <p>Every machine you own ships into the same rooms, and each install stamps its rows with a fingerprint written once — so <code>WHERE host = …</code> tells the desktop from the laptop. It is random rather than derived from the hostname, because two machines that both answer to <code>MacBook-Pro</code> would otherwise share one identity, and renaming a machine would cut its history in half.</p>
+        <p>Every machine you own ships into the same rooms, and each machine stamps its rows with a fingerprint derived from the machine itself — so <code>WHERE host = …</code> tells the desktop from the laptop. It is not the hostname: two machines that both answer to <code>MacBook-Pro</code> stay two, renaming a machine does not cut its history in half, and a reinstall keeps the same identity.</p>
       </div>
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M2 12h2M20 12h2M9 11v2M15 11v2"/></svg>
@@ -483,7 +486,7 @@
       <div class="card">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 18v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg>
         <h3>Upgrades itself, and says so</h3>
-        <p><code>memhouse update</code> does the two thirds a bare <code>npm i -g</code> leaves undone: it re-passes the native-binding flag, restarts the daemons, and checks whether your house is missing a column the new shipper needs. The daemons also notice on their own — each compares the installed version against the one it booted with and hands over, exiting under systemd or launchd so the supervisor restarts it, re-executing itself when nothing is supervising. A shipper here once ran for a day and a half out of a directory that had been <em>moved</em>.</p>
+        <p><code>memhouse update</code> does what a bare <code>npm i -g</code> leaves undone: it brings your rooms to the new schema, repoints an install whose rooms were moved, refreshes the <code>/mem</code> skills, and restarts the daemons — and <code>status</code> tells you when a newer version is out. The daemons also notice on their own — each compares the installed version against the one it booted with and hands over, exiting under systemd or launchd so the supervisor restarts it, re-executing itself when nothing is supervising. A shipper here once ran for a day and a half out of a directory that had been <em>moved</em>.</p>
       </div>
     </div>
   </div>
@@ -505,7 +508,7 @@
         <tbody>
           <tr>
             <td>deploy --local</td>
-            <td>Stock ClickHouse in docker or podman, bound to loopback. Since 0.4.2 <code>onboard</code> offers it when discover has just proved there is nothing to point at, instead of demanding a URL you do not have. It labels what it creates and refuses to touch a container or volume it did not create, so a name collision costs you an error rather than somebody else's data.</td>
+            <td>Stock ClickHouse in docker or podman, bound to loopback. <code>onboard</code> offers it when discover has just proved there is nothing to point at, instead of demanding a URL you do not have. It labels what it creates and refuses to touch a container or volume it did not create, so a name collision costs you an error rather than somebody else's data.</td>
             <td>One machine — or several members later.</td>
           </tr>
           <tr>
@@ -535,22 +538,21 @@
           <li><b>Schema outgrows a running house.</b> <code>memhouse migrate</code> runs whatever this
             house still needs — copy, atomic swap, nothing deleted — and <code>--dry-run</code> shows the
             plan first.</li>
-          <li><b>Moving server?</b> <code>memhouse relocate --to &lt;url&gt;</code> copies the whole house
-            server-to-server and repoints the install; the shipper does not re-ingest, and the source is
-            left untouched until you say otherwise.</li>
+          <li><b>House moved to a new layout?</b> The operator runs <code>memhouse convert</code> once — a
+            rename, nothing copied — and each member's next <code>memhouse update</code> repoints itself.</li>
         </ul>
       </div>
       <div class="term">
 <pre><span class="c"># see what a migration would do before it runs</span>
 <span class="p">$</span> <span class="k">memhouse migrate --dry-run</span>
-<span class="t">  sessions: schema 2 → 3, adds `origin`, `epoch`</span>
-<span class="t">  plan: copy → atomic swap → keep sessions_pre_epoch</span>
+<span class="t">  plan: copy → atomic swap → keep &lt;room&gt;_pre_epoch</span>
 
 <span class="p">$</span> <span class="k">memhouse migrate --yes</span>
-<span class="g">  ✓</span> house record: schema 3, no migration pending
+<span class="g">  ✓</span> house record: schema 2, no migration pending
 
-<span class="c"># moving to a new ClickHouse — copy, then repoint</span>
-<span class="p">$</span> <span class="k">memhouse relocate --to https://new.example.com:8443 --yes</span>
+<span class="c"># after the operator converted the house</span>
+<span class="p">$</span> <span class="k">memhouse update</span>
+<span class="g">  ✓</span> your rooms moved: alice.messages is now mem.alice_messages
 </pre>
       </div>
     </div>
@@ -574,13 +576,14 @@
 
 <span class="c"># the wizard: discover → configure → ship → start</span>
 <span class="p">$</span> <span class="k">memhouse onboard</span>
-<span class="g">  ✓</span> 17 adapters · 9 with sessions on this machine
+<span class="g">  ✓</span> 16 adapters · 9 with sessions on this machine
 <span class="g">  ✓</span> sessions shipped · dashboard on <span class="t">http://localhost:4640</span>
 
 <span class="c"># then, any time</span>
 <span class="p">$</span> <span class="k">memhouse search</span> clickhouse ttl
 <span class="p">$</span> <span class="k">memhouse stats</span>
-<span class="p">$</span> <span class="k">memhouse status --json</span>
+<span class="p">$</span> <span class="k">memhouse status</span>      <span class="c"># shipping? which machines? newer version?</span>
+<span class="p">$</span> <span class="k">memhouse instance</span>    <span class="c"># which house, member and rooms</span>
 <span class="p">$</span> <span class="k">memhouse doctor</span>
 </pre>
       </div>
@@ -599,9 +602,9 @@
 
         <ul class="list" style="margin-top:0">
           <li><b>Incremental.</b> A pass skips every session that hasn't grown or changed; a full re-ship stays safe.</li>
-          <li><b>Idempotent.</b> Re-shipping a known session clears its old message and tool rows first, so a shrunken re-parse can't leave a stale tail behind.</li>
-          <li><b>Degrades one adapter at a time.</b> A missing SQLite binding used to make <code>discover</code> report <em>zero</em> editors — one absent native module threw before any adapter ran. Since 0.4.3 the eleven adapters that need no native code work regardless, and the five that do are named as skipped.</li>
-          <li><b>Honest about failure.</b> <code>doctor</code> diagnoses the whole pipeline, and both it and <code>discover</code> say out loud when the binding is missing rather than leaving you to infer it from a low number.</li>
+          <li><b>Insert-only.</b> A grown session ships only its new rows; a session that changed is written as a new parse beside the old one. The shipper never deletes or overwrites.</li>
+          <li><b>Degrades one adapter at a time.</b> A locked or unreadable store is named and skipped, and retried on the next pass, while every other adapter keeps shipping.</li>
+          <li><b>Honest about failure.</b> <code>doctor</code> diagnoses the whole pipeline, and <code>status</code> quotes the last failed pass in words rather than leaving you to infer it from a low number.</li>
         </ul>
       </div>
     </div>
@@ -622,7 +625,7 @@
       <div>
         <p class="quote">"Did we ever solve this before?" <span>— asked before the answer is re-derived, not after.</span></p>
         <ul class="list" style="margin-top:18px">
-          <li><b>Nine skills.</b> <code>/mem:recall</code> answers from memory, <code>/mem:recall</code> and <code>/mem:recall</code> find and browse, <code>/mem:sql</code> runs read-only analytics, <code>/mem:house</code> and <code>/mem:house</code> report on the house, and <code>/mem:access</code> / <code>/mem:access</code> bring in or read from a housemate — an agent can onboard a teammate without an admin at the keyboard.</li>
+          <li><b>Five skills.</b> <code>/mem:recall</code> answers from past sessions — yours and any shared with you; <code>/mem:sql</code> runs read-only analytics; <code>/mem:house</code> reports what the house holds and whether shipping works; <code>/mem:access</code> invites a member or shares your rooms; <code>/mem:admin</code> is for whoever operates the ClickHouse.</li>
           <li><b>A plugin.</b> <code>memhouse plugins install claude</code> drops them into <em>every</em> Claude Code config directory on the machine — <code>~/.claude</code>, whatever <code>CLAUDE_CONFIG_DIR</code> points at, and each playbook under <code>~/.claude-playbooks/</code> — all selected by default, because a skill installed into only one of them is missing from the instance you actually work in, and a missing skill never announces itself. <code>onboard</code> offers this at the end.</li>
           <li><b>A prompt snippet.</b> <code>memhouse prompt</code> prints the system-prompt block that tells an agent to search memory <em>before</em> claiming ignorance.</li>
           <li><b>An install prompt, rendered for this machine.</b> <code>memhouse prompt --install</code> probes for a house, a container engine and an existing config, then states the <em>one</em> route that applies — including "already installed, do not reinstall" and "configured but the house does not answer, diagnose before repointing". An agent gets an instruction, not a decision tree to walk and a branch to pick wrong.</li>
@@ -634,11 +637,11 @@
 <span class="p">$</span> <span class="k">memhouse install --yes \
     --url https://ch.example.com:8443 \
     --user alice --password ***** --db mem</span>
-<span class="g">  ✓</span> rooms ready: <span class="t">sessions, messages, tool_calls</span> in <span class="t">mem</span>
+<span class="g">  ✓</span> rooms ready: <span class="t">mem.alice_sessions, mem.alice_messages, mem.alice_tool_calls</span>
 <span class="g">  ✓</span> verified as alice
 
 <span class="p">$</span> <span class="k">memhouse plugins install claude</span>
-<span class="g">  ✓</span> skills installed: ask · hello · invite · search · sessions · share · sql · status · users
+<span class="g">  ✓</span> skills installed: access · admin · house · recall · sql
 
 <span class="p">$</span> <span class="k">memhouse prompt</span> &gt;&gt; CLAUDE.md
 
@@ -700,19 +703,14 @@
 
       <details>
         <summary>I already have a memhouse house — is upgrading safe?</summary>
-        <p>Upgrade with <code>memhouse update</code>, and read the refusal it prints. 0.4.4 fixed a
-        data-loss bug that matters if you ever
-        <em>imported</em> history into your house: a ship pass clears and re-inserts a session's rows so a
-        shorter re-parse cannot leave a stale tail, and that clear was scoped to the session alone — so it
-        removed rows the adapters never wrote and cannot rewrite. Measured on a real house of 135,307
-        imported messages, one pass took a source from 126,098 rows to 98,150, and would have continued a
-        pass at a time.</p>
-        <p>Rooms now carry an <code>origin</code> column, and it is <em>in the sorting key</em> — guarding
-        only the delete leaves ReplacingMergeTree to collapse an imported row against a shipped one sharing
-        the same key, which is the same loss reached through the merge. <code>ORDER BY</code> cannot be
-        altered in place, so a house built earlier needs its rooms rebuilt; the shipper refuses to write
-        into one and prints the steps, and it checks on every pass rather than at schema time. A house with
-        no imported rows can simply be re-shipped from scratch.</p>
+        <p>Yes. <code>memhouse update</code> upgrades the package and then does the rest in one pass: it
+        brings your rooms to the new schema, repoints an install whose rooms the operator moved, refreshes
+        the <code>/mem</code> skills, and restarts the daemons. <code>memhouse update --check</code> shows
+        what it would install first.</p>
+        <p>The house is insert-only: a session that changes is written as a new parse beside the old one,
+        never over it, so an upgrade cannot shorten your history. When a release needs a room rebuilt, the
+        shipper refuses to write until it is, and <code>memhouse migrate</code> does it as copy + atomic
+        swap, deleting nothing.</p>
       </details>
 
       <details>
@@ -734,17 +732,17 @@
 
       <details>
         <summary>Can a team share memory?</summary>
-        <p>Sharing is the design, not a feature. A team's house is one database; every housemate's
-        shipper writes into the same tables, the server stamps who, the fingerprint stamps which
-        machine, and the dashboard shows the whole house with no configuration. Groups that should
-        not see each other run separate houses — the database is the boundary.</p>
+        <p>Yes — and nobody sees anyone else's by default. A team's house is one ClickHouse database
+        where each member owns rooms named for them; the server stamps who wrote every row and the
+        fingerprint stamps which machine. <code>memhouse share bob</code> lets Bob read yours — all of
+        it, or <code>--only project=…</code> — and <code>--revoke</code> takes it back.</p>
       </details>
 
       <details>
         <summary>Which editors, exactly?</summary>
-        <p>Seventeen adapters, covering: Claude Code, Codex, Cursor, Cursor Agent, VS Code, VS Code Insiders,
-        GitHub Copilot (CLI and JetBrains), Gemini CLI, Devin, Devin Next, Zed, Goose, OpenCode, Kiro,
-        Antigravity, Codebuff, Command Code and GSD Workflow.</p>
+        <p>Sixteen adapters, covering eighteen apps: Claude Code, Codex, Cursor, Cursor Agent, VS Code,
+        VS Code Insiders, GitHub Copilot (CLI and JetBrains), Gemini CLI, Devin, Devin Next, Zed, Goose,
+        OpenCode, Kiro, Antigravity, Codebuff and Command Code.</p>
       </details>
 
       <details>
@@ -797,8 +795,8 @@
   var C = ['#fe7601', '#ffea25', '#98bead', '#c8a48c'];
   var editors = [
     'Claude Code', 'Codex', 'Cursor', 'Cursor Agent', 'VS Code', 'VS Code Insiders',
-    'GitHub Copilot', 'Copilot JetBrains', 'Gemini CLI', 'Devin', 'Devin Next',
-    'Zed', 'Goose', 'OpenCode', 'Kiro', 'Antigravity', 'Codebuff', 'Command Code', 'GSD Workflow'
+    'Copilot CLI', 'Copilot JetBrains', 'Gemini CLI', 'Devin', 'Devin Next',
+    'Zed', 'Goose', 'OpenCode', 'Kiro', 'Antigravity', 'Codebuff', 'Command Code'
   ];
   var track = document.getElementById('editor-track');
   if (!track) return;
