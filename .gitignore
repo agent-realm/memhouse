@@ -165,3 +165,6 @@ gha-creds-*.json
 
 # ClickHouse writes these when run from the repo dir (test/dev)
 preprocessed_configs/
+
+# Cloudflare wrangler local cache (account id, pages state)
+.wrangler/
