@@ -30,6 +30,14 @@ apex/`www` records are Pages-managed CNAMEs, proxied. `wrangler pages deployment
 --project-name=memhouse-io` shows history, and every deploy also gets its own immutable
 `<hash>.memhouse-io.pages.dev` preview URL.
 
+## On every release
+
+The version shows in three places — `index.html` (nav badge and the hero status line) and
+`docs.html` (nav badge). Bump all three and redeploy; the site went from v0.12.7 to v0.18.9
+in one jump because nobody did. The adapter count (16 adapters, 18 apps) lives in the
+meta descriptions, the hero tiles, the editors marquee, the FAQ and the chip list — change
+them together when an adapter is added or retired.
+
 ## Caching — the one trap here
 
 The CSS and the logo carry a **version suffix in the filename** (`style-5.css`,

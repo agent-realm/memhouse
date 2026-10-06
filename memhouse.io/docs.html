@@ -50,7 +50,7 @@
       <img class="on-light" src="/mark.png" alt="MemHouse" width="37" height="28">
       <img class="on-dark" src="/mark-dark.png" alt="MemHouse" width="37" height="28" hidden>
       memhouse
-      <span class="ver">v0.12.7</span>
+      <span class="ver">v0.18.9</span>
     </a>
     <nav class="nav-links">
       <a href="/#who">Solo &amp; teams</a>
@@ -102,7 +102,7 @@
 
 <span class="c"># the wizard: discover → configure → ship → start</span>
 <span class="p">$</span> <span class="k">memhouse onboard</span>
-<span class="g">  ✓</span> 17 adapters · 9 with sessions on this machine
+<span class="g">  ✓</span> 16 adapters · 9 with sessions on this machine
 <span class="g">  ✓</span> sessions shipped · dashboard on <span class="t">http://localhost:4640</span>
 
 <span class="c"># read-only preflight — writes nothing</span>
@@ -114,6 +114,10 @@
     <a href="https://github.com/agent-realm">ultimagent kernel</a>? <code>memhouse setup --yes --url … --user … --password … --db …</code>
     writes the config directly, no wizard.</p>
 
+    <p>Joining a house someone else runs? They send you <code>invite-&lt;you&gt;.env</code>. Run
+    <code>memhouse install --env invite-&lt;you&gt;.env</code> — or just <code>memhouse</code> in the folder
+    that holds it, and it offers to join.</p>
+
     <p>Every command is dual-mode: interactive for a human, <code>--yes</code> / flags / <code>--json</code>
     for an agent. An agent can install its own memory, unattended.</p>
   </div>
@@ -123,19 +127,23 @@
 <section class="doc-section" id="concepts">
   <div class="wrap narrow">
     <h2>Concepts</h2>
-    <p class="lede">A house is a ClickHouse database. Three shared tables are its rooms. Everything else follows from that.</p>
+    <p class="lede">A house is a ClickHouse database — <code>mem</code> by default. Each member owns rooms named for them in it. Everything else follows from that.</p>
 
     <h3>House, rooms, member</h3>
-    <p><code>sessions</code>, <code>messages</code>, <code>tool_calls</code> — real typed columns for what other
-    tools derive at query time, plus one <code>extra JSON</code> escape hatch per table so no adapter field is
-    ever dropped. A <em>member</em> is a ClickHouse user with a database (their house) and full grants on it.</p>
+    <p>A member's rooms are <code>mem.&lt;member&gt;_sessions</code>, <code>_messages</code> and
+    <code>_tool_calls</code> — real typed columns for what other tools derive at query time, plus one
+    <code>extra JSON</code> escape hatch per table so no adapter field is ever dropped — with
+    <code>_meta</code> and <code>_events</code> beside them for bookkeeping. A <em>member</em> is a ClickHouse
+    user with one grant, on <code>mem.&lt;member&gt;_*</code>: their own rooms, to write, evolve and share,
+    and nothing beyond. <code>memhouse instance</code> shows which house, member and rooms this machine
+    uses.</p>
 
     <h3>Provenance no client can fake</h3>
     <p><code>user_id</code> is <code>MATERIALIZED currentUser()</code> — the server stamps it during the
-    insert, with async inserts pinned off so the stamp cannot be skipped. <code>host</code> is a random
-    fingerprint minted once per install (<code>~/.memhouse/host.json</code>), not derived from the hostname —
-    two laptops both called <code>MacBook-Pro</code> stay two machines, and renaming one doesn't split its
-    history.</p>
+    insert, with async inserts pinned off so the stamp cannot be skipped. <code>host</code> is a
+    fingerprint derived from the machine itself (kept in <code>~/.memhouse/host.json</code>), not from the
+    hostname — two laptops both called <code>MacBook-Pro</code> stay two machines, renaming one doesn't split
+    its history, and a reinstall keeps the same identity.</p>
     <div class="callout" style="margin:16px 0">
       One person: <code>WHERE user_id = 'alice'</code>. One machine: <code>WHERE host = 'macbook-4127a95b'</code>.
       The whole house: no filter.
@@ -146,8 +154,9 @@
     in <code>messages</code>/<code>tool_calls</code> carries an <code>epoch</code>: unchanged sessions keep their
     epoch, a changed session writes under a new one, and the old epoch stays complete and queryable. Reads
     default to the current epoch only; <code>sessions</code> is the deliberate exception — one row per session,
-    no epoch in its key. Rows also carry <code>origin</code> (<code>ship</code> vs <code>import</code>), so the
-    shipper's own clear can never touch history it didn't write.</p>
+    no epoch in its key. Rows also carry <code>origin</code> (<code>ship</code> vs <code>import</code>). The shipper is
+    insert-only — a session that grew ships just its new rows — so it never touches history it didn't
+    write.</p>
   </div>
 </section>
 
@@ -163,13 +172,15 @@
         <tbody>
           <tr><td>onboard</td><td>Interactive wizard: discover → configure → ship → start.</td></tr>
           <tr><td>install</td><td>Scriptable setup — <code>--url --user --password --db [--yes] [--no-ship]</code>. <code>--env FILE</code> installs from an invite file.</td></tr>
-          <tr><td>invite &lt;name&gt;</td><td>Mint a member + house on the server, write the env file their install needs — <code>--url --admin-user --admin-password [--db NAME] [--out FILE]</code>. This machine untouched; the admin credential is never stored.</td></tr>
+          <tr><td>invite &lt;name&gt;</td><td>Mint a member on the server — the user and one grant on <code>mem.&lt;name&gt;_*</code> — and write <code>invite-&lt;name&gt;.env</code> for their install. Uses your own credential when it may create users, otherwise <code>--admin-user --admin-password</code>. This machine untouched; the admin credential is never stored.</td></tr>
+          <tr><td>share &lt;user&gt;</td><td>Let a housemate read your rooms — all of them, or <code>--only project=… | session=… | since=…</code> (row policies). <code>--revoke</code> withdraws; <code>--list</code> shows who can read.</td></tr>
+          <tr><td>instance</td><td>Which memhouse this is: binary, house, member, rooms, host, daemons, and the playbooks bound to it.</td></tr>
           <tr><td>passwd</td><td>Rotate this member's password and rewrite the env file. Admin-assisted (<code>--admin-user --admin-password</code>) or <code>--print-sql</code> to run it yourself.</td></tr>
           <tr><td>setup</td><td>(Re)write the connection config only. <code>--yes</code> skips every prompt.</td></tr>
           <tr><td>discover</td><td>Read-only preflight: editors found, sessions on disk, reachable ClickHouses. Writes nothing.</td></tr>
           <tr><td>uninstall</td><td>Stop daemons + service, clear runtime state. Default tier keeps config and host identity — <code>--credentials</code> also forgets the house, <code>--full-removal</code> takes everything (asks first). No tier touches house data.</td></tr>
-          <tr><td>update</td><td>Upgrade the package, restart the daemons, migrate the house if needed. <code>--check</code> compares versions only.</td></tr>
-          <tr><td>reset</td><td>Clear the shipper's rows and re-ship everything (asks; <code>--yes</code> skips). Imported rows are kept unless <code>--all-origins</code>.</td></tr>
+          <tr><td>update</td><td>Upgrade the package, bring the house to the new schema, repoint an install whose rooms moved, refresh <code>/mem</code>, restart the daemons. <code>--check</code> compares versions only; <code>--no-install</code> when the files are already in place.</td></tr>
+          <tr><td>reset</td><td>Clear the shipper's rows and re-ship everything (asks; <code>--yes</code> skips). Imported rows are kept unless <code>--all-origins</code>. Sessions whose transcripts are no longer on disk cannot be re-shipped — reach for this last.</td></tr>
           <tr><td>nightly</td><td>Build an installable, version-stamped tarball from this checkout. Publishes nothing. <code>[--out DIR]</code></td></tr>
           <tr><td>ship</td><td>One incremental pass. <code>--full</code> re-ships everything; <code>--loop [sec]</code> runs continuously.</td></tr>
           <tr><td>stats</td><td>Per-source session/message/token counts.</td></tr>
@@ -183,7 +194,7 @@
           <tr><td>prompt</td><td>Print the memory system-prompt snippet. <code>--install</code> prints an install prompt for an agent instead.</td></tr>
           <tr><td>deploy --local</td><td>Run ClickHouse in docker/podman, bound to loopback, then install. <code>--down</code> removes it (container + volume).</td></tr>
           <tr><td>migrate / migrate-rooms</td><td>Run every migration the house still needs (or just the rooms) — copy + atomic swap, deletes nothing. <code>[--dry-run] [--yes]</code></td></tr>
-          <tr><td>relocate --to URL</td><td>Copy the whole house to a new ClickHouse, server-to-server, and repoint this install. The shipper does not re-ingest; source is untouched until confirmed. Needs <code>GRANT REMOTE ON *.*</code> on the destination user.</td></tr>
+          <tr><td>convert</td><td>(Operator.) Move a house from the old database-per-member layout into rooms in <code>mem</code> — a rename, nothing copied; grants and shares carried across. <code>--dry-run</code> first.</td></tr>
           <tr><td>service install</td><td>Run the shipper as a real user service (systemd <code>--user</code> / launchd). Also <code>stop | start | restart | uninstall | status</code>.</td></tr>
         </tbody>
       </table>
@@ -199,24 +210,25 @@
     <p class="lede">Two different things: <em>owning</em> a house (invite) and <em>reading</em> someone else's (share).</p>
 
     <h3>Bringing in a housemate</h3>
-    <p><code>memhouse invite &lt;name&gt;</code> mints the ClickHouse user, their database, and the grants —
-    <code>GRANT ALL … WITH GRANT OPTION</code>, so a member is a full owner of their own house and can hand
-    grants on to someone else, but still cannot <code>CREATE USER</code> or reach another house. It writes a
-    portable env file; the admin credential used to run <code>invite</code> is never stored anywhere. The
-    invitee runs one command:</p>
+    <p><code>memhouse invite &lt;name&gt;</code> creates the ClickHouse user and one grant on
+    <code>mem.&lt;name&gt;_*</code> — their rooms, with the rights to write, evolve and share them, and
+    nothing beyond: they cannot <code>CREATE USER</code> or read a housemate's rooms. It writes
+    <code>invite-&lt;name&gt;.env</code>; an admin credential, if one was needed, is never stored anywhere.
+    The invitee runs one command, which offers to rotate the password to one only they know and then
+    deletes the file:</p>
     <div class="term">
-<pre><span class="p">$</span> <span class="k">memhouse invite alice --url https://ch.example.com:8443 \
-    --admin-user root --admin-password *****</span>
-<span class="g">  ✓</span> alice.env written
+<pre><span class="p">$</span> <span class="k">memhouse invite alice --url https://house.example.com</span>
+<span class="g">  ✓</span> invite written: invite-alice.env
 
 <span class="c"># alice runs, on her own machine:</span>
-<span class="p">$</span> <span class="k">memhouse install --env alice.env</span>
+<span class="p">$</span> <span class="k">memhouse install --env invite-alice.env</span>
 </pre>
     </div>
 
     <h3>Reading a housemate's memory without owning it</h3>
-    <p><code>memhouse share</code> opens a read-only <code>SELECT</code> window into your house for another
-    member — for asking "how did bob fix this" without handing bob write access to your rooms. Members can
+    <p><code>memhouse share bob</code> grants Bob <code>SELECT</code> on your rooms — for asking "how did
+    alice fix this" without handing anyone write access. <code>--only project=…</code> narrows it with row
+    policies, and <code>memhouse share bob --revoke</code> withdraws it. Members can
     also see who else is on the server (<code>GRANT SHOW USERS ON *.*</code>), so <code>/mem:house</code> can
     answer "everyone on this ClickHouse" without an admin.</p>
 
@@ -238,28 +250,26 @@
   <div class="wrap narrow">
     <h2>Staying current</h2>
     <p class="lede">A bare <code>npm i -g memhouse@latest</code> does about two-thirds of the job.</p>
-    <p><code>memhouse update</code> upgrades the package, restarts the daemons (which otherwise keep parsing
-    with the code they booted with — one shipper here ran 1d16h out of a directory that had been <em>moved</em>),
-    and checks whether the house is missing something the new shipper needs. <code>update --check</code>
-    compares versions and changes nothing. Each daemon also checks on its own, once per pass, and hands over
+    <p><code>memhouse update</code> upgrades the package, brings your rooms to the new schema, repoints an
+    install whose rooms were moved, refreshes the <code>/mem</code> skills, and restarts the daemons (which
+    otherwise keep parsing with the code they booted with — one shipper here ran 1d16h out of a directory
+    that had been <em>moved</em>). <code>update --check</code> compares versions and changes nothing, and
+    <code>status</code> says when a newer version is out. Each daemon also checks on its own, once per pass, and hands over
     when it's behind — exiting under a supervisor (systemd/launchd) so it restarts on the new code, or
     re-executing itself when nothing is supervising it.</p>
 
     <h3>When the house itself needs to change</h3>
     <p><code>memhouse migrate</code> runs whatever this house still needs — detected from the house's own
-    <code>house_meta</code> record, not from anything the client remembers. Every migration is copy + atomic
+    <code>_meta</code> record, not from anything the client remembers. Every migration is copy + atomic
     swap; the old room is kept as <code>&lt;room&gt;_pre_epoch</code> for you to drop once you've checked it.
     <code>migrate --dry-run</code> shows the plan without touching anything.</p>
 
-    <h3>Moving to a different ClickHouse</h3>
-    <p><code>memhouse relocate --to &lt;url&gt;</code> copies the whole house server-to-server
-    (<code>remoteSecure()</code>/<code>remote()</code> INSERT SELECT, preserving provenance) and repoints this
-    install at the new one. It gates on a matching row count before switching, and the old env is kept until
-    you confirm.</p>
-    <p>The destination user needs <code>GRANT REMOTE ON *.*</code> — it's what lets
-    <code>remoteSecure()</code> pull from the source. Members invited or installed since this grant was
-    added get it automatically; on an older account, an admin runs <code>GRANT REMOTE ON *.* TO
-    &lt;member&gt;</code> once.</p>
+    <h3>When the operator moves the house</h3>
+    <p>If whoever runs your ClickHouse converts it to the current layout (<code>memhouse convert</code> —
+    your rooms are renamed from <code>alice.messages</code> to <code>mem.alice_messages</code>, nothing
+    copied), your next <code>memhouse update</code> — or the shipper, on its next start — notices and
+    rewrites <code>MEMHOUSE_DB</code> itself. Nothing ships in between, and nothing is lost: the transcripts
+    are still on disk, and the first good pass sends everything that was missed.</p>
   </div>
 </section>
 
@@ -274,7 +284,7 @@
     <code>--allow-scripts</code> flag; that failure class is gone now. What can still go wrong is one store at
     a time — a locked <code>state.vscdb</code>, a corrupt file, a schema an editor release changed —
     and it's never silent: <code>memhouse discover</code> and <code>memhouse doctor</code> both name the
-    skipped adapter and say why, while the other sixteen keep working.</p>
+    skipped adapter and say why, while every other adapter keeps working.</p>
 
     <h3><code>EACCES</code> on install</h3>
     <p>Check who owns the prefix root, not the path: <code>ls -ld "$(npm prefix -g)"</code>. Owned by
