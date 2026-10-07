@@ -31,22 +31,20 @@ Rules, each learned once:
   so a zeo machine never receives a team build by accident, and vice versa.
 - **`master` is retired.** It was the pre-0.18 default; `main` is the default now. Do not
   branch from it, tag on it, or push to it.
-- **A token publish is a *staged* publish on this account.** `npm publish` prints
-  `+ memhouse@x.y.z` and the guard says the lines agree, but with 2FA-required publishing
-  the version sits in npm's staging until a person's login supplies proof of presence —
-  `npm view` shows nothing, and a retry says "previously staged". Do not report a release
-  as published until `npm view memhouse dist-tags` shows it. (0.18.3, 2026-09-17: the
-  version went live on the pilot's next `npm login`.)
+- **A publish is live when `npm view` says so.** `npm publish` prints `+ memhouse@x.y.z`;
+  confirm with `npm view memhouse dist-tags --prefer-online`. A version that seems missing
+  right after a publish is registry lag or a stale local npm cache (`npm cache verify`),
+  not a "staged" publish. That misdiagnosis cost three releases.
 - **Which token.** The pilot's publish token lives in the macOS keychain as `npmjs-token`
-  (`~/.pilot-profile/online/npm.md` has the temp-userconfig recipe); `~/.npmrc` may hold a
-  narrower granular token. Either stages; a login releases.
+  (`~/.pilot-profile/online/npm.md` has the temp-userconfig recipe). Lend it to the one
+  command; never print it.
 - **One owner per line at a time.** Before releasing, check `ListAgents`/herdr for another
   session on the same repo and agree who cuts it; the release record lives in `CHANGELOG.md`
   on the line's branch and in `drills/`.
 
 ## What memhouse is
 
-A local shipper parses coding-agent sessions from 17 editors and writes them as typed rows
+A local shipper parses coding-agent sessions (16 adapters covering 18 apps) and writes them as typed rows
 into a ClickHouse database the user owns. A **house** is a database; its **rooms** are
 tables, one set per **member** and named for them (`mem.alice_messages`). A member holds
 one grant — `ON mem.alice_*` — and nothing else in the database; nobody is ever granted the
@@ -122,7 +120,75 @@ ubuntu only. macOS and Windows are untested there; say so rather than implying c
 
 ## Releasing
 
-Version lives in `package.json`, `package-lock.json` and the plugin manifest — all three
-move together. `## Unreleased` in `CHANGELOG.md` becomes `## <version> — <date>`. Tag
-`v<version>`, push the tag, then publish. A new user-facing capability is a **minor**
-bump; so is a behaviour change like refusing a flag that used to be ignored.
+Version lives in `package.json`, `package-lock.json` and the plugin manifest
+(`memhouse/delivery/plugin/.claude-plugin/plugin.json`). All three move together, along
+with the memhouse.io badges. `## Unreleased` in `CHANGELOG.md` becomes
+`## <version> — <date>`. Tag `v<version>`, push the tag, then publish. A new user-facing
+capability is a **minor** bump; so is a behaviour change like refusing a flag that used
+to be ignored.
+
+Every release also has:
+
+- **A release document**, `docs/releases/v<version>.md`: what changed, what a user must
+  do, the upgrade steps, deprecations with their removal version, and what was deferred.
+  The CHANGELOG entry links to it, and the GitHub release uses it as its notes
+  (`gh release create v<version> --notes-file docs/releases/v<version>.md`).
+- **The documentation standard:**
+  - a short README (what, why, how);
+  - `docs/`, with tutorials and guides for common operations;
+  - `examples/`, from smallest to full, each with its own README;
+  - the agent install section below.
+
+  A change to a command, a flag or a default updates the guide that describes it in the
+  same PR.
+- **A drill** when the release changes a surface a person touches (see above), recorded
+  in `drills/`.
+
+## Installing and deploying memhouse (for agents)
+
+How an agent installs memhouse for its principal, unattended. Every command takes `--yes`
+and most take `--json`. Follow the first route that applies, and never invent a house.
+
+```bash
+npm install -g memhouse                       # Node 24+. Distro Node: sudo. Homebrew/nvm/fnm/volta: no sudo
+
+# 1. The principal handed you an invite file:
+memhouse install --env invite-<name>.env --yes          # rotates the password, deletes the file
+
+# 2. The principal has a member credential, held by a secret manager:
+with-secret MEMHOUSE_PASSWORD=<reference> -- \
+  memhouse install --url <url> --user <member> --db mem --yes
+
+# 3. The principal administers the server (creates the member, ships as the member):
+with-secret MEMHOUSE_ADMIN_PASSWORD=<reference> -- \
+  memhouse install --url <url> --admin-user <admin> --member <name> --yes
+
+# 4. Nothing exists yet, and docker or podman is present: a house on this machine
+memhouse deploy --local --yes
+
+# Then verify, and keep it running:
+memhouse status --json        # connection, rooms, last pass
+memhouse whoami --json        # which credential, and what it may do
+memhouse service install      # survive reboots
+memhouse plugins install claude --yes
+```
+
+`memhouse prompt --install` prints an install prompt rendered for the current machine,
+with its state and the one route that applies.
+
+Rules:
+
+- **Never put a secret in the conversation, in argv, or in a file you write.** memhouse
+  ships transcripts into the house, and the archive is insert-only. Take passwords by
+  reference (`with-secret`, `MEMHOUSE_ADMIN_PASSWORD`, `--admin-password-file -`). Never
+  print `~/.memhouse/env`. If a secret reaches a transcript, say so and recommend rotation.
+- **Never guess a house.** With no URL from the principal and no invite file, stop and ask.
+  Do not point at `localhost:8123` because something answers there.
+- **Destructive commands need the principal's explicit yes, for that object:**
+  `memhouse reset`, `deploy --down` (deletes the local house's data),
+  `uninstall --full-removal`, and any `DROP`/`DELETE` in SQL. Look first, report the
+  counts, then ask.
+- **Verify from the outside.** `status --json` and a row count in `mem.<member>_messages`
+  are the evidence that it works. A started daemon is not.
+
+The user-facing version of all this is in [`docs/guides/install.md`](docs/guides/install.md).

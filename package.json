@@ -20,7 +20,11 @@
     "ui/vite.config.js",
     "ui/eslint.config.js",
     "public/",
-    "README.md"
+    "README.md",
+    "docs/README.md",
+    "docs/tutorials/",
+    "docs/guides/",
+    "docs/releases/"
   ],
   "scripts": {
     "start": "node bin/memhouse.js",
