@@ -90,9 +90,32 @@ $CLI share bob --revoke --yes >/dev/null 2>&1
 denied "$(M bob bpw "SELECT count() FROM mem.alice_messages")" && ok "  revoke works — bob is denied again" || bad "  bob still reads after revoke"
 out=$($CLI share bob --only project=alpha --yes 2>&1)
 printf '%s' "$out" | grep -q "✓" && ok "a scoped share works from the member's own grant" || bad "scoped share failed" "$(printf '%s' "$out" | grep '✗' | head -1)"
+printf '%s' "$out" | grep -q "could not verify how this server treats readers" && bad "  the permissive-server probe could not run" "$(printf '%s' "$out" | grep -m1 'could not verify')" || ok "  the permissive-server probe ran (it builds its table inside alice_*)"
 r=$(M bob bpw "SELECT groupUniqArray(project) FROM mem.alice_messages FORMAT TSV")
 printf '%s' "$r" | grep -q beta && bad "LEAK: scoped share exposed another project" "$r" || ok "  bob sees only the named project"
+# A scoped grant is table by table: nothing without a policy is reachable — not the stat
+# tables (first prompts, folders, token totals of EVERY project), not meta or events, and
+# not a room the member adds after the share.
+for t in session_stats session_model_stats session_tool_stats meta events; do
+  denied "$(M bob bpw "SELECT count() FROM mem.alice_$t")" && ok "  scoped: bob cannot read alice_$t" || bad "LEAK: a scoped share exposes alice_$t" "$(M bob bpw "SELECT count() FROM mem.alice_$t FORMAT TSV")"
+done
+A "CREATE TABLE mem.alice_later (session_id String) ENGINE=MergeTree ORDER BY session_id" >/dev/null
+denied "$(M bob bpw "SELECT count() FROM mem.alice_later")" && ok "  scoped: a room added after the share is not shared" || bad "LEAK: a scoped share reaches a room added later"
+A "DROP TABLE IF EXISTS mem.alice_later" >/dev/null
 $CLI share bob --revoke --yes >/dev/null 2>&1
+[ "$(A "SELECT count() FROM system.row_policies WHERE database='mem' AND has(apply_to_list, 'bob') FORMAT TSV")" = "0" ] && ok "  revoke leaves no row policy for bob" || bad "  revoke left row policies behind" "$(A "SELECT short_name FROM system.row_policies WHERE database='mem' FORMAT TSV")"
+# Narrowing a FULL share must take the wildcard back, or it reaches straight past the filters.
+$CLI share bob --yes >/dev/null 2>&1
+r=$(M bob bpw "SELECT count() FROM mem.alice_session_stats FORMAT TSV"); case "$r" in ''|*[!0-9]*) bad "  a full share should include the stat tables" "$r";; *) ok "  a full share includes the stat tables (by design)";; esac
+$CLI share bob --only project=alpha --yes >/dev/null 2>&1
+denied "$(M bob bpw "SELECT count() FROM mem.alice_session_stats")" && ok "  narrowing full -> scoped takes the wildcard back" || bad "LEAK: narrowing a full share kept the stat tables readable"
+r=$(M bob bpw "SELECT groupUniqArray(project) FROM mem.alice_messages FORMAT TSV")
+printf '%s' "$r" | grep -q beta && bad "LEAK: narrowed share still exposes another project" "$r" || ok "  and the narrowed share filters messages"
+$CLI share bob --revoke --yes >/dev/null 2>&1
+# An empty scope is a mistake, never a full share.
+out=$($CLI share bob --only "" --yes 2>&1)
+printf '%s' "$out" | grep -q "needs a scope" && ok "--only \"\" is refused" || bad "--only \"\" was not refused" "$(printf '%s' "$out" | tail -2)"
+denied "$(M bob bpw "SELECT count() FROM mem.alice_messages")" && ok "  and grants nothing" || bad "LEAK: --only \"\" granted a share"
 A "REVOKE CREATE ROW POLICY ON mem.alice_* FROM alice" >/dev/null
 out=$($CLI share bob --only project=alpha --yes 2>&1)
 printf '%s' "$out" | grep -q "NOTHING WAS GRANTED" && ok "a scoping failure grants nothing" || bad "scoping failure did not say it granted nothing" "$(printf '%s' "$out" | tail -2)"

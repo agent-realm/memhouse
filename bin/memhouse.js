@@ -3168,9 +3168,16 @@ async function cmdShare() {
   // today (the member has no grant option on the database) but with a raw ACCESS_DENIED
   // naming a privilege nobody can explain. Grant the rooms this member actually owns.
   const mine = roomNames(cfg.user);
-  // One grant on the member's own pattern: the shape the member holds, one level down
-  // (SELECT only). It reaches nothing a housemate wrote.
-  const shareTargets = [`${db}.${mine.pattern}`];
+  // A FULL share is one grant on the member's own pattern: the shape the member holds, one
+  // level down (SELECT only). It reaches nothing a housemate wrote — and, by design,
+  // everything of this member's, including the stat tables and any room added later.
+  const wildcard = `${db}.${mine.pattern}`;
+  // A SCOPED share is granted table by table: exactly the rooms its row policies filter,
+  // and nothing else. It used to take the wildcard too, and the policies covered only
+  // these three, so a grantee scoped to one project read every other project's opening
+  // prompt, folder and token totals straight out of <member>_session_stats, plus meta,
+  // events and whatever table the pattern would match next.
+  const scopedTargets = ROOM_TYPES.map((room) => `${db}.${mine.physical[room]}`);
 
   // Statements, not reads: this is the one command in the read family that writes, so it
   // does NOT go through the readonly connection the skills use.
@@ -3196,13 +3203,19 @@ async function cmdShare() {
   // re-share silently inherits the old scope. Measured — a re-granted user saw 2,121 rows
   // instead of the whole house, with nothing on any surface explaining the filter.
   if (flags.revoke === true) {
+    // Withdraw the grant FIRST, then the filters. The other order failed open: a REVOKE
+    // refused after the policies were dropped left the grantee with an unfiltered share.
+    try { for (const tgt of [wildcard, ...scopedTargets]) await run(`REVOKE SELECT ON ${tgt} FROM ${user}`); }
+    catch (e) {
+      console.log(bad(`could not revoke: ${netReason(e)}`));
+      console.log(`  Nothing else was changed: any row policies for '${user}' are still in place.`);
+      return 1;
+    }
     let dropped = 0;
     for (const room of ROOM_TYPES) {
       try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); dropped++; }
       catch (e) { console.log(warn(`could not drop the policy on ${room}: ${e.message.split('\n')[0]}`)); }
     }
-    try { for (const tgt of shareTargets) await run(`REVOKE SELECT ON ${tgt} FROM ${user}`); }
-    catch (e) { console.log(bad(`could not revoke: ${netReason(e)}`)); return 1; }
     await houseMeta(cfg, `share:${user}`, `revoked ${new Date().toISOString().slice(0, 10)}`);
     console.log(ok(`revoked '${user}' — SELECT withdrawn and ${dropped} row polic${dropped === 1 ? 'y' : 'ies'} dropped`));
     console.log('  Dropping the grant alone would have left the policies, and a later re-share');
@@ -3211,9 +3224,12 @@ async function cmdShare() {
   }
 
   // ── grant ─────────────────────────────────────────────────────────────────────
-  const scopeRaw = flags.only !== undefined && flags.only !== true ? String(flags.only) : null;
+  const scopeRaw = flags.only !== undefined && flags.only !== true ? String(flags.only).trim() : null;
   let scope = null;
-  if (flags.only === true) { console.log(bad('--only needs a scope, e.g. --only project=memhouse or --only session=<id>')); return 1; }
+  // An EMPTY scope is a mistake, not a request for everything. `--only "$SCOPE"` with an
+  // unset variable used to fall through to a full share — the widest grant this command
+  // makes, from the flag whose whole purpose is to narrow it.
+  if (flags.only === true || scopeRaw === '') { console.log(bad('--only needs a scope, e.g. --only project=memhouse or --only session=<id>')); return 1; }
   if (scopeRaw) {
     try { scope = share.parseScope(scopeRaw); } catch (e) { console.log(bad(e.message)); return 1; }
   }
@@ -3261,15 +3277,27 @@ async function cmdShare() {
     }
   }
 
-  try { for (const tgt of shareTargets) await run(`GRANT SELECT ON ${tgt} TO ${user}`); }
-  catch (e) {
-    console.log(bad(`could not grant: ${netReason(e)}`));
-    // Filters without a grant are inert, but leaving them behind would make a later full
-    // share silently scoped — the case the widening path below exists to catch.
+  // Full: the wildcard. Scoped: first take back any wildcard an earlier share left — it
+  // would reach straight past the filters — then grant the filtered rooms one by one.
+  // A failure part-way leaves the grantee with LESS than before, never more.
+  try {
     if (scope) {
+      await run(`REVOKE SELECT ON ${wildcard} FROM ${user}`);
+      for (const tgt of scopedTargets) await run(`GRANT SELECT ON ${tgt} TO ${user}`);
+    } else {
+      await run(`GRANT SELECT ON ${wildcard} TO ${user}`);
+    }
+  } catch (e) {
+    console.log(bad(`could not grant: ${netReason(e)}`));
+    if (scope) {
+      // Withdraw whatever part of the table-by-table grant landed, THEN drop the filters
+      // (grant before filters, the same order --revoke uses). Filters without a grant are
+      // inert, but left behind they would make a later full share silently scoped.
+      for (const tgt of scopedTargets) { try { await run(`REVOKE SELECT ON ${tgt} FROM ${user}`); } catch { /* best effort */ } }
       for (const room of ROOM_TYPES) {
         try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); } catch { /* best effort */ }
       }
+      console.log(`  '${user}' was left with no access to your rooms — nothing wider than before.`);
     }
     return 1;
   }
@@ -3306,6 +3334,8 @@ async function cmdShare() {
       console.log(`  ${room.padEnd(11)} ${r[0].n} of ${all[0].n} rows`);
     } catch { /* counting is a courtesy */ }
   }
+  console.log('  Not shared under a scope: the stat tables, meta and events — they carry no');
+  console.log('  per-session filter, so a scoped reader gets none of them.');
   console.log(`  Widen to everything:  memhouse share ${user}`);
   console.log(`  Withdraw:             memhouse share ${user} --revoke`);
   return 0;
@@ -3321,7 +3351,10 @@ async function cmdShare() {
  * true = permissive, false = restrictive, null = could not tell.
  */
 async function probePermissive(cfg, db) {
-  const t = `_mh_probe_${process.pid}`;
+  // Inside the member's own pattern: the one place the one-layout grant lets them create a
+  // table and put a policy on it. A bare `_mh_probe_<pid>` sat outside it, was refused on
+  // every server, and turned this check into a permanent "could not verify".
+  const t = `${cfg.user}__mh_probe_${process.pid}`;
   const run = (sql) => ch(cfg, sql, { database: db });
   try {
     await run(`CREATE TABLE IF NOT EXISTS ${t} (x UInt8) ENGINE = MergeTree ORDER BY x`);
