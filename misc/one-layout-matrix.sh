@@ -116,6 +116,18 @@ $CLI share bob --revoke --yes >/dev/null 2>&1
 out=$($CLI share bob --only "" --yes 2>&1)
 printf '%s' "$out" | grep -q "needs a scope" && ok "--only \"\" is refused" || bad "--only \"\" was not refused" "$(printf '%s' "$out" | tail -2)"
 denied "$(M bob bpw "SELECT count() FROM mem.alice_messages")" && ok "  and grants nothing" || bad "LEAK: --only \"\" granted a share"
+# A re-scope whose cleanup REVOKE is refused must keep the filters (Codex P1 on #13): the
+# grantee still holds the table grants of the earlier scoped share, and dropping their
+# filters would expose every row.
+$CLI share bob --only project=alpha --yes >/dev/null 2>&1
+A "REVOKE GRANT OPTION FOR SELECT ON mem.alice_* FROM alice" >/dev/null
+out=$($CLI share bob --only project=beta --yes 2>&1)
+r=$(M bob bpw "SELECT groupUniqArray(project) FROM mem.alice_messages FORMAT TSV")
+case "$r" in *alpha*beta*|*beta*alpha*) bad "LEAK: a failed re-scope left bob unfiltered" "$r";; ''|*Exception*) bad "  bob's read failed unexpectedly" "$r";; *) ok "  a re-scope whose revoke is refused keeps bob filtered ($r)";; esac
+printf '%s' "$out" | grep -q "filters stay in place" && ok "  and says the filters stay" || bad "  the failed re-scope did not explain itself" "$(printf '%s' "$out" | tail -3)"
+A "GRANT SELECT ON mem.alice_* TO alice WITH GRANT OPTION" >/dev/null
+$CLI share bob --revoke --yes >/dev/null 2>&1
+denied "$(M bob bpw "SELECT count() FROM mem.alice_messages")" && ok "  and a later revoke still clears it" || bad "  bob still reads after the final revoke"
 A "REVOKE CREATE ROW POLICY ON mem.alice_* FROM alice" >/dev/null
 out=$($CLI share bob --only project=alpha --yes 2>&1)
 printf '%s' "$out" | grep -q "NOTHING WAS GRANTED" && ok "a scoping failure grants nothing" || bad "scoping failure did not say it granted nothing" "$(printf '%s' "$out" | tail -2)"

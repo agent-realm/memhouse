@@ -3267,11 +3267,12 @@ async function cmdShare() {
         made.push(room);
       } catch (e) {
         console.log(bad(`could not scope ${room}: ${e.message.split('\n')[0]}`));
-        for (const r of made) {
-          try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, r)} ON ${db}.${mine.physical[r]}`); } catch { /* best effort */ }
-        }
-        console.log(`  NOTHING WAS GRANTED — '${user}' can read no more than before, and any`);
-        console.log('  filters this attempt created have been removed.');
+        // Do NOT drop what this attempt wrote. `OR REPLACE` may have just overwritten the
+        // filter of an EXISTING scoped share, and dropping it would leave that grantee's
+        // table grant unfiltered — failing open. A filter without a grant is inert, and the
+        // full-share and --revoke paths both clear leftovers.
+        console.log(`  NOTHING WAS GRANTED — '${user}' can read no more than before.`);
+        if (made.length) console.log(`  The filters written for ${made.join(', ')} are left in place; \`memhouse share ${user} --revoke\` clears them.`);
         return 1;
       }
     }
@@ -3290,14 +3291,24 @@ async function cmdShare() {
   } catch (e) {
     console.log(bad(`could not grant: ${netReason(e)}`));
     if (scope) {
-      // Withdraw whatever part of the table-by-table grant landed, THEN drop the filters
-      // (grant before filters, the same order --revoke uses). Filters without a grant are
-      // inert, but left behind they would make a later full share silently scoped.
-      for (const tgt of scopedTargets) { try { await run(`REVOKE SELECT ON ${tgt} FROM ${user}`); } catch { /* best effort */ } }
-      for (const room of ROOM_TYPES) {
-        try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); } catch { /* best effort */ }
+      // Withdraw the grant, and drop the filters ONLY once that is confirmed. If any REVOKE
+      // is refused — the owner lost the grant option, a transient error — the grantee may
+      // still hold a table-level SELECT from an earlier scoped share, and dropping its
+      // filter would expose every row. Leaving a filter behind costs nothing: without a
+      // grant it is inert, and the full-share and --revoke paths both clear it.
+      let withdrawn = true;
+      for (const tgt of [wildcard, ...scopedTargets]) {
+        try { await run(`REVOKE SELECT ON ${tgt} FROM ${user}`); } catch { withdrawn = false; }
       }
-      console.log(`  '${user}' was left with no access to your rooms — nothing wider than before.`);
+      if (withdrawn) {
+        for (const room of ROOM_TYPES) {
+          try { await run(`DROP ROW POLICY IF EXISTS ${share.policyName(user, room)} ON ${db}.${mine.physical[room]}`); } catch { /* inert without a grant */ }
+        }
+        console.log(`  '${user}' was left with no access to your rooms — nothing wider than before.`);
+      } else {
+        console.log(`  Could not confirm '${user}' lost every grant, so the filters stay in place — whatever`);
+        console.log(`  '${user}' can still reach is filtered. Retry, or: memhouse share ${user} --revoke`);
+      }
     }
     return 1;
   }
