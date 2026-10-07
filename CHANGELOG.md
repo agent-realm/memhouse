@@ -11,8 +11,10 @@ migration path is planned work, not a promise the old versions can cash.
   stdin), from `MEMHOUSE_ADMIN_PASSWORD` (so `with-secret` lends it to one command), from a
   credential this install already keeps for the same admin, or from a prompt. Before, giving
   `--admin-user` as a flag switched every other source off, so the only scriptable admin
-  path put the password on argv, where `ps` and shell history keep it. `--admin-password`
-  still works, with a warning. Found by O's sandbox rehearsal.
+  path put the password on argv, where `ps` and shell history keep it. Found by O's sandbox
+  rehearsal. **Deprecation:** `--admin-password <value>` still works in this release, with a
+  warning, and is **removed in 0.19.0**, the next minor release after this one (deprecated
+  2026-10-08). Move scripts to `MEMHOUSE_ADMIN_PASSWORD` or `--admin-password-file`.
 - **An admin install no longer saves the admin credential**, unless `--keep-admin` (or the
   env file already keeps that same admin). The help said it was saved; every agent-facing
   text (the install prompt, invite's advice, `/mem:admin`) said it never was. Credentials

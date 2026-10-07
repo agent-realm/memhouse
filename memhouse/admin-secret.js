@@ -66,7 +66,7 @@ function resolveAdminPassword({ adminUser, flags = {}, env = process.env, stored
 }
 
 // One line for a caller that took the password off argv anyway.
-const ARGV_WARNING = 'a password on the command line is visible in `ps` and shell history — prefer MEMHOUSE_ADMIN_PASSWORD (with-secret) or --admin-password-file -';
+const ARGV_WARNING = '--admin-password on the command line is visible in `ps` and shell history, and is deprecated: it is removed in 0.19.0. Use MEMHOUSE_ADMIN_PASSWORD (with-secret) or --admin-password-file -';
 
 // What to tell a caller with no TTY and no password from any source.
 function missingAdminPasswordHelp(adminUser) {
