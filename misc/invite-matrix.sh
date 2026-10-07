@@ -191,10 +191,32 @@ else
   case "$out" in *"agent conversation memory"*) ok "bare memhouse with no invite prints help" ;; *) bad "bare memhouse without an invite did not print help" "$(printf '%s' "$out" | head -2)" ;; esac
 fi
 
+# ── the admin password never has to go on the command line (O rehearsal, finding 6) ──
+H="$WORK/adm-env"; mkdir -p "$H"
+out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_envadm --member-password epw --yes --no-ship </dev/null 2>&1 || true)
+case "$out" in *installed*) ok "install --admin-user takes the password from MEMHOUSE_ADMIN_PASSWORD (no flag, no TTY)" ;; *) bad "the env admin password was ignored" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
+grep -q '^MEMHOUSE_ADMIN_PASSWORD' "$H/env" 2>/dev/null && bad "  the admin password was saved without --keep-admin" || ok "  and is not saved"
+printf '%s' "$out" | grep -qF -- "$ADMPW" && bad "  the admin password was printed" || ok "  and never printed"
+H="$WORK/adm-stdin"; mkdir -p "$H"
+out=$(printf '%s\n' "$ADMPW" | MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --admin-password-file - --member im_stdinadm --member-password spw --yes --no-ship 2>&1 || true)
+case "$out" in *installed*) ok "--admin-password-file - reads it from stdin" ;; *) bad "the stdin admin password failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
+H="$WORK/adm-keep"; mkdir -p "$H"
+out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_keepadm --member-password kpw --keep-admin --yes --no-ship </dev/null 2>&1 || true)
+grep -q "^MEMHOUSE_ADMIN_USER='$ADM'" "$H/env" 2>/dev/null && ok "--keep-admin saves it — on request only" || bad "--keep-admin did not save it" "$(printf '%s' "$out" | tail -2)"
+H="$WORK/adm-none"; mkdir -p "$H"
+out=$(env -u MEMHOUSE_ADMIN_PASSWORD MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --member im_noadm --member-password npw --yes --no-ship </dev/null 2>&1 || true)
+case "$out" in *"no TTY to prompt on"*with-secret*) ok "no password anywhere: refused, naming the off-argv ways" ;; *) bad "a missing admin password was not explained" "$(printf '%s' "$out" | head -3)" ;; esac
+H="$WORK/adm-stray"; mkdir -p "$H"
+out=$(MEMHOUSE_HOME="$H" $CLI install --url "$URL" --user im_member --password mpw --keep-admin --yes --no-ship </dev/null 2>&1 || true)
+case "$out" in *"only read with --admin-user"*) ok "--keep-admin on a member install is refused, not ignored" ;; *) bad "--keep-admin without --admin-user was not refused" "$(printf '%s' "$out" | head -2)" ;; esac
+
 # ── cleanup ────────────────────────────────────────────────────────────────────────
-for u in im_member im_target im_made im_occupy im_bare; do
+for u in im_member im_target im_made im_occupy im_bare im_envadm im_stdinadm im_keepadm im_noadm; do
   q "DROP USER IF EXISTS $u" >/dev/null 2>&1 || true
   q "DROP DATABASE IF EXISTS $u SYNC" >/dev/null 2>&1 || true
+  for t in $(q "SELECT name FROM system.tables WHERE database='mem' AND startsWith(name, '${u}_') FORMAT TSV" 2>/dev/null); do
+    q "DROP TABLE IF EXISTS mem.$t SYNC" >/dev/null 2>&1 || true
+  done
 done
 
 echo "  $pass passed, $fail failed"

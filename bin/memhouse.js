@@ -147,7 +147,7 @@ function requireConfig(cfg, what) {
 }
 
 function childEnv(cfg, override = {}) {
-  return {
+  const env = {
     ...process.env,
     // Set only by the install path, which prints its own refusal for this case.
     ...(cfg._quietDenied ? { MEMHOUSE_QUIET_DENIED: '1' } : {}),
@@ -159,6 +159,11 @@ function childEnv(cfg, override = {}) {
       // environment would write into another member's rooms.
     ...override,
   };
+  // A daemon never needs the admin credential. Inherited from an exported shell variable
+  // it would sit in the shipper's and dashboard's environment for their whole lifetime.
+  delete env.MEMHOUSE_ADMIN_USER;
+  delete env.MEMHOUSE_ADMIN_PASSWORD;
+  return env;
 }
 
 function writeEnvFile(cfg) {
@@ -349,6 +354,34 @@ function netReason(e) {
 // Read without echoing. `onboard` and `setup` both prompt for the house password and
 // printed it back on the terminal — in a wizard whose whole audience is someone typing a
 // credential in front of whoever is in the room.
+// The admin password for `adminUser`: --admin-password-file (or - for stdin), then
+// --admin-password (warned), then MEMHOUSE_ADMIN_PASSWORD, then the stored credential
+// of that SAME admin, then a TTY prompt. null = none, and the caller has been told how
+// to give one without putting it on the command line. See memhouse/admin-secret.js.
+async function adminPasswordFor(adminUser) {
+  const as = require(path.join(REPO_ROOT, 'memhouse', 'admin-secret'));
+  const file = readEnvFile();
+  let r;
+  try {
+    r = as.resolveAdminPassword({
+      adminUser, flags, stored: { user: file.MEMHOUSE_ADMIN_USER, password: file.MEMHOUSE_ADMIN_PASSWORD },
+    });
+  } catch (e) { console.log(bad(e.message)); return null; }
+  // stderr: `members --json` and friends must emit nothing but JSON on stdout.
+  if (r.source === 'flag') console.error(warn(as.ARGV_WARNING));
+  if (r.password !== undefined) return r.password;
+  if (process.stdin.isTTY) {
+    const p = await askSecret(`  password for '${adminUser}'`);
+    if (p) return p;
+    console.log(bad('no password given'));
+    return null;
+  }
+  const lines = as.missingAdminPasswordHelp(adminUser);
+  console.log(bad(lines[0]));
+  for (const l of lines.slice(1)) console.log(l);
+  return null;
+}
+
 function askSecret(label, dflt = '') {
   if (!process.stdin.isTTY) return ask(label, dflt);
   return new Promise((resolve) => {
@@ -414,22 +447,23 @@ memhouse ${PKG.version} — agent conversation memory across 17 editors
 Setup        onboard              interactive wizard: discover → configure → ship → start
              install              scriptable setup (--url --user --password --db [--yes] [--no-ship])
                                   --print-sql            print the SQL, run it yourself
-                                  with admin: --admin-user --admin-password [--member NAME]
-                                  builds house + user + rooms + grants, then verifies as
-                                  the member. The admin credential IS written to the env
-                                  file (mode 600) so invite/members need no flags; delete
-                                  those two lines if you would rather pass it each time.
+                                  with admin: --admin-user NAME [--member NAME] builds the
+                                  member + grants, then verifies as the member. The admin
+                                  password comes from MEMHOUSE_ADMIN_PASSWORD (with-secret),
+                                  --admin-password-file FILE|- (stdin), or a prompt; plain
+                                  --admin-password works but shows in ps/history. It is NOT
+                                  saved unless --keep-admin (then invite needs no flags).
                                   --env FILE installs from an invite file (see: invite)
              invite <name>        mint a member and write the env file their install needs
-                                  (--url [--db NAME] [--out FILE]; --admin-user and
-                                  --admin-password only if this install keeps no admin
+                                  (--url [--db NAME] [--out FILE]; --admin-user — password
+                                  as for install — only if this install keeps no admin
                                   credential). They get rooms named for them, <db>.<name>_*,
                                   and one grant on exactly those. Refuses a name whose rooms
                                   already hold messages; --adopt takes them over (same
                                   person, new credential). Not an admin? --print-sql prints
                                   the plan to hand to whoever is.
              passwd               rotate this member's password + rewrite the env file
-                                  (admin-assisted: --admin-user --admin-password)
+                                  (admin-assisted: --admin-user, password as for install)
              setup                (re)write the connection config only (--yes = no prompts)
              discover             read-only preflight: editors, sessions, reachable ClickHouses
              uninstall            stop daemons + service, clear runtime state (asks; --yes).
@@ -1029,6 +1063,7 @@ async function cmdInstall({ interactive }) {
   }
   let cfg = resolveConfig();
   const adminUser = flags['admin-user'];
+  if (adminUser === true) { console.log(bad('--admin-user needs a name, e.g. --admin-user default')); return 1; }
 
   // The house name is spliced unquoted into CREATE DATABASE and GRANT ALL ON <db>.* —
   // validate it HERE, on every install mode, not only where deploy happens to choose it.
@@ -1064,11 +1099,22 @@ async function cmdInstall({ interactive }) {
   if (adminUser) {
     const member = resolveMemberHandle();
     if (!member) return 1;
+    // From a file, stdin, the environment or a prompt — never REQUIRED on argv.
+    const adminPassword = await adminPasswordFor(String(adminUser));
+    if (adminPassword === null) return 1;
     const built = await adminBootstrap(cfg, {
-      user: adminUser, password: flags['admin-password'] || '', member,
+      user: adminUser, password: adminPassword, member,
     });
     if (!built) return 1;
-    cfg = built;
+    // The admin credential is used for this install and NOT saved, unless asked
+    // (--keep-admin) or this env file already keeps that same admin (an operator seat).
+    // It used to be saved every time, which the help said and every agent-facing text
+    // (the install prompt, invite's own advice, /mem:admin) contradicted — and a saved
+    // admin password ends up wherever the env file goes.
+    const keepAdmin = flags['keep-admin'] === true || readEnvFile().MEMHOUSE_ADMIN_USER === String(adminUser);
+    cfg = keepAdmin
+      ? { ...built, adminUser: String(adminUser), adminPassword }
+      : { ...built, adminUser: '', adminPassword: '' };
   // BEFORE the env file and BEFORE the ship. INSTALL.md's contract is that the config is
   // written last, "after everything above has proved out", because a config left by a
   // failed install is read as truth by the next command. Placed after the write, a
@@ -1099,8 +1145,13 @@ async function cmdInstall({ interactive }) {
       console.log(`  every machine you install as '${cfg.user}' writes into the same rooms; this is what tells them apart`);
     }
     console.log(ok('installed'));
-    console.log('  adding a housemate later — the admin credential is in your env file, so no flags:');
-    console.log(`     memhouse invite <name> --url ${cfg.url}`);
+    if (cfg.adminUser) {
+      console.log('  adding a housemate later — the admin credential is kept in your env file, so no flags:');
+      console.log(`     memhouse invite <name> --url ${cfg.url}`);
+    } else {
+      console.log(`  the admin credential was used for this install and not saved. To invite later:`);
+      console.log(`     with-secret MEMHOUSE_ADMIN_PASSWORD=<reference> -- memhouse invite <name> --url ${cfg.url} --admin-user ${adminUser}`);
+    }
     printGettingStarted(cfg);
     await finishInvite(cfg);
     // The first ship loads the whole backlog; do it in the background so install returns
@@ -1114,7 +1165,9 @@ async function cmdInstall({ interactive }) {
   // authenticating as memhouse_root instead: the three flags did nothing, --yes satisfied
   // haveAll so no prompt asked who you were, and resolveConfig's default was used AS A
   // CREDENTIAL. Refuse rather than do something else silently.
-  const adminOnly = ['member', 'member-password'].filter((k) => flags[k] !== undefined);
+  // Every flag that only means something to the admin bootstrap. Left out, it was silently
+  // ignored on a member install (`--keep-admin` was — Codex P2 on #14).
+  const adminOnly = ['member', 'member-password', 'keep-admin', 'admin-password-file', 'admin-password'].filter((k) => flags[k] !== undefined);
   if (!adminUser && adminOnly.length) {
     console.log(bad(`--${adminOnly.join(', --')} ${adminOnly.length > 1 ? 'are' : 'is'} only read with --admin-user`));
     console.log('  Those flags provision a member, which needs house admin. Without them this');
@@ -3643,8 +3696,16 @@ async function cmdInvite() {
   // --admin-* wins. Otherwise the admin credential this install keeps beside its member
   // credential (a house you deployed or administer). Failing both, the member credential
   // itself is tried below — which works for whoever set the house up as its superuser.
-  let adminUser = flags['admin-user'] || cfg.adminUser || undefined;
-  let adminPass = flags['admin-password'] || (!flags['admin-user'] && cfg.adminPassword) || undefined;
+  if (flags['admin-user'] === true) { console.log(bad('--admin-user needs a name, e.g. --admin-user default')); return 1; }
+  let adminUser = (flags['admin-user'] ? String(flags['admin-user']) : '') || cfg.adminUser || undefined;
+  let adminPass;
+  if (adminUser) {
+    // --admin-password-file / --admin-password / MEMHOUSE_ADMIN_PASSWORD / the stored one
+    // for this same admin / a prompt. `--admin-user` as a flag used to switch the
+    // environment off, so the only scriptable path put the password on argv.
+    adminPass = await adminPasswordFor(adminUser);
+    if (adminPass === null) return 1;
+  }
   if (!adminUser) {
     const c = requireConfig(cfg, 'invite');
     if (!c.user) return 1;
@@ -3687,28 +3748,16 @@ async function cmdInvite() {
       console.log('  keeps one housemate out of another house.');
       console.log('');
       console.log('  If you RUN this ClickHouse — use the admin credential you created it with');
-      console.log('  (for a stock server that is `default`); memhouse never stores it, so pass it');
-      console.log('  per invite and it is used for one connection and discarded:');
-      console.log(`     memhouse invite ${name} --url ${url} --admin-user default`);
-      console.log('     (leave --admin-password off and it is prompted for, so it stays out of');
-      console.log('      your shell history and the process list)');
+      console.log('  (for a stock server that is `default`); memhouse does not store it, so give it');
+      console.log('  per invite — used for one connection and discarded, never on the command line:');
+      console.log(`     with-secret MEMHOUSE_ADMIN_PASSWORD=<reference> -- memhouse invite ${name} --url ${url} --admin-user default`);
+      console.log(`     memhouse invite ${name} --url ${url} --admin-user default      (prompts on a terminal)`);
       console.log('');
       console.log('  If SOMEONE ELSE runs it — you cannot invite, and no flag changes that.');
       console.log('  Print the statements and send them to whoever administers the server:');
       console.log(`     memhouse invite ${name} --url ${url} --print-sql`);
       return 1;
     }
-  } else if (adminPass === undefined) {
-    // Prompt rather than refuse. A password given as --admin-password lands in the
-    // process list for the life of the request and in shell history unless the caller
-    // remembered a leading space; asking for it keeps it in this process only.
-    // Non-TTY (an agent, CI) still gets the old refusal — there is nobody to ask.
-    if (!process.stdin.isTTY) {
-      console.log(bad('--admin-user given without --admin-password (no TTY to prompt on)'));
-      return 1;
-    }
-    adminPass = await askSecret(`  password for '${adminUser}'`);
-    if (!adminPass) { console.log(bad('no password given')); return 1; }
   }
 
   // WHERE to connect to provision. --url is the address the INVITEE will use — it may be
@@ -3888,12 +3937,15 @@ async function cmdPasswd({ quiet = false, forNext = null } = {}) {
         }
       }
     }
-    if (!adminUser || flags['admin-password'] === undefined) {
+    if (!adminUser || adminUser === true) {
       console.log(bad(`'${cfg.user}' cannot change its own password on this house (pre-0.11 member, or no access management).`));
-      console.log('  Rotate with an admin credential:  memhouse passwd --admin-user <a> --admin-password <p>');
+      console.log('  Rotate with an admin credential (password from MEMHOUSE_ADMIN_PASSWORD, --admin-password-file, or a prompt):');
+      console.log('     memhouse passwd --admin-user <a>');
       return 1;
     }
-    const via = { ...cfg, user: adminUser, password: flags['admin-password'] || '' };
+    const adminPassword = await adminPasswordFor(String(adminUser));
+    if (adminPassword === null) return 1;
+    const via = { ...cfg, user: adminUser, password: adminPassword };
     try { await ch(via, `ALTER USER \`${cfg.user}\` IDENTIFIED BY '${escPw}'`, { database: '' }); }
     catch (e) { console.log(bad(`could not rotate: ${e.message}`)); return 1; }
   }
@@ -4144,7 +4196,8 @@ async function cmdUninstall() {
       const convert = require(path.join(REPO_ROOT, 'memhouse', 'convert'));
       const db = flags.db && flags.db !== true ? String(flags.db) : 'mem';
       const au = flags['admin-user'] && flags['admin-user'] !== true ? String(flags['admin-user']) : (cfg.adminUser || null);
-      const ap = flags['admin-password'] && flags['admin-password'] !== true ? String(flags['admin-password']) : (cfg.adminPassword || '');
+      const ap = au ? await adminPasswordFor(au) : '';
+      if (ap === null) { process.exitCode = 1; break; }
       if (!au) { console.log(bad('convert needs an admin credential: --admin-user/--admin-password (or the one this instance keeps)')); process.exitCode = 1; break; }
       const who = { ...cfg, user: au, password: ap };
       const only = flags.member && flags.member !== true ? String(flags.member) : null;
@@ -4232,7 +4285,8 @@ async function cmdUninstall() {
       // --admin-* wins; otherwise the admin credential this install keeps (a house you
       // deployed or administer). A member alone cannot read other accounts' grants.
       const au = flags['admin-user'] && flags['admin-user'] !== true ? String(flags['admin-user']) : (cfg.adminUser || null);
-      const ap = flags['admin-password'] && flags['admin-password'] !== true ? String(flags['admin-password']) : (cfg.adminPassword || '');
+      const ap = au ? await adminPasswordFor(au) : '';
+      if (ap === null) { process.exitCode = 1; break; }
       // Reading ANOTHER account's grants needs privilege; without it ClickHouse simply
       // returns fewer rows. Say so rather than presenting a short list as the whole truth.
       const who = au ? { ...cfg, user: au, password: ap } : cfg;

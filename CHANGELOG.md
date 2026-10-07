@@ -6,6 +6,25 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **An admin password never has to go on the command line.** `install --member`, `invite`,
+  `passwd`, `convert` and `members` take it from `--admin-password-file <file>` (or `-` for
+  stdin), from `MEMHOUSE_ADMIN_PASSWORD` (so `with-secret` lends it to one command), from a
+  credential this install already keeps for the same admin, or from a prompt. Before, giving
+  `--admin-user` as a flag switched every other source off, so the only scriptable admin
+  path put the password on argv, where `ps` and shell history keep it. Found by O's sandbox
+  rehearsal. **Deprecation:** `--admin-password <value>` still works in this release, with a
+  warning, and is **removed in 0.19.0**, the next minor release after this one (deprecated
+  2026-10-08). Move scripts to `MEMHOUSE_ADMIN_PASSWORD` or `--admin-password-file`.
+- **An admin install no longer saves the admin credential**, unless `--keep-admin` (or the
+  env file already keeps that same admin). The help said it was saved; every agent-facing
+  text (the install prompt, invite's advice, `/mem:admin`) said it never was. Credentials
+  already saved keep working.
+- **A daemon never carries the admin credential.** Service units drop `MEMHOUSE_ADMIN_*`
+  before inlining the env, and the shipper and dashboard are started without it even when
+  the shell exported it. `deploy --local` hands the ClickHouse password to `docker run` by
+  environment, not as `-e CLICKHOUSE_PASSWORD=<value>` on its argv. A unit test now fails on
+  any spawn/exec in the shipped code that passes a password in argv.
+
 - **A scoped share now shares only what its scope filters.** `memhouse share <user> --only
   <scope>` granted `SELECT` on the member's whole pattern (`mem.<member>_*`) while its row
   policies covered only `sessions`, `messages` and `tool_calls`. The grantee could therefore

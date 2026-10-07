@@ -159,7 +159,9 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
     '--label', `${OWNER_LABEL}=1`,
     '--restart', 'unless-stopped',
     '-e', `CLICKHOUSE_USER=${user}`,
-    '-e', `CLICKHOUSE_PASSWORD=${password}`,
+    // By NAME only: the value goes in the child's environment below, never in argv, where
+    // `ps` would show it for as long as `docker run` lives.
+    '-e', 'CLICKHOUSE_PASSWORD',
     // The house itself is created by `memhouse install`, not here: pre-creating it
     // would skip the step an install is supposed to prove.
     '-e', 'CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1',
@@ -168,7 +170,7 @@ function up({ password, port = 8123, tag = DEFAULT_TAG, user = 'memhouse_root' }
     '--ulimit', 'nofile=262144:262144',
     image,
   ];
-  const r = spawnSync(eng, args, { encoding: 'utf-8' });
+  const r = spawnSync(eng, args, { encoding: 'utf-8', env: { ...process.env, CLICKHOUSE_PASSWORD: password } });
   if (r.status !== 0) {
     // The volume exists but the image never touched it — an unpullable tag, a port bind
     // that failed. Leaving it labelled would make the NEXT deploy read an empty volume as
