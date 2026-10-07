@@ -86,6 +86,10 @@ Useful flags:
 The admin password never needs to be on the command line. See
 [Admin credentials](admin-credentials.md).
 
+`install --env <file>` reads the connection **only** from the file. Exported `MEMHOUSE_*`
+variables are ignored, including `MEMHOUSE_EDITORS` and `MEMHOUSE_CLAUDE_ROOTS`. To narrow
+what an invite install ships, pass `--editors` / `--claude-roots` as flags.
+
 ### What install checks
 
 Before it writes any config, install connects, confirms who the credential is, and checks

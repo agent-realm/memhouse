@@ -85,7 +85,8 @@ Afterwards, point each member at the new URL with `memhouse setup --url …`.
 
 memhouse does not back up the house. Use ClickHouse's own `BACKUP DATABASE mem TO …`, to a
 disk or an object store, on a schedule, and test a `RESTORE` into a scratch server.
-[`examples/04-self-hosted-team`](../../examples/) shows a nightly job.
+[`examples/04-self-hosted-team`](../../examples/04-self-hosted-team/README.md) shows a nightly job,
+rotation, and a tested restore.
 
 - **Keep backups as private as the house.** They hold every member's transcripts.
 - **Backups outlive deletions.** A row removed from the house remains in every backup
