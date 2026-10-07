@@ -193,18 +193,18 @@ fi
 
 # ── the admin password never has to go on the command line (O rehearsal, finding 6) ──
 H="$WORK/adm-env"; mkdir -p "$H"
-out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_envadm --member-password epw --yes --no-ship </dev/null 2>&1)
+out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_envadm --member-password epw --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *installed*) ok "install --admin-user takes the password from MEMHOUSE_ADMIN_PASSWORD (no flag, no TTY)" ;; *) bad "the env admin password was ignored" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
 grep -q '^MEMHOUSE_ADMIN_PASSWORD' "$H/env" 2>/dev/null && bad "  the admin password was saved without --keep-admin" || ok "  and is not saved"
 printf '%s' "$out" | grep -qF -- "$ADMPW" && bad "  the admin password was printed" || ok "  and never printed"
 H="$WORK/adm-stdin"; mkdir -p "$H"
-out=$(printf '%s\n' "$ADMPW" | MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --admin-password-file - --member im_stdinadm --member-password spw --yes --no-ship 2>&1)
+out=$(printf '%s\n' "$ADMPW" | MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --admin-password-file - --member im_stdinadm --member-password spw --yes --no-ship 2>&1 || true)
 case "$out" in *installed*) ok "--admin-password-file - reads it from stdin" ;; *) bad "the stdin admin password failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
 H="$WORK/adm-keep"; mkdir -p "$H"
-out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_keepadm --member-password kpw --keep-admin --yes --no-ship </dev/null 2>&1)
+out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_keepadm --member-password kpw --keep-admin --yes --no-ship </dev/null 2>&1 || true)
 grep -q "^MEMHOUSE_ADMIN_USER='$ADM'" "$H/env" 2>/dev/null && ok "--keep-admin saves it — on request only" || bad "--keep-admin did not save it" "$(printf '%s' "$out" | tail -2)"
 H="$WORK/adm-none"; mkdir -p "$H"
-out=$(env -u MEMHOUSE_ADMIN_PASSWORD MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --member im_noadm --member-password npw --yes --no-ship </dev/null 2>&1)
+out=$(env -u MEMHOUSE_ADMIN_PASSWORD MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --member im_noadm --member-password npw --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *"no TTY to prompt on"*with-secret*) ok "no password anywhere: refused, naming the off-argv ways" ;; *) bad "a missing admin password was not explained" "$(printf '%s' "$out" | head -3)" ;; esac
 
 # ── cleanup ────────────────────────────────────────────────────────────────────────
