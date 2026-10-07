@@ -4,6 +4,26 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **A scoped share now shares only what its scope filters.** `memhouse share <user> --only
+  <scope>` granted `SELECT` on the member's whole pattern (`mem.<member>_*`) while its row
+  policies covered only `sessions`, `messages` and `tool_calls`. The grantee could therefore
+  read `<member>_session_stats` in full — the opening prompt, folder, project and token totals
+  of EVERY session in every project — plus the model and tool stats, `meta`, `events`, and any
+  room the pattern matched later. A scoped share is now granted table by table, on exactly the
+  three filtered rooms; narrowing an existing full share takes the wildcard back first. A full
+  share (no `--only`) is unchanged and still reaches everything, by design. **Existing scoped
+  shares keep their old wildcard until re-run:** `memhouse share <user> --only <scope>` again
+  narrows it. Found by an agent reading the code.
+- **`--revoke` withdraws the grant before it drops the filters.** The old order failed open: a
+  `REVOKE` refused after the policies were gone left an unfiltered share behind.
+- **`--only ""` is refused.** An empty scope (`--only "$SCOPE"` with the variable unset) used
+  to fall through to a full share.
+- **The permissive-server check before a scoped share actually runs.** It built its probe
+  table outside the member's one-layout grant, was refused on every server, and always
+  reported "could not verify"; the table now lives inside `mem.<member>_*`.
+
 ## 0.18.9 — 2026-09-22
 
 - **The Sessions page rendered blank on a house with ~900+ sessions.** It asks for
