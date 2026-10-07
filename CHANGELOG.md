@@ -4,7 +4,13 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.10 — 2026-10-08
+
+Release notes: [`docs/releases/v0.18.10.md`](docs/releases/v0.18.10.md) — what changed, the
+upgrade steps, and the status of the 0.18.10 pre-tag list. A security release; everyone on
+0.18.x should upgrade. The subagent re-ship fix moves to 0.18.11. **The documentation
+standard (short README, `docs/` tutorials and guides, `examples/`, the `AGENTS.md`
+install section) is a hard gate for 0.19.0.**
 
 - **No command prints a member password (G23).**
   - `install --admin-user` used to show the generated password "once". It went into the
