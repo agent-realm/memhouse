@@ -190,6 +190,11 @@ function install({ shipJs, envFile, logDir, interval = 300, home = null, force =
   // another member's rooms — which either fails on permissions or, if it can read them,
   // quietly ships into the wrong place.
   const env = parseEnvFile(envFile);
+  // The shipper never uses the admin credential, and the unit inlines every key it is
+  // given — a kept admin password would land in a second file and in the daemon's
+  // environment for its whole life.
+  delete env.MEMHOUSE_ADMIN_USER;
+  delete env.MEMHOUSE_ADMIN_PASSWORD;
   // MEMHOUSE_HOME is not in the env file — it is where the env file itself lives — and a
   // service installed under a custom home must keep using it, or it reads a different
   // config after a reboot than the one just written.

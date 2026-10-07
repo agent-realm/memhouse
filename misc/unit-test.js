@@ -1441,5 +1441,60 @@ test('getChats chunks the cost scope so the request URI stays small', () => {
   assert.ok(!/computePerChatCosts\(f, \{\s*ids: rows\.map/.test(body), 'no unchunked call passing every row');
 });
 
+// ── an admin password never has to go on the command line (O rehearsal, finding 6) ──────
+test('admin password: file, stdin, flag, env, stored — in that order, never argv-only', () => {
+  const { resolveAdminPassword } = require('../memhouse/admin-secret');
+  const io = (content, tty = false) => ({ readFile: () => content, stdinIsTTY: tty });
+  // --admin-user given AND the environment holds the password: the env is honoured. This was
+  // the bug — a flagged admin user switched every other source off.
+  assert.deepStrictEqual(resolveAdminPassword({ adminUser: 'default', flags: { 'admin-user': 'default' }, env: { MEMHOUSE_ADMIN_PASSWORD: 'e' } }),
+    { password: 'e', source: 'env' });
+  assert.deepStrictEqual(resolveAdminPassword({ adminUser: 'default', flags: { 'admin-password-file': '/x' }, env: { MEMHOUSE_ADMIN_PASSWORD: 'e' }, io: io('f\n') }),
+    { password: 'f', source: 'file' }, 'a file beats the env and loses exactly one trailing newline');
+  assert.strictEqual(resolveAdminPassword({ adminUser: 'a', flags: { 'admin-password-file': '/x' }, io: io('pw  \n') }).password, 'pw  ', 'trailing spaces are part of a password');
+  assert.deepStrictEqual(resolveAdminPassword({ adminUser: 'a', flags: { 'admin-password-file': '-' }, io: io('s\n') }),
+    { password: 's', source: 'stdin' });
+  assert.throws(() => resolveAdminPassword({ adminUser: 'a', flags: { 'admin-password-file': '-' }, io: io('s', true) }), /stdin is a terminal/);
+  assert.throws(() => resolveAdminPassword({ adminUser: 'a', flags: { 'admin-password-file': '/x', 'admin-password': 'p' }, io: io('f') }), /one way/);
+  assert.throws(() => resolveAdminPassword({ adminUser: 'a', flags: { 'admin-password-file': true } }), /needs a path/);
+  assert.deepStrictEqual(resolveAdminPassword({ adminUser: 'a', flags: { 'admin-password': 'p' }, env: { MEMHOUSE_ADMIN_PASSWORD: 'e' } }),
+    { password: 'p', source: 'flag' }, 'still accepted (with a warning) — never required');
+  assert.deepStrictEqual(resolveAdminPassword({ adminUser: 'a', flags: {}, env: {}, stored: { user: 'a', password: 's' } }),
+    { password: 's', source: 'stored' });
+  assert.deepStrictEqual(resolveAdminPassword({ adminUser: 'b', flags: {}, env: {}, stored: { user: 'a', password: 's' } }),
+    { password: undefined, source: null }, "a stored password is never paired with a DIFFERENT admin user");
+});
+
+test('no child process is given a password in its argv', () => {
+  // Every spawn/exec call in the shipped code, with its options object's env removed: what
+  // is left is argv, and argv is world-readable through `ps` for the life of the process.
+  const roots = ['bin', 'memhouse', 'editors'].map((d) => path.join(__dirname, '..', d));
+  const files = [];
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    const f = path.join(d, e.name);
+    if (e.isDirectory()) { if (e.name !== 'node_modules') walk(f); } else if (f.endsWith('.js')) files.push(f);
+  } };
+  roots.forEach(walk);
+  const offenders = [];
+  for (const f of files) {
+    const src = fs.readFileSync(f, 'utf-8');
+    const re = /\b(spawnSync|spawn|execFileSync|execFile|execSync|exec)\s*\(/g;
+    let m;
+    while ((m = re.exec(src))) {
+      let depth = 0; let i = m.index + m[0].length - 1; const start = i;
+      for (; i < src.length; i++) { if (src[i] === '(') depth++; else if (src[i] === ')' && --depth === 0) break; }
+      const call = src.slice(start, i + 1)
+        .replace(/\benv\s*:\s*\{[^}]*\}/g, '')          // env: { ... }   — not argv
+        .replace(/\benv\s*:\s*[A-Za-z_.$()]+/g, '')      // env: childEnv(cfg)
+        .replace(/\/\/[^\n]*/g, '')                       // comments
+        // macOS `security find-generic-password` is a COMMAND NAME — the opt-in Claude
+        // subscription read (editors/claude.js) reads a secret out, it passes none in.
+        .replace(/find-generic-password/g, '');
+      if (/password|passwd/i.test(call)) offenders.push(`${path.relative(path.join(__dirname, '..'), f)}: ${call.replace(/\s+/g, ' ').slice(0, 120)}`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [], `a password reaches argv:\n  ${offenders.join('\n  ')}`);
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
