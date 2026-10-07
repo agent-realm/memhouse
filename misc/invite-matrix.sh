@@ -206,6 +206,9 @@ grep -q "^MEMHOUSE_ADMIN_USER='$ADM'" "$H/env" 2>/dev/null && ok "--keep-admin s
 H="$WORK/adm-none"; mkdir -p "$H"
 out=$(env -u MEMHOUSE_ADMIN_PASSWORD MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --member im_noadm --member-password npw --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *"no TTY to prompt on"*with-secret*) ok "no password anywhere: refused, naming the off-argv ways" ;; *) bad "a missing admin password was not explained" "$(printf '%s' "$out" | head -3)" ;; esac
+H="$WORK/adm-stray"; mkdir -p "$H"
+out=$(MEMHOUSE_HOME="$H" $CLI install --url "$URL" --user im_member --password mpw --keep-admin --yes --no-ship </dev/null 2>&1 || true)
+case "$out" in *"only read with --admin-user"*) ok "--keep-admin on a member install is refused, not ignored" ;; *) bad "--keep-admin without --admin-user was not refused" "$(printf '%s' "$out" | head -2)" ;; esac
 
 # ── cleanup ────────────────────────────────────────────────────────────────────────
 for u in im_member im_target im_made im_occupy im_bare im_envadm im_stdinadm im_keepadm im_noadm; do

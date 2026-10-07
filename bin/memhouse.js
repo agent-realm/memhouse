@@ -367,7 +367,8 @@ async function adminPasswordFor(adminUser) {
       adminUser, flags, stored: { user: file.MEMHOUSE_ADMIN_USER, password: file.MEMHOUSE_ADMIN_PASSWORD },
     });
   } catch (e) { console.log(bad(e.message)); return null; }
-  if (r.source === 'flag') console.log(warn(as.ARGV_WARNING));
+  // stderr: `members --json` and friends must emit nothing but JSON on stdout.
+  if (r.source === 'flag') console.error(warn(as.ARGV_WARNING));
   if (r.password !== undefined) return r.password;
   if (process.stdin.isTTY) {
     const p = await askSecret(`  password for '${adminUser}'`);
@@ -1164,7 +1165,9 @@ async function cmdInstall({ interactive }) {
   // authenticating as memhouse_root instead: the three flags did nothing, --yes satisfied
   // haveAll so no prompt asked who you were, and resolveConfig's default was used AS A
   // CREDENTIAL. Refuse rather than do something else silently.
-  const adminOnly = ['member', 'member-password'].filter((k) => flags[k] !== undefined);
+  // Every flag that only means something to the admin bootstrap. Left out, it was silently
+  // ignored on a member install (`--keep-admin` was — Codex P2 on #14).
+  const adminOnly = ['member', 'member-password', 'keep-admin', 'admin-password-file', 'admin-password'].filter((k) => flags[k] !== undefined);
   if (!adminUser && adminOnly.length) {
     console.log(bad(`--${adminOnly.join(', --')} ${adminOnly.length > 1 ? 'are' : 'is'} only read with --admin-user`));
     console.log('  Those flags provision a member, which needs house admin. Without them this');
