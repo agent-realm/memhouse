@@ -1,0 +1,158 @@
+# memhouse — a self-hosted team house.
+#
+# Three services, one file:
+#   clickhouse  the house. Not published: reachable only through the proxy.
+#   caddy       TLS in front of ClickHouse's HTTP port. A real certificate from Let's
+#               Encrypt for MEMHOUSE_DOMAIN, or Caddy's own CA (MEMHOUSE_TLS=internal).
+#   backup      the house and its accounts, every night, to their own volume; the
+#               last BACKUP_KEEP kept.
+#
+# Everything the containers need is inline (the `configs:` blocks), so this file is the
+# whole deployment. Settings come from a `.env` file beside it — see .env.example.
+#
+#   cp .env.example .env && chmod 600 .env    # then edit it
+#   docker compose up -d
+#
+# Pinned to the ClickHouse version memhouse's own production house runs. Upgrading is
+# changing CLICKHOUSE_TAG and `docker compose up -d` — see README.md first.
+#
+# Compose interpolates `$` everywhere in this file, config contents included, which is
+# why the shell variables inside the backup script are written `$$`.
+
+name: memhouse-team
+
+services:
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:${CLICKHOUSE_TAG:-26.7.1.1315}
+    restart: unless-stopped
+    environment:
+      # The image creates this account at first start and removes the passwordless
+      # `default` user. It administers the server: it invites members, nothing ships as it.
+      CLICKHOUSE_USER: ${MEMHOUSE_ADMIN_USER:-admin}
+      CLICKHOUSE_PASSWORD: ${MEMHOUSE_ADMIN_PASSWORD:?set MEMHOUSE_ADMIN_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    configs:
+      - source: clickhouse-memhouse
+        target: /etc/clickhouse-server/config.d/memhouse.xml
+    volumes:
+      - data:/var/lib/clickhouse
+      - backups:/backups
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  caddy:
+    image: docker.io/library/caddy:${CADDY_TAG:-2.10}
+    restart: unless-stopped
+    depends_on:
+      clickhouse: { condition: service_healthy }
+    environment:
+      MEMHOUSE_DOMAIN: ${MEMHOUSE_DOMAIN:?set MEMHOUSE_DOMAIN in .env}
+      MEMHOUSE_TLS: ${MEMHOUSE_TLS:-internal}
+    ports:
+      - "${MEMHOUSE_HTTPS_PORT:-443}:443"
+      # Port 80 answers Let's Encrypt's HTTP challenge and redirects everything else.
+      - "${MEMHOUSE_HTTP_PORT:-80}:80"
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy-data:/data
+
+  backup:
+    image: docker.io/clickhouse/clickhouse-server:${CLICKHOUSE_TAG:-26.7.1.1315}
+    restart: unless-stopped
+    depends_on:
+      clickhouse: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "/backup.sh"]
+    # The image declares a VOLUME at /var/lib/clickhouse; this service runs no server, and
+    # without the tmpfs every recreate would leave an anonymous volume behind.
+    tmpfs: [/var/lib/clickhouse]
+    environment:
+      CLICKHOUSE_USER: ${MEMHOUSE_ADMIN_USER:-admin}
+      CLICKHOUSE_PASSWORD: ${MEMHOUSE_ADMIN_PASSWORD:?set MEMHOUSE_ADMIN_PASSWORD in .env}
+      MEMHOUSE_DB: ${MEMHOUSE_DB:-mem}
+      BACKUP_AT: ${BACKUP_AT:-03:17}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BACKUP_ON_START: ${BACKUP_ON_START:-0}
+    configs:
+      - source: backup-script
+        target: /backup.sh
+    volumes:
+      - backups:/backups
+
+configs:
+  clickhouse-memhouse:
+    content: |
+      <clickhouse>
+        <!-- memhouse's scoped shares (memhouse share USER with a scope) filter the grantee
+             with row policies. A reader WITHOUT a policy must keep seeing rows, or scoping one
+             person hides the house from everyone else; `memhouse share` measures this and
+             refuses when it is off. Set explicitly so an image default can never move it. -->
+        <access_control_improvements>
+          <users_without_row_policies_can_read_rows>true</users_without_row_policies_can_read_rows>
+        </access_control_improvements>
+        <!-- Where BACKUP ... TO Disk('backups', ...) writes. -->
+        <storage_configuration>
+          <disks>
+            <backups><type>local</type><path>/backups/</path></backups>
+          </disks>
+        </storage_configuration>
+        <backups>
+          <allowed_disk>backups</allowed_disk>
+          <allowed_path>/backups/</allowed_path>
+        </backups>
+      </clickhouse>
+
+  caddyfile:
+    content: |
+      {$$MEMHOUSE_DOMAIN} {
+        # `internal`: Caddy's own CA (testing, or a private network whose clients trust
+        # it). An e-mail address: a Let's Encrypt certificate for MEMHOUSE_DOMAIN.
+        tls {$$MEMHOUSE_TLS}
+        reverse_proxy clickhouse:8123
+      }
+
+  backup-script:
+    content: |
+      #!/bin/bash
+      # Nightly backup at BACKUP_AT (UTC), keeping the newest BACKUP_KEEP. One file holds
+      # the house AND the accounts: users, their grants and the row policies of scoped
+      # shares live outside the database, and a restore without them is a house nobody
+      # can log in to. README.md has the restore.
+      set -uo pipefail
+      ACCESS="TABLE system.users, TABLE system.roles, TABLE system.row_policies, TABLE system.settings_profiles, TABLE system.quotas"
+      run() {
+        if [ "$$(clickhouse-client --host clickhouse --query "EXISTS DATABASE $$MEMHOUSE_DB")" != "1" ]; then
+          echo "$$(date -u +%FT%TZ) no database '$$MEMHOUSE_DB' yet (no member has installed) — nothing to back up"
+          return
+        fi
+        name="$$MEMHOUSE_DB-$$(date -u +%Y-%m-%d-%H_%M).zip"
+        if clickhouse-client --host clickhouse --query \
+             "BACKUP DATABASE $$MEMHOUSE_DB, $$ACCESS TO Disk('backups', '$$name')" >/dev/null; then
+          echo "$$(date -u +%FT%TZ) backup written: $$name"
+        else
+          echo "$$(date -u +%FT%TZ) backup FAILED: $$name" >&2
+        fi
+        ls -1t /backups/"$$MEMHOUSE_DB"-*.zip 2>/dev/null | tail -n +"$$((BACKUP_KEEP + 1))" | while read -r old; do
+          rm -f -- "$$old" && echo "$$(date -u +%FT%TZ) pruned: $$(basename "$$old")"
+        done
+      }
+      [ "$$BACKUP_ON_START" = "1" ] && run
+      while true; do
+        now=$$(date -u +%s)
+        next=$$(date -u -d "today $$BACKUP_AT" +%s)
+        [ "$$next" -le "$$now" ] && next=$$(date -u -d "tomorrow $$BACKUP_AT" +%s)
+        sleep $$((next - now))
+        run
+      done
+
+volumes:
+  data:
+  backups:
+  caddy-data:
