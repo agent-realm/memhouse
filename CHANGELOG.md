@@ -4,7 +4,16 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
+## 0.18.11 — 2026-10-08
+
+Release notes: [`docs/releases/v0.18.11.md`](docs/releases/v0.18.11.md). Read its upgrade
+section first: the first pass after the upgrade re-sends every stored session with
+subagents once.
+
+- Sessions with subagents ship only their new rows.
+- **Security:** `invite` no longer sends a stored credential to `--url` (G4).
+- The 0.18.10 pre-tag list is finished, and the gentar kit is v0.9.3.
+- **No drill was run for this release; waived (2026-10-08) under the pilot's 0.18.10 ruling. The drill runs before 0.19.0.**
 
 - **A session with subagents ships only its new rows, like any other.** 0.18.8's tail-only
   shipping did not reach the sessions that grow the most: folded subagent rows were numbered
