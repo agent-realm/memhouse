@@ -84,7 +84,7 @@ Useful flags:
 | `--ensure-schema` | create any room or stats table the house is missing |
 
 The admin password never needs to be on the command line. See
-[Admin credentials](admin-credentials.md).
+[Admin password](admin-password.md).
 
 `install --env <file>` reads the connection **only** from the file. Exported `MEMHOUSE_*`
 variables are ignored, including `MEMHOUSE_EDITORS` and `MEMHOUSE_CLAUDE_ROOTS`. To narrow

@@ -61,8 +61,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Refuse anything this run did not make: the users, and any table under their room prefixes
+# (orphaned rooms can outlive their users). The cleanup below drops by those prefixes, so it
+# may only run when this check proved them empty first.
 existing=$(admin_q "SELECT count() FROM system.users WHERE name IN ('alice','bob','carol') FORMAT TSV")
 [ "$existing" = "0" ] || { echo "refusing: users alice/bob/carol already exist on this server — use a throwaway ClickHouse"; exit 1; }
+rooms=$(admin_q "SELECT count() FROM system.tables WHERE database = 'mem' AND (startsWith(name, 'alice_') OR startsWith(name, 'bob_') OR startsWith(name, 'carol_')) FORMAT TSV")
+[ "$rooms" = "0" ] || { echo "refusing: mem.alice_*/bob_*/carol_* tables already exist ($rooms) — use a throwaway ClickHouse"; exit 1; }
 CREATED=1
 
 # A loopback URL is right only through a tunnel; invite refuses one unless told so.

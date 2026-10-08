@@ -33,7 +33,7 @@ See [install and onboard](docs/guides/install.md).
 ```bash
 memhouse status                  # is it shipping, and how fresh
 memhouse search "auth error"     # full-text across every session, every machine
-memhouse resume claude:6b1f…     # prints the command that reopens that session
+memhouse resume claude-code:6b1f… # prints the command that reopens that session
 memhouse plugins install claude  # /mem:recall and four more skills for your agents
 ```
 

@@ -68,7 +68,7 @@ owned by root.
 - For a member, these are expected outside `mem.<you>_*` and the rooms shared with you.
   `memhouse whoami` shows what your credential may do.
 - For `invite`, `members` or `convert`: you need the admin credential. See
-  [Admin credentials](admin-credentials.md).
+  [Admin password](admin-password.md).
 - A room that should be yours but is refused usually means the house is older than this
   version. Run `memhouse doctor`, then `memhouse migrate` if it says so.
 

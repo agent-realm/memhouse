@@ -38,7 +38,7 @@ with-secret MEMHOUSE_ADMIN_PASSWORD=keychain:pilot/house-admin -- \
 ```
 
 Never paste the admin password into an agent's conversation. memhouse ships that
-conversation into the house. See [Admin credentials](admin-credentials.md).
+conversation into the house. See [Admin password](admin-password.md).
 
 Not the admin? `memhouse invite alice --url … --print-sql` prints the statements for
 whoever is.

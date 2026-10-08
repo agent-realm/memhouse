@@ -35,8 +35,27 @@ you run it.
 | `folder=` | the working directory |
 | `session=` | one session id |
 | `host=` | one machine (its fingerprint, as `status` shows it) |
-| `source=` | one editor: `claude`, `codex`, `cursor`, … |
+| `source=` | one editor, by the value stored in the `source` column (below) |
 | `since=` / `until=` | a date range: message time, or session creation time for `sessions` |
+
+`source=` compares against the stored value, which is not always the adapter name you
+use in `MEMHOUSE_EDITORS`. Claude Code rows, for example, say `claude-code`, not `claude`.
+The values:
+
+| editor | `source` |
+|---|---|
+| Claude Code | `claude-code` |
+| Codex | `codex` |
+| Cursor / Cursor Agent | `cursor` / `cursor-agent` |
+| VS Code / VS Code Insiders | `vscode` / `vscode-insiders` |
+| GitHub Copilot / Copilot for JetBrains | `copilot-cli` / `copilot-jetbrains` |
+| Gemini CLI | `gemini-cli` |
+| Zed, OpenCode, Goose, Kiro, Codebuff, Antigravity | `zed`, `opencode`, `goose`, `kiro`, `codebuff`, `antigravity` |
+| Devin / Devin Next | `devin` / `devin-next` |
+| Command Code | `commandcode` |
+
+To see what your rooms actually hold:
+`SELECT source, count() FROM mem.<you>_sessions FINAL GROUP BY source`.
 
 An empty scope (`--only ""`, or `--only "$SCOPE"` with the variable unset) is refused.
 It never falls back to a full share.

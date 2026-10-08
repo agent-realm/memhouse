@@ -1,7 +1,7 @@
 # Operate a house
 
 For whoever administers the ClickHouse server behind a house. Each command below takes the
-admin credential as described in [Admin credentials](admin-credentials.md). From Claude
+admin credential as described in [Admin password](admin-password.md). From Claude
 Code, `/mem:admin` does the same work and keeps the password out of the conversation.
 
 ## Who is here

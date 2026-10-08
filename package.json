@@ -24,7 +24,11 @@
     "docs/README.md",
     "docs/tutorials/",
     "docs/guides/",
-    "docs/releases/"
+    "docs/releases/",
+    "examples/",
+    "AGENTS.md",
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "start": "node bin/memhouse.js",

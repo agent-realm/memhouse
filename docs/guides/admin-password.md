@@ -1,4 +1,4 @@
-# Admin credentials
+# Admin password
 
 A few commands need the ClickHouse server's administrator:
 

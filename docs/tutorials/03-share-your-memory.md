@@ -29,7 +29,7 @@ Other scopes work the same way:
 
 - `session=…`
 - `host=…`
-- `source=…` (an editor)
+- `source=…` (an editor, as stored: `claude-code`, `codex`, …)
 - `folder=…`
 - `since=…` and `until=…` (dates)
 

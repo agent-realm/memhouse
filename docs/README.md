@@ -25,7 +25,7 @@ One common operation each.
 | [Daemons and services](guides/daemons.md) | keep the shipper and dashboard running, across reboots |
 | [Invite members](guides/invite.md) | bring a teammate into a house you administer |
 | [Share and revoke](guides/share.md) | let someone read your rooms, scoped or whole |
-| [Admin credentials](guides/admin-credentials.md) | run an admin command without the password reaching `ps`, history, or a transcript |
+| [Admin password](guides/admin-password.md) | run an admin command without the password reaching `ps`, history, or a transcript |
 | [Search, resume and skills](guides/search-and-resume.md) | find an old session, reopen it, let an agent answer from history |
 | [How memory is stored](guides/storage.md) | houses, rooms, epochs, machine identity, what is never deleted |
 | [Operate a house](guides/operate.md) | members, migrations, moving a house, backups |
@@ -42,4 +42,5 @@ One common operation each.
 - [`../memhouse/DESIGN.md`](../memhouse/DESIGN.md): the design, and why it is shaped this
   way.
 - [`../SECURITY.md`](../SECURITY.md): what holds, and what does not.
-- [`design/`](design/): designs captured before they are built.
+- [`docs/design/`](https://github.com/agent-realm/memhouse/tree/main/docs/design) (in the
+  repository): designs captured before they are built.
