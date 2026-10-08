@@ -8,9 +8,9 @@ migration path is planned work, not a promise the old versions can cash.
 
 Release notes: [`docs/releases/v0.18.10.md`](docs/releases/v0.18.10.md) — what changed, the
 upgrade steps, and the status of the 0.18.10 pre-tag list. A security release; everyone on
-0.18.x should upgrade. The subagent re-ship fix moves to 0.18.11. **The documentation
-standard (short README, `docs/` tutorials and guides, `examples/`, the `AGENTS.md`
-install section) is a hard gate for 0.19.0.**
+0.18.x should upgrade. The subagent re-ship fix moves to 0.18.11. The repository now
+meets the documentation standard (#17): a short README, `docs/` tutorials and guides,
+`examples/`, and the `AGENTS.md` install section.
 
 - **No command prints a member password (G23).**
   - `install --admin-user` used to show the generated password "once". It went into the
