@@ -1,12 +1,13 @@
 memhouse — tags and their changes
 ==================================
 
-Generated 2026-10-08 from `git tag` and CHANGELOG.md. 47 tags: 45 releases, plus 2
-non-release tags. The 0.17.1 entry comes from the v0.17.1 tag, because that release shipped
-on the retired release/0.17 line and is not in main's CHANGELOG. For 0.3.x and 0.4.x, the
-CHANGELOG has one grouped section per series, so this file uses each tag's message.
-CHANGELOG.md has the full text; from 0.18.10 on, docs/releases/ has one document per
-release.
+Generated 2026-10-08 from `git tag` and CHANGELOG.md. 47 tags: 45 releases, listed
+newest first, followed by the 2 non-release tags in their own section at the end. The
+0.17.1 entry comes from the v0.17.1 tag, because that release shipped on the retired
+release/0.17 line and is not in main's CHANGELOG. For 0.3.x and 0.4.x, the CHANGELOG has
+one grouped section per series, so this file uses each tag's message. CHANGELOG.md has
+the full text. Starting with 0.18.10, each release also gets its own document under
+docs/releases/; that directory arrives with the 0.18.10 release PR (#16).
 
 
 Unreleased — 0.18.10 (PR #16, not yet tagged)
@@ -227,8 +228,8 @@ v0.3.0    2026-07-24
   typed ClickHouse schema, the CLI, and the dashboard.
 
 
-Non-release tags
-----------------
+Non-release tags (not releases; listed separately, newest first)
+----------------------------------------------------------------
 
 arena                         2026-10-04
 - A gentar arena trigger tag, at 963d3de: "the phase-1 dry-run proves
