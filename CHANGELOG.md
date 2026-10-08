@@ -73,6 +73,40 @@ migration path is planned work, not a promise the old versions can cash.
 - **Docs: the host id is derived from the machine's own id, not random,** since 0.18.6.
   The guides, `HOUSE.md`, `host.js` and `uninstall --full-removal` said a reinstall mints a
   new identity. It derives the same one again. (A8)
+- **`invite` never sends a credential this install keeps to `--url` (G4, security).** `--url`
+  is the invitee's address, typed on a command line. A typo, a tunnel or somebody else's
+  server got the member's own credential (the reachability probe and the grants read), or
+  a kept admin's (provisioning). `resolveConfig()` lets the flag outrank the env file, so
+  the "configured" URL the code used WAS `--url`.
+  - A stored credential now goes only to the house it was saved for: the member's, a
+    `--keep-admin` admin's, or a password resolved from the env file.
+  - `--url` gets an unauthenticated `/ping` to confirm the invitee can reach it.
+  - An admin given for this command (`--admin-user` or an exported
+    `MEMHOUSE_ADMIN_USER`, with its password from a file, stdin, the environment or a
+    prompt) still provisions at `--url`.
+  - `misc/invite-matrix.sh` points `--url` at a spy server and asserts it receives
+    nothing but a ping.
+- **The dashboard no longer goes empty on a quiet house (G11).** The stats tables carry a
+  one-day TTL and were refreshed only by a pass that shipped something. So a house whose
+  machines went quiet for a day lost every generation, and the dashboard, which had chosen
+  its tables once per process, kept reading the emptied one.
+  - The shipper now also refreshes when the newest generation is over an hour old.
+  - The dashboard re-resolves its rooms every five minutes, so it falls back to the inline
+    rollup when a stats table is empty.
+- **The skills find their reference again (G26).** All five said
+  `Read ../reference/HOUSE.md`, a path that does not exist in the installed plugin; the
+  file is at `../../reference/HOUSE.md`. A unit test now resolves every skill's reference
+  path from its own directory.
+- **`/mem:recall` queries that run (A2).**
+  - "Recent sessions" ordered by `started_at`, which the room does not have; it now uses
+    `created_at` / `last_updated_at`, read `FINAL`.
+  - The search now returns `hit_seq`, which the transcript read needs.
+  - The read takes its window by position (three turns before, twelve after) instead of
+    by `seq` arithmetic, which a subagent's block numbering defeats.
+- **`HOUSE.md`'s subagent queries keep to the current parse (A3).** They had no epoch
+  filter, so a re-parsed session doubled each subagent's turns.
+- `misc/skill-recipe.sh` now runs these queries verbatim, extracted from the docs, against
+  fixture rows with a superseded parse and a subagent block.
 
 ## 0.18.10 — 2026-10-08
 

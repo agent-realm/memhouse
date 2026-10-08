@@ -331,6 +331,22 @@ async function ask(question, dflt) {
 // reason in .cause. `✗ not connected: fetch failed` names neither the host nor the problem,
 // while `ship` prints ECONNREFUSED for the identical condition — the three commands
 // disagreed about the same event.
+// Is `url` an HTTP endpoint that answers at all? ClickHouse's /ping needs no credential, so
+// this checks an address without sending one. Any HTTP response counts — a proxy that
+// wants auth on every path still proves the address is reachable.
+async function pingUrl(url) {
+  let target;
+  try { target = new URL('ping', String(url).endsWith('/') ? String(url) : `${url}/`); }
+  catch { return { ok: false, reason: 'not a URL' }; }
+  try {
+    await fetch(target, { signal: AbortSignal.timeout(8000), redirect: 'manual' });
+    return { ok: true };
+  } catch (e) {
+    const c = e && e.cause && (e.cause.code || e.cause.message);
+    return { ok: false, reason: c || (e && e.name === 'TimeoutError' ? 'timed out' : String(e && e.message || e)) };
+  }
+}
+
 function netReason(e) {
   const cause = e && e.cause;
   const inner = cause && (cause.message || cause.code);
@@ -348,7 +364,7 @@ function netReason(e) {
 // --admin-password (warned), then MEMHOUSE_ADMIN_PASSWORD, then the stored credential
 // of that SAME admin, then a TTY prompt. null = none, and the caller has been told how
 // to give one without putting it on the command line. See memhouse/admin-secret.js.
-async function adminPasswordFor(adminUser) {
+async function adminPasswordFor(adminUser, out = {}) {
   const as = require(path.join(REPO_ROOT, 'memhouse', 'admin-secret'));
   const file = readEnvFile();
   let r;
@@ -359,9 +375,11 @@ async function adminPasswordFor(adminUser) {
   } catch (e) { console.log(bad(e.message)); return null; }
   // stderr: `members --json` and friends must emit nothing but JSON on stdout.
   if (r.source === 'flag') console.error(warn(as.ARGV_WARNING));
+  out.source = r.source;
   if (r.password !== undefined) return r.password;
   if (process.stdin.isTTY) {
     const p = await askSecret(`  password for '${adminUser}'`);
+    out.source = 'prompt';
     if (p) return p;
     console.log(bad('no password given'));
     return null;
@@ -3725,13 +3743,35 @@ async function cmdInvite() {
   // itself is tried below — which works for whoever set the house up as its superuser.
   if (flags['admin-user'] === true) { console.log(bad('--admin-user needs a name, e.g. --admin-user default')); return 1; }
   let adminUser = (flags['admin-user'] ? String(flags['admin-user']) : '') || cfg.adminUser || undefined;
+  // Who named this admin decides where its credential may go (G4, memhouse/invite-target.js):
+  // one given for this command provisions at --url; one this install keeps provisions only
+  // at the house it was saved for.
+  const adminUserSource = flags['admin-user'] ? 'flag'
+    : (process.env.MEMHOUSE_ADMIN_USER ? 'env' : (adminUser ? 'file' : 'member'));
   let adminPass;
+  const pwSource = {};
   if (adminUser) {
     // --admin-password-file / --admin-password / MEMHOUSE_ADMIN_PASSWORD / the stored one
     // for this same admin / a prompt. `--admin-user` as a flag used to switch the
     // environment off, so the only scriptable path put the password on argv.
-    adminPass = await adminPasswordFor(adminUser);
+    adminPass = await adminPasswordFor(adminUser, pwSource);
     if (adminPass === null) return 1;
+  }
+  const target = require(path.join(REPO_ROOT, 'memhouse', 'invite-target'))
+    .provisionTarget({ url, storedUrl: configuredUrl, adminUserSource, passwordSource: pwSource.source || null });
+  if (target.error) { console.log(bad(target.error)); return 1; }
+  // A stored credential is never sent to --url, so check that the INVITEE can reach it
+  // without one: ClickHouse answers /ping unauthenticated.
+  if (target.stored) {
+    const reach = await pingUrl(url);
+    if (!reach.ok) {
+      console.log(bad(`cannot reach ${url}: ${reach.reason}`));
+      console.log('  --url is the address the INVITEE will use, and invite checks it from here first.');
+      console.log('  A `deploy --local` house is bound to loopback on purpose, so no LAN address');
+      console.log('  reaches it and no invitee could either — publish it (tunnel, reverse proxy)');
+      console.log('  before inviting, or use --print-sql and let the invitee be told the address.');
+      return 1;
+    }
   }
   if (!adminUser) {
     const c = requireConfig(cfg, 'invite');
@@ -3751,20 +3791,18 @@ async function cmdInvite() {
     // unreachable host — a typo, a loopback-bound house, a tunnel that is down — come back
     // as "you are only a member", which sends the reader after a privilege they already
     // have. Caught on the testbed, where a wrong --url produced exactly that.
+    // The member credential is stored, so it is checked against the house it was saved for
+    // (target.url), never against --url; --url's reachability was checked above, unauthenticated.
     try {
-      await ch({ ...c, url }, 'SELECT 1', { database: '' });
+      await ch({ ...c, url: target.url }, 'SELECT 1', { database: '' });
     } catch (e) {
-      console.log(bad(`cannot reach ${url} as '${c.user}': ${netReason(e)}`));
-      console.log('  --url is the address the INVITEE will use, and invite checks it from here first.');
-      console.log('  A `deploy --local` house is bound to loopback on purpose, so no LAN address');
-      console.log('  reaches it and no invitee could either — publish it (tunnel, reverse proxy)');
-      console.log('  before inviting, or use --print-sql and let the invitee be told the address.');
+      console.log(bad(`cannot reach your house ${target.url} as '${c.user}': ${netReason(e)}`));
       return 1;
     }
     // What this credential may do, judged from its own grants and SCOPE-AWARE — a member
     // holds CREATE DATABASE inside `ON <their-db>.*`, which mints no new house at all.
     // Shared with `whoami` so the two can never disagree about who is an administrator.
-    const caps = capabilitiesFrom(await readGrants({ ...c, url }, c.user));
+    const caps = capabilitiesFrom(await readGrants({ ...c, url: target.url }, c.user));
     if (caps.canProvision) {
       adminUser = c.user; adminPass = c.password;
       console.log(ok(`inviting as your own credential '${c.user}' (it can create users and houses here)`));
@@ -3787,13 +3825,12 @@ async function cmdInvite() {
     }
   }
 
-  // WHERE to connect to provision. --url is the address the INVITEE will use — it may be
-  // a LAN IP or tunnel that is not this admin's own endpoint, and sending the stored
-  // credential there would hand it to whatever answers a typo'd or hostile --url. So the
-  // stored-credential path provisions at the admin's OWN configured cfg.url; only an
-  // EXPLICIT --admin-* (where the admin typed the target themselves) provisions at --url.
-  // Either way the invite FILE carries --url, the invitee's path.
-  const provisionUrl = flags['admin-user'] ? url : cfg.url;
+  // WHERE to connect to provision: decided above by provisionTarget(). A stored credential
+  // provisions at the house it was saved for; one given for this command, at --url. Either
+  // way the invite FILE carries --url, the invitee's path. (This used to read
+  // `flags['admin-user'] ? url : cfg.url` — but cfg.url IS --url once the flag is given, so
+  // the stored credential went to whatever --url named.)
+  const provisionUrl = target.url;
 
   // Is there already a house here, with somebody's memory in it? The house is created
   // with CREATE DATABASE IF NOT EXISTS, so inviting a name whose database already exists

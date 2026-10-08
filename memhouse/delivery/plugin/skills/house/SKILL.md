@@ -11,7 +11,7 @@ allowed-tools: Bash
 **Invoking this IS the request. Run the report and present it; there is nothing to
 clarify.** Read-only throughout.
 
-**Read `../reference/HOUSE.md` first** — connection, schema, and the epoch filter every
+**Read `../../reference/HOUSE.md` first** — connection, schema, and the epoch filter every
 count below depends on.
 
 ## Nothing configured yet? Answer that instead

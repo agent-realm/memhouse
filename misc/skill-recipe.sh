@@ -57,6 +57,57 @@ printf '%s' "$out" | grep -qF '"pattern": "carol_*"' && ok "rooms reports the me
 printf '%s' "$out" | grep -q 'carol_messages' && ok "  and names carol_messages" || bad "  rooms did not name the real table"
 
 echo
+echo "=== the skills' own queries run, verbatim, and hand each step what the next needs ==="
+# The SQL is taken out of the docs a skill reads, not retyped: a test of a paraphrase proves
+# nothing about the query an agent will actually run. sqlblock <file> <n>: the n-th ```sql block.
+SKILL="$ROOT/memhouse/delivery/plugin/skills/recall/SKILL.md"
+sqlblock() { awk -v want="$2" '/^```sql/{n++; if (n==want) {on=1; next}} /^```/{on=0} on' "$1"; }
+# Fixtures: session s1 holds a superseded parse (epoch 0) beside the current one (epoch 1),
+# and a subagent block numbered far above the parent's turns, the way the shipper folds one.
+SID='claude-code:s1'
+A "INSERT INTO mem.carol_messages (session_id, seq, source, host, ts, role, text, line_hash, epoch, is_subagent, extra) VALUES
+ ('$SID',0,'claude-code','h',now64(3)-60,'user','old parse: the needle',10,0,0,'{}'),
+ ('$SID',1000000000,'claude-code','h',now64(3)-55,'assistant','old subagent turn',11,0,1,'{\"agent\":{\"id\":\"a1\",\"description\":\"look\"}}'),
+ ('$SID',0,'claude-code','h',now64(3)-50,'user','start',20,1,0,'{}'),
+ ('$SID',1,'claude-code','h',now64(3)-49,'assistant','thinking',21,1,0,'{}'),
+ ('$SID',2,'claude-code','h',now64(3)-48,'user','here is the needle',22,1,0,'{}'),
+ ('$SID',3,'claude-code','h',now64(3)-47,'assistant','fixed it',23,1,0,'{}'),
+ ('$SID',1000000000,'claude-code','h',now64(3)-46,'user','subagent task',24,1,1,'{\"agent\":{\"id\":\"a1\",\"description\":\"look\"}}'),
+ ('$SID',1000000001,'claude-code','h',now64(3)-45,'assistant','subagent answer',25,1,1,'{\"agent\":{\"id\":\"a1\",\"description\":\"look\"}}')" >/dev/null
+A "INSERT INTO mem.carol_sessions (session_id, source, host, name, project, created_at, last_updated_at, message_count, extra) VALUES ('$SID','claude-code','h','start','proj', now64(3)-60, now64(3)-45, 6, '{}')" >/dev/null
+sub() { sed -e "s/<sid>/$SID/g" -e "s/<uid>/$UID_/g" -e "s/<hit_seq>/$HIT/g" -e "s/<agent>/a1/g"; }
+
+# Step 1: the search. It must return the session's user_id and hit_seq — step 2 needs both.
+r=$(run_recipe "$WORK/carol.env" "$(sqlblock "$SKILL" 1) FORMAT JSONEachRow")
+# the row for s1 (the recipe section above left another matching session behind)
+row() { printf '%s' "$r" | SID="$SID" F="$1" node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{for(const l of d.split("\n")){try{const r=JSON.parse(l);if(r.session_id===process.env.SID){process.stdout.write(String(r[process.env.F]??""));return}}catch{}}})'; }
+UID_=$(row user_id); HIT=$(row hit_seq); HITS=$(row hits)
+[ -n "$UID_" ] && [ "$HIT" = "2" ] && ok "recall step 1 runs and returns user_id and hit_seq (= 2, the current parse's hit)" || bad "recall step 1" "$(printf '%s' "$r" | head -2)"
+[ "$HITS" = "1" ] && ok "  and counts the current parse only (1 hit, not 2)" || bad "  step 1 counted a superseded parse ($HITS)" "$r"
+
+# Step 2: the window, by position. Two turns before the hit, the hit and everything after —
+# including the subagent block, whose seq is a billion higher — and nothing from epoch 0.
+r=$(run_recipe "$WORK/carol.env" "$(sqlblock "$SKILL" 2 | sub) FORMAT TSV")
+n=$(printf '%s\n' "$r" | grep -c . || true)
+[ "$n" = "6" ] && ok "recall step 2 returns the window by position (6 rows: 0,1,2,3 and the subagent's 2)" || bad "recall step 2 returned $n rows" "$r"
+printf '%s' "$r" | grep -q "old parse\|old subagent" && bad "  step 2 read a superseded parse" || ok "  and no superseded parse"
+printf '%s' "$r" | grep -q "subagent answer" && ok "  and crosses the gap into the subagent block" || bad "  the window stopped at the seq gap"
+
+# Recent sessions: the columns the room actually has.
+r=$(run_recipe "$WORK/carol.env" "$(sqlblock "$SKILL" 3) FORMAT JSONEachRow")
+printf '%s' "$r" | grep -q "\"session_id\":\"$SID\"" && printf '%s' "$r" | grep -q '"last_active":"20' && ok "recall's recent-sessions query runs (started, last_active)" || bad "recall recent sessions" "$(printf '%s' "$r" | head -2)"
+
+# HOUSE.md's subagent queries carry the epoch filter: one subagent, 2 turns, not 3.
+HB=$(sqlblock "$DOC" 1)
+q1=$(printf '%s\n' "$HB" | awk '/^-- the subagents a session spawned/{on=1; next} /^-- one subagent/{on=0} on' | sub)
+q2=$(printf '%s\n' "$HB" | awk '/^-- one subagent/{on=1; next} on' | sub)
+r=$(run_recipe "$WORK/carol.env" "$q1 FORMAT TSV")
+[ "$(printf '%s' "$r" | cut -f1,3)" = "$(printf 'a1\t2')" ] && ok "HOUSE.md: the subagent list counts the current parse (a1: 2 turns)" || bad "HOUSE.md subagent list" "$r"
+r=$(run_recipe "$WORK/carol.env" "$q2 FORMAT TSV")
+n=$(printf '%s\n' "$r" | grep -c . || true)
+[ "$n" = "2" ] && ok "HOUSE.md: one subagent's transcript has its 2 current turns" || bad "HOUSE.md subagent transcript: $n rows" "$r"
+
+echo
 echo "=== the SAME recipe, unprefixed, must be unaffected ==="
 A "DROP DATABASE IF EXISTS solo SYNC" >/dev/null; A "DROP USER IF EXISTS dave" >/dev/null
 (cd "$WORK" && node "$ROOT/bin/memhouse.js" invite dave --url "$URL" \

@@ -16,7 +16,7 @@ answer still exists.
 path — this skill retrieves rows and YOU read them. Never present a guess as a retrieval:
 if the house has nothing, say so.
 
-**Read `../reference/HOUSE.md` first** — connection, schema, and the three traps
+**Read `../../reference/HOUSE.md` first** — connection, schema, and the three traps
 (epoch filtering, `(session_id, user_id)` joins, escaping). Every query below assumes it.
 
 ## Which shape is being asked for
@@ -43,7 +43,8 @@ found 8 messages where `%clickhouse%` AND `%ttl%` found 1,461.
 ```sql
 SELECT session_id, user_id, any(folder) AS folder,
        formatDateTime(max(ts), '%Y-%m-%d') AS day, count() AS hits,
-       substring(anyIf(text, positionCaseInsensitive(text, 'NEEDLE') > 0), 1, 300) AS sample
+       min(seq) AS hit_seq,
+       substring(argMin(text, seq), 1, 300) AS sample
 FROM messages
 WHERE text_ngram LIKE '%needle%'
   AND (origin != 'ship'
@@ -55,8 +56,8 @@ ORDER BY hits DESC, max(ts) DESC
 LIMIT 8
 ```
 
-`anyIf(...)` so the sample is a line that actually matched — `any(text)` returns an
-arbitrary message from the session and misled two readers in three. **Order by `hits`,
+Every row counted here matched, so `sample` is a line that actually matched: the
+session's first hit, at `hit_seq`. Step 2 reads around that position. **Order by `hits`,
 not just recency**: a session mentioning the term 197 times outranks yesterday's passing
 reference.
 
@@ -64,15 +65,27 @@ reference.
 the match so you see the resolution, not the complaint:
 
 ```sql
-SELECT seq, role, substring(text, 1, 2000) AS text
-FROM messages
-WHERE session_id = '<sid>' AND user_id = '<uid>'
-  AND seq BETWEEN <hit_seq - 3> AND <hit_seq + 12>
+SELECT seq, role, is_subagent, substring(text, 1, 2000) AS text FROM (
+    (SELECT seq, role, is_subagent, text FROM messages FINAL
+     WHERE session_id = '<sid>' AND user_id = '<uid>' AND seq < <hit_seq>
+       AND (origin != 'ship' OR epoch = (SELECT max(epoch) FROM messages
+            WHERE session_id = '<sid>' AND user_id = '<uid>' AND origin = 'ship'))
+     ORDER BY seq DESC LIMIT 3)
+    UNION ALL
+    (SELECT seq, role, is_subagent, text FROM messages FINAL
+     WHERE session_id = '<sid>' AND user_id = '<uid>' AND seq >= <hit_seq>
+       AND (origin != 'ship' OR epoch = (SELECT max(epoch) FROM messages
+            WHERE session_id = '<sid>' AND user_id = '<uid>' AND origin = 'ship'))
+     ORDER BY seq LIMIT 13))
 ORDER BY seq
 ```
 
-Apply the epoch filter here too — an unfiltered read of a compacted session interleaves
-two parses of the same conversation.
+`<sid>`, `<uid>` and `<hit_seq>` come from step 1's row. The window is counted in rows,
+not in `seq` values: three turns before the hit and twelve after. `seq` has gaps. A
+subagent's turns are numbered in a block of their own, far above the parent's, so
+`seq BETWEEN hit_seq - 3 AND hit_seq + 12` could return the hit alone. The epoch filter
+keeps one parse: an unfiltered read of a compacted session interleaves two versions of
+the same conversation. `FINAL` collapses row versions the server has not merged yet.
 
 **3. Answer, then cite.** Lead with the answer. Under it list the sessions it came from —
 `session_id`, date, project — so the user can reopen one (`memhouse resume <session_id>`
@@ -95,12 +108,19 @@ one representative line each. Offer to read the strongest. Do not dump ten rows 
 prefer it over hand-joining. For a plain list:
 
 ```sql
-SELECT session_id, name, source, host, project,
-       formatDateTime(started_at, '%Y-%m-%d %H:%i') AS started, message_count
-FROM sessions
-ORDER BY started_at DESC
+SELECT session_id, user_id, name, source, host, project,
+       formatDateTime(created_at, '%Y-%m-%d %H:%i') AS started,
+       formatDateTime(coalesce(last_updated_at, created_at), '%Y-%m-%d %H:%i') AS last_active,
+       message_count
+FROM sessions FINAL
+ORDER BY coalesce(last_updated_at, created_at) DESC
 LIMIT 20
 ```
+
+`sessions` keeps one row per session and the newest write wins, so read it `FINAL`.
+"Recent" means recently active (`last_updated_at`): a session started last month and
+worked on today is recent. The room has no `started_at`; `created_at` is when the
+session began.
 
 Narrow with `WHERE project = '…'`, `source = 'cursor'`, `host = '…'`, or a date range as
 asked. In a shared house every member's sessions are here — add `AND user_id = '<name>'`

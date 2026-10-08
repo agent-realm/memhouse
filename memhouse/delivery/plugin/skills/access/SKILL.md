@@ -13,7 +13,7 @@ Two things that look alike and are not:
 - **Invite** mints a ClickHouse *user* and their own *house*. Needs an administrator.
 - **Share** grants an existing user `SELECT` on *your* house. You can do this yourself.
 
-**Read `../reference/HOUSE.md` first** for the connection block. One rule dominates
+**Read `../../reference/HOUSE.md` first** for the connection block. One rule dominates
 everything here: **a password must never enter this conversation.** memhouse ships this
 transcript into the house, and the archive is insert-only — a credential pasted here
 cannot be withdrawn.
