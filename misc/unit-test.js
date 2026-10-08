@@ -1496,5 +1496,35 @@ test('no child process is given a password in its argv', () => {
   assert.deepStrictEqual(offenders, [], `a password reaches argv:\n  ${offenders.join('\n  ')}`);
 });
 
+test('a printed plan carries a placeholder, never a password (G23)', () => {
+  const p = provision.plan({ db: 'mem', member: 'alice', placeholder: true });
+  const create = p.find((s) => s.sql.startsWith('CREATE USER'));
+  assert.ok(create, 'the printed plan still creates the member');
+  assert.strictEqual(create.sql, `CREATE USER alice IDENTIFIED BY ${provision.PASSWORD_PLACEHOLDER}`);
+  // Unquoted on purpose: run as printed, it must FAIL to parse rather than create a member
+  // whose password is the placeholder text.
+  assert.ok(!/IDENTIFIED BY '/.test(provision.render(p, { db: 'mem', member: 'alice' })),
+    'a printed plan must not hold a quoted password literal');
+});
+
+test('nothing in the CLI prints a password value (G23)', () => {
+  // Static half of the guarantee; misc/invite-matrix.sh runs every install, invite and
+  // passwd path against a real ClickHouse and greps their output for the real values.
+  // A console/stdout/stderr call that interpolates a variable holding a password is a leak
+  // into terminals, scrollback and agent transcripts, which memhouse ships into the house.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'memhouse.js'), 'utf-8');
+  const secretVars = /\$\{\s*(password|pw|memberPw|next|escPw|adminPass|adminPassword|ADMPW|built\.password|cfg\.password|priorCfg\.password|admin\.password)\s*\}/;
+  const offenders = [];
+  const re = /(console\.(log|error|warn)|process\.std(out|err)\.write)\(/g;
+  let m;
+  while ((m = re.exec(src))) {
+    let depth = 0; let i = m.index + m[0].length - 1;
+    for (; i < src.length; i++) { if (src[i] === '(') depth++; else if (src[i] === ')' && --depth === 0) break; }
+    const call = src.slice(m.index, i + 1);
+    if (secretVars.test(call)) offenders.push(`line ${src.slice(0, m.index).split('\n').length}: ${call.replace(/\s+/g, ' ').slice(0, 120)}`);
+  }
+  assert.deepStrictEqual(offenders, [], `a password value is printed:\n  ${offenders.join('\n  ')}`);
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

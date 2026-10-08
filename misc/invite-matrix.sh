@@ -37,6 +37,18 @@ pass=0; fail=0
 ok()   { printf '  \033[32mok\033[0m   %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n     %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
 q()    { curl -sS --user "$ADM:$ADMPW" --data-binary "$1" "$URL/"; }
+# The password an env or invite file holds — read here only to prove it is NOT in a command's
+# output (G23). Never printed by this script either.
+envpw() { sed -n "s/^MEMHOUSE_PASSWORD='\(.*\)'$/\1/p" "$1" 2>/dev/null | head -1; }
+# leak <label> <output> <secret>…: no secret may appear in the output, and none may be empty.
+leak() {
+  local label=$1 out=$2; shift 2
+  for sec in "$@"; do
+    [ -n "$sec" ] || { bad "$label: a secret to check for was empty"; return; }
+    printf '%s' "$out" | grep -qF -- "$sec" && { bad "LEAK: $label printed a password"; return; }
+  done
+  ok "$label prints no password"
+}
 
 echo "invite matrix against $URL"
 
@@ -80,11 +92,19 @@ printf '%s' "$w" | grep -qi "$(printf 'mpw')" \
   && bad "whoami leaked the password" || ok "whoami prints no password"
 
 # ── --print-sql is the member's way out: offline, no credential ─────────────────────
-sql=$($CLI invite im_target --url "$URL" --allow-local --print-sql 2>&1 || true)
+sql=$($CLI invite im_target --url "$URL" --allow-local --print-sql --member-password G23givenINVITEpw 2>&1 || true)
 n=$(printf '%s' "$sql" | grep -cE '^(CREATE|GRANT|ALTER)' || true)
 [ "$n" -ge 6 ] && ok "--print-sql emits the plan ($n statements)" || bad "--print-sql emitted $n statements" "$sql"
 printf '%s' "$sql" | grep -q "MEMHOUSE_PASSWORD=" \
-  && ok "--print-sql carries the handoff credential" || bad "--print-sql omitted the handoff lines"
+  && ok "--print-sql carries the handoff lines" || bad "--print-sql omitted the handoff lines"
+# G23: a printed plan holds a placeholder that does not parse, never a password.
+printf '%s' "$sql" | grep -qF 'IDENTIFIED BY <member-password>' && ok "  the password is a placeholder" || bad "  no placeholder in the printed plan"
+printf '%s' "$sql" | grep -q "IDENTIFIED BY '" && bad "  LEAK: the printed plan holds a quoted password" || ok "  and no quoted password literal"
+leak "invite --print-sql (given --member-password)" "$sql" G23givenINVITEpw
+printf '%s' "$sql" | grep -qx -- '--   MEMHOUSE_INVITE=1' && ok "  the handoff is marked as an invite (install offers rotation)" || bad "  the handoff is not marked MEMHOUSE_INVITE=1"
+sql=$($CLI install --url "$URL" --print-sql --member im_psql --member-password G23givenINSTALLpw 2>&1 || true)
+printf '%s' "$sql" | grep -qF 'IDENTIFIED BY <member-password>' && ok "install --print-sql prints a placeholder" || bad "install --print-sql has no placeholder" "$(printf '%s' "$sql" | grep 'CREATE USER')"
+leak "install --print-sql (given --member-password)" "$sql" G23givenINSTALLpw
 
 # ── an admin IS accepted — the bug that refused everyone would fail here ────────────
 export MEMHOUSE_HOME="$WORK/admin"; mkdir -p "$MEMHOUSE_HOME"
@@ -101,6 +121,7 @@ case "$out" in
 esac
 q "SELECT count() FROM system.users WHERE name='im_made'" | grep -qx 1 \
   && ok "the invited user exists" || bad "the invited user was not created"
+leak "invite (generated password, written to the invite file)" "$out" "$(envpw "$WORK/invite-im_made.env")" "$ADMPW"
 
 # whoami must agree from the other side too
 w=$(cd "$WORK" && $CLI whoami --json 2>&1 || true)
@@ -171,10 +192,14 @@ else
   [ -f "$H/env" ] && bad "  it joined without a yes" || ok "  and nothing was installed"
   case "$out" in *"$ADMPW"*|*PASSWORD*) bad "  LEAK: a secret appeared in the offer" ;; *) ok "  the offer prints no secret" ;; esac
   # --yes: it must join and consume the file.
+  ipw=$(envpw "$D/invite-im_bare.env")
   out=$( cd "$D" && MEMHOUSE_HOME="$H" $CLI --yes </dev/null 2>&1 || true )
   case "$out" in *installed*) ok "memhouse --yes joins from the nearby invite" ;; *) bad "memhouse --yes did not join" "$(printf '%s' "$out" | grep -i '✗\|error' | head -1)" ;; esac
   [ -f "$D/invite-im_bare.env" ] && bad "  the spent invite file was not removed" || ok "  the spent invite file is gone"
   grep -q "MEMHOUSE_USER='im_bare'" "$H/env" 2>/dev/null && ok "  installed as the invited member" || bad "  env not written as im_bare"
+  rpw=$(envpw "$H/env")
+  [ -n "$rpw" ] && [ "$rpw" != "$ipw" ] && ok "  the invite password was rotated" || bad "  the invite password was not rotated"
+  leak "install --env (invite password, and the rotated one)" "$out" "$ipw" "$rpw"
   # the invite carried the inviter's channel; the joined env must keep it — or the member's first
   # `memhouse update` follows `latest` onto the other line (a 0.18 member was downgraded to 0.17.1)
   grep -q "^MEMHOUSE_CHANNEL='team'" "$H/env" 2>/dev/null && ok "  the joined env keeps the invite's channel (team)" || bad "  the joined env lost the invite's channel"
@@ -185,6 +210,11 @@ else
     grep -q "adopting it and retrying" "$H/logs/shipper.log" && ok "the shipper adopted the rotated credential (recovered)" || bad "the shipper spawned by join holds the INVITE password" "$(grep -m1 'rejected\|Authentication' "$H/logs/shipper.log")"
   else ok "the shipper spawned by join authenticates with the rotated password"; fi
   ( cd "$D" && MEMHOUSE_HOME="$H" $CLI stop >/dev/null 2>&1 || true )
+  # passwd: the self-rotation writes the env file and prints neither password.
+  out=$( MEMHOUSE_HOME="$H" $CLI passwd </dev/null 2>&1 || true )
+  npw=$(envpw "$H/env")
+  [ -n "$npw" ] && [ "$npw" != "$rpw" ] && ok "passwd rotates and rewrites the env file" || bad "passwd did not rotate" "$(printf '%s' "$out" | head -2)"
+  leak "passwd (old and new password)" "$out" "$rpw" "$npw"
   # no invite present: bare memhouse falls back to help, not an offer.
   E="$WORK/empty"; mkdir -p "$E"    # a clean dir — earlier cases dropped invite files in $WORK
   out=$( cd "$E" && MEMHOUSE_HOME="$WORK/nohome" $CLI </dev/null 2>&1 || true )
@@ -197,6 +227,10 @@ out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$U
 case "$out" in *installed*) ok "install --admin-user takes the password from MEMHOUSE_ADMIN_PASSWORD (no flag, no TTY)" ;; *) bad "the env admin password was ignored" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
 grep -q '^MEMHOUSE_ADMIN_PASSWORD' "$H/env" 2>/dev/null && bad "  the admin password was saved without --keep-admin" || ok "  and is not saved"
 printf '%s' "$out" | grep -qF -- "$ADMPW" && bad "  the admin password was printed" || ok "  and never printed"
+H="$WORK/adm-gen"; mkdir -p "$H"
+out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_genadm --yes --no-ship </dev/null 2>&1 || true)
+case "$out" in *installed*) ok "install --admin-user with a generated member password" ;; *) bad "the generated-password admin install failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
+leak "install --admin-user (generated member password; admin password)" "$out" "$(envpw "$H/env")" "$ADMPW"
 H="$WORK/adm-stdin"; mkdir -p "$H"
 out=$(printf '%s\n' "$ADMPW" | MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --admin-password-file - --member im_stdinadm --member-password spw --yes --no-ship 2>&1 || true)
 case "$out" in *installed*) ok "--admin-password-file - reads it from stdin" ;; *) bad "the stdin admin password failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
@@ -211,7 +245,7 @@ out=$(MEMHOUSE_HOME="$H" $CLI install --url "$URL" --user im_member --password m
 case "$out" in *"only read with --admin-user"*) ok "--keep-admin on a member install is refused, not ignored" ;; *) bad "--keep-admin without --admin-user was not refused" "$(printf '%s' "$out" | head -2)" ;; esac
 
 # ── cleanup ────────────────────────────────────────────────────────────────────────
-for u in im_member im_target im_made im_occupy im_bare im_envadm im_stdinadm im_keepadm im_noadm; do
+for u in im_member im_target im_made im_occupy im_bare im_envadm im_stdinadm im_keepadm im_noadm im_genadm im_psql; do
   q "DROP USER IF EXISTS $u" >/dev/null 2>&1 || true
   q "DROP DATABASE IF EXISTS $u SYNC" >/dev/null 2>&1 || true
   for t in $(q "SELECT name FROM system.tables WHERE database='mem' AND startsWith(name, '${u}_') FORMAT TSV" 2>/dev/null); do

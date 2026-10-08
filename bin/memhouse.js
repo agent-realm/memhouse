@@ -786,10 +786,33 @@ function generatePassword() {
  * hand produces exactly what `--admin-user` would have produced. It is rendered from the
  * same templates provision.js applies, so the two cannot drift into different houses.
  */
-function memberSql(db, member, password) {
-  // The SAME plan adminBootstrap executes, rendered. Not a second description of it.
+function memberSql(db, member) {
+  // The SAME plan adminBootstrap executes, rendered. Not a second description of it — except
+  // the password: a printed plan carries a placeholder, never a real one (G23). Printed SQL
+  // lands in terminals, scrollback and agent transcripts, and memhouse ships transcripts.
   const { plan, render } = require(path.join(REPO_ROOT, 'memhouse', 'provision'));
-  return render(plan({ db, member, password }), { db, member });
+  return render(plan({ db, member, placeholder: true }), { db, member });
+}
+
+// The handoff lines that follow a printed plan: an env file for the member, with the
+// password left as the placeholder the plan used. `invite` marks it MEMHOUSE_INVITE=1, so
+// the member's `install --env` offers to rotate it to one only they know.
+function handoffLines({ url, db, member, invite }) {
+  const { PASSWORD_PLACEHOLDER } = require(path.join(REPO_ROOT, 'memhouse', 'provision'));
+  const lines = [
+    `-- Then put these lines in a file (mode 600), with the same password where ${PASSWORD_PLACEHOLDER}`,
+    '-- stands, and hand it over a channel you trust (croc, a password manager) — not chat:',
+    `--   MEMHOUSE_URL='${url}'`,
+    `--   MEMHOUSE_USER='${member}'`,
+    `--   MEMHOUSE_PASSWORD='${PASSWORD_PLACEHOLDER}'`,
+    `--   MEMHOUSE_DB='${db}'`,
+  ];
+  if (invite) lines.push('--   MEMHOUSE_INVITE=1');
+  lines.push('-- They install with:  memhouse install --env <that file>   (it deletes the file afterwards)');
+  if (flags['member-password'] !== undefined) {
+    lines.push('-- The --member-password you gave is not printed: use it where the placeholder stands.');
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -847,17 +870,13 @@ async function adminBootstrap(cfg, admin) {
   } else {
     if (!password) {
       password = generatePassword();
-      // For a local install the password must be SHOWN — it is the user's only copy. For
-      // an invite it must NOT: the caller writes it to the credential file, and printing
-      // it here would land it in the terminal and, via /mem:access, in a transcript
-      // memhouse itself ships. admin.quiet is the invite path.
-      if (!admin.quiet) {
-        console.log('');
-        console.log(`  password for '${admin.member}':  ${password}`);
-        console.log(`  Shown once. It goes into ${ENV_FILE}; to change it later:`);
-        console.log(`     ALTER USER ${admin.member} IDENTIFIED BY '…'   then: memhouse setup --password …`);
-        console.log('');
-      }
+      // Never printed, on any path (G23). It used to be shown once on an install, "the
+      // user's only copy" — but install writes it to the env file, and an invite to the
+      // credential file, so the terminal never needed it. What the terminal gets ends up in
+      // scrollback and, via /mem:access and /mem:admin, in a transcript memhouse itself
+      // ships into the house. A run that fails before the password is written down drops
+      // the user it created (below), so no account is left behind with a password nobody
+      // holds.
     }
     try { await q(`CREATE USER ${admin.member} IDENTIFIED BY '${password.replace(/'/g, "\\'")}'`, { database: '' }); }
     catch (e) {
@@ -903,9 +922,15 @@ async function adminBootstrap(cfg, admin) {
   } catch (e) {
     console.log(bad(`could not grant the house to '${admin.member}': ${e.message}`));
     if (createdUser) {
-      console.log(`  ClickHouse user '${createdUser}' WAS created before this failed.`);
-      console.log(`  Continue once fixed:  memhouse install --member ${createdUser} --member-password '<the password above>' …`);
-      console.log(`  Or undo it as the admin:  DROP USER ${createdUser}`);
+      // This run made the user and nobody holds its password (it is never printed), so the
+      // only useful state is "not there": drop it, and the same command can simply be re-run.
+      try {
+        await q(`DROP USER IF EXISTS ${createdUser}`, { database: '' });
+        console.log(`  the ClickHouse user '${createdUser}' this run created was dropped — fix the cause and re-run`);
+      } catch (e2) {
+        console.log(`  ClickHouse user '${createdUser}' WAS created and could not be dropped (${String(e2.message).split('\n')[0]}).`);
+        console.log(`  Undo it as the admin:  DROP USER ${createdUser}   — then re-run.`);
+      }
     } else {
       console.log('  nothing was written');
     }
@@ -1081,17 +1106,11 @@ async function cmdInstall({ interactive }) {
   if (flags['print-sql'] === true) {
     const member = resolveMemberHandle();
     if (!member) return 1;
-    const password = flags['member-password'] || generatePassword();
-    console.log(memberSql(cfg.db, member, password));
-    console.log(`-- Then, once that has run:`);
+    console.log(memberSql(cfg.db, member));
     // Only echo a URL that was actually STATED. --print-sql is the path where the house is
     // typically someone else's, run by someone else, and cfg.url falls back to
     // http://localhost:8123 — the one address the rest of the product refuses to guess.
-    // Handing it back as a copy-paste command carrying a live credential is worse than
-    // leaving a placeholder.
-    console.log(cfg.stated
-      ? `--   memhouse install --url ${cfg.url} --db ${cfg.db} --user ${member} --password '${password}'`
-      : `--   memhouse install --url <the house this SQL was run on> --db ${cfg.db} --user ${member} --password '${password}'`);
+    console.log(handoffLines({ url: cfg.stated ? cfg.url : '<the house this SQL was run on>', db: cfg.db, member, invite: false }));
     return 0;
   }
 
@@ -3673,19 +3692,11 @@ async function cmdInvite() {
   // statements adminBootstrap would run, so the person with the credential runs four
   // lines instead of installing anything. Nothing is contacted and nothing is written.
   if (flags['print-sql'] === true) {
-    const password = flags['member-password'] && flags['member-password'] !== true
-      ? String(flags['member-password']) : generatePassword();
     // memberSql prints its own header naming the house and the credential it needs; a
     // second one above it said the same thing twice, and in a shared house said the wrong
     // thing ("their own house" — they get rooms in a shared one).
-    console.log(memberSql(db, name, password));
-    console.log('-- Then send them these four lines — they are a credential, so use a channel');
-    console.log('-- you trust (croc, a password manager), not chat:');
-    console.log(`--   MEMHOUSE_URL='${url}'`);
-    console.log(`--   MEMHOUSE_USER='${name}'`);
-    console.log(`--   MEMHOUSE_PASSWORD='${password}'`);
-    console.log(`--   MEMHOUSE_DB='${db}'`);
-    console.log(`-- They install with:  memhouse install --url ${url} --user ${name} --password '…' --db ${db}`);
+    console.log(memberSql(db, name));
+    console.log(handoffLines({ url, db, member: name, invite: true }));
     return 0;
   }
 
@@ -3962,7 +3973,8 @@ async function cmdPasswd({ quiet = false, forNext = null } = {}) {
   console.log(ok(`password rotated for '${cfg.user}' and ${ENV_FILE.replace(os.homedir(), '~')} updated`));
   console.log('  restart anything that inlines the credential here:  memhouse update --no-install');
   console.log(warn('this rotated the ONE server credential — every OTHER machine you ship as'));
-  console.log(`  '${cfg.user}' now fails auth until it gets the new password (memhouse setup --password …).`);
+  console.log(`  '${cfg.user}' now fails auth until its env file gets the new password: copy the`);
+  console.log(`  MEMHOUSE_PASSWORD line from ${ENV_FILE.replace(os.homedir(), '~')} over a channel you trust.`);
   return 0;
 }
 
