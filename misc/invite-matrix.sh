@@ -248,12 +248,44 @@ H="$WORK/adm-stray"; mkdir -p "$H"
 out=$(MEMHOUSE_HOME="$H" $CLI install --url "$URL" --user im_member --password G23memberPW --keep-admin --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *"only read with --admin-user"*) ok "--keep-admin on a member install is refused, not ignored" ;; *) bad "--keep-admin without --admin-user was not refused" "$(printf '%s' "$out" | head -2)" ;; esac
 
+# ── G4: a credential this install KEEPS is never sent to --url ────────────────────────
+# --url is typed on a command line and names the INVITEE's address. A spy HTTP server stands
+# in for a typo'd or hostile one and records every request; the invite must provision at the
+# stored house and send the spy nothing but an unauthenticated /ping.
+SPY_LOG="$WORK/spy.log"; : > "$SPY_LOG"
+node -e '
+const http = require("http"), fs = require("fs"); const log = process.argv[1];
+const s = http.createServer((q, r) => {
+  const cred = !!(q.headers.authorization || q.headers["x-clickhouse-key"] || /password=/.test(q.url));
+  fs.appendFileSync(log, JSON.stringify({ path: q.url.split("?")[0], cred }) + "\n");
+  q.resume(); q.on("end", () => r.end("Ok.\n"));
+});
+s.listen(0, "127.0.0.1", () => fs.writeFileSync(log + ".port", String(s.address().port)));
+' "$SPY_LOG" & SPY_PID=$!
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$SPY_LOG.port" ] && break; sleep 0.3; done
+SPY_PORT=$(cat "$SPY_LOG.port" 2>/dev/null || true)
+[ -n "$SPY_PORT" ] && ok "G4: a spy server stands in for --url (port $SPY_PORT)" || bad "G4: the spy server did not start — the cases below prove nothing"
+SPY="http://127.0.0.1:${SPY_PORT:-1}"
+H="$WORK/adm-keep"   # holds member im_keepadm AND the kept admin (--keep-admin, above)
+out=$(cd "$WORK" && MEMHOUSE_HOME="$H" $CLI invite im_g4a --url "$SPY" --allow-local --out "$WORK/invite-im_g4a.env" </dev/null 2>&1 || true)
+case "$out" in *"invite written"*) ok "G4: a kept admin provisions at its own house, not at --url" ;; *) bad "G4: invite with a kept admin failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
+grep -q "^MEMHOUSE_URL='$SPY'" "$WORK/invite-im_g4a.env" 2>/dev/null && ok "  the invite file carries --url" || bad "  the invite file does not carry --url"
+out=$(cd "$WORK" && MEMHOUSE_HOME="$H" $CLI invite im_g4b --url "$SPY" --allow-local --admin-user "$ADM" --out "$WORK/invite-im_g4b.env" </dev/null 2>&1 || true)
+case "$out" in *"invite written"*) ok "G4: --admin-user with the stored password provisions at the stored house" ;; *) bad "G4: --admin-user with a stored password failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
+grep -q '"cred":true' "$SPY_LOG" && bad "LEAK: a stored credential was sent to --url" "$(grep '"cred":true' "$SPY_LOG" | head -2)" || ok "  --url received no credential"
+pings=$(grep -c '"path":"/ping"' "$SPY_LOG" || true)
+[ "${pings:-0}" -ge 1 ] && ok "  --url was reached ($pings ping(s)), so the checks above saw real traffic" || bad "  the spy saw no request at all — nothing was proven"
+grep -v '"path":"/ping"' "$SPY_LOG" | grep -q path && bad "  --url got more than a ping" "$(grep -v '/ping' "$SPY_LOG" | head -2)" || ok "  --url was only pinged"
+kill "$SPY_PID" 2>/dev/null || true; wait "$SPY_PID" 2>/dev/null || true
+
 # ── cleanup ────────────────────────────────────────────────────────────────────────
-for u in im_member im_target im_made im_occupy im_bare im_envadm im_stdinadm im_keepadm im_noadm im_genadm im_psql; do
+for u in im_member im_target im_made im_occupy im_bare im_envadm im_stdinadm im_keepadm im_noadm im_genadm im_psql im_g4a im_g4b; do
   q "DROP USER IF EXISTS $u" >/dev/null 2>&1 || true
   q "DROP DATABASE IF EXISTS $u SYNC" >/dev/null 2>&1 || true
-  for t in $(q "SELECT name FROM system.tables WHERE database='mem' AND startsWith(name, '${u}_') FORMAT TSV" 2>/dev/null); do
-    q "DROP TABLE IF EXISTS mem.$t SYNC" >/dev/null 2>&1 || true
+  # Every database, not just mem: an invite into the admin's own house (db = its configured
+  # one, e.g. `default`) leaves rooms there, and a second run then finds the name occupied.
+  for t in $(q "SELECT concat(database, '.', name) FROM system.tables WHERE database NOT IN ('system','INFORMATION_SCHEMA','information_schema') AND startsWith(name, '${u}_') FORMAT TSV" 2>/dev/null); do
+    q "DROP TABLE IF EXISTS $t SYNC" >/dev/null 2>&1 || true
   done
 done
 

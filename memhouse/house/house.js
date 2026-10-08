@@ -412,6 +412,31 @@ function statRefreshStatements(rooms, at = 'now64(3)') {
     `INSERT INTO ${names[k]} SELECT ${at} AS refreshed_at, * FROM (${bodies[k].body})`);
 }
 
+/**
+ * When the shipper refreshes the stat tables (G11). After every pass that shipped something,
+ * as before — and ALSO when the newest generation is older than STATS_MAX_AGE_MS, even if
+ * nothing shipped. The tables carry a one-day TTL, so a house whose machines went quiet for
+ * a day used to lose every generation and the dashboard went empty while the rooms still
+ * held everything. `ageMs` null means "could not tell" (no table, no rights): do not refresh
+ * on age then; the read layer is already on the inline rollup.
+ */
+const STATS_MAX_AGE_MS = 60 * 60 * 1000;
+function statsNeedRefresh({ shipped, ageMs, maxAgeMs = STATS_MAX_AGE_MS }) {
+  if (shipped > 0) return true;
+  return ageMs !== null && ageMs !== undefined && ageMs > maxAgeMs;
+}
+
+/**
+ * How long a reader may keep its resolved rooms (G11). resolveRooms() decides once whether
+ * the stat tables are usable or the inline rollup must answer; a long-running dashboard that
+ * never asked again kept reading a stat table after its TTL had emptied it. Re-resolving
+ * every few minutes costs one small round trip and lets it follow the house either way.
+ */
+const ROOMS_TTL_MS = 5 * 60 * 1000;
+function roomsCacheStale(resolvedAt, now = Date.now(), ttlMs = ROOMS_TTL_MS) {
+  return !resolvedAt || now - resolvedAt > ttlMs;
+}
+
 /** The read-side source for one stat table: its newest generation, and nothing else. */
 function latestGeneration(table) {
   return `(SELECT * FROM ${table} WHERE refreshed_at = (SELECT max(refreshed_at) FROM ${table}))`;
@@ -598,4 +623,5 @@ module.exports = {
   sessionsRollup, currentParse, createStatement, roomNames, currentUser, resolveRooms,
   SESSION_STATS, MODEL_STATS, TOOL_STATS, statTableNames, hasSessionStats, statTables,
   statCreateStatements, statRefreshStatements, latestGeneration,
+  STATS_MAX_AGE_MS, statsNeedRefresh, ROOMS_TTL_MS, roomsCacheStale,
 };

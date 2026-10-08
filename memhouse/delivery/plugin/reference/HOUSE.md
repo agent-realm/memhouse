@@ -101,11 +101,23 @@ session finds nothing — look inside the parent:
 ```sql
 -- the subagents a session spawned
 SELECT toString(extra.agent.id) AS agent, any(toString(extra.agent.description)) AS asked_to, count() AS turns
-FROM messages WHERE session_id = '<sid>' AND is_subagent GROUP BY agent   -- toString: a JSON path cannot be a GROUP BY key
+FROM messages FINAL
+WHERE session_id = '<sid>' AND user_id = '<uid>' AND is_subagent
+  AND (origin != 'ship' OR epoch = (SELECT max(epoch) FROM messages
+       WHERE session_id = '<sid>' AND user_id = '<uid>' AND origin = 'ship'))
+GROUP BY agent   -- toString: a JSON path cannot be a GROUP BY key
 -- one subagent's transcript, in order
-SELECT seq, role, substring(text, 1, 2000) FROM messages
-WHERE session_id = '<sid>' AND extra.agent.id = '<agent>' ORDER BY seq
+SELECT seq, role, substring(text, 1, 2000) AS text FROM messages FINAL
+WHERE session_id = '<sid>' AND user_id = '<uid>' AND toString(extra.agent.id) = '<agent>'
+  AND (origin != 'ship' OR epoch = (SELECT max(epoch) FROM messages
+       WHERE session_id = '<sid>' AND user_id = '<uid>' AND origin = 'ship'))
+ORDER BY seq
 ```
+
+Both carry the current-epoch filter (trap 1 below). A session whose subagents were
+re-parsed holds every parse, so an unfiltered count doubles each subagent's turns, and an
+unfiltered transcript repeats them. `<uid>` is the session's `user_id`, from whatever
+query found it (trap 2).
 
 **`messages`** — one row per turn.
 

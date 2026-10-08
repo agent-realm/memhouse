@@ -1748,5 +1748,62 @@ test('a fresh subagent with no timestamped line holds its session for a pass (GL
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('invite sends a STORED credential only to the house it was saved for (G4)', () => {
+  const { provisionTarget } = require('../memhouse/invite-target');
+  const url = 'https://invitee-facing.example:8443'; const storedUrl = 'https://house.example:8443';
+  // The member's own credential and an admin kept in the env file are stored: never to --url.
+  for (const adminUserSource of ['member', 'file']) {
+    assert.deepStrictEqual(provisionTarget({ url, storedUrl, adminUserSource }), { url: storedUrl, stored: true }, adminUserSource);
+  }
+  // --admin-user typed now, but its password resolved from the env file: still stored.
+  assert.deepStrictEqual(provisionTarget({ url, storedUrl, adminUserSource: 'flag', passwordSource: 'stored' }), { url: storedUrl, stored: true });
+  // An admin given for this command, with a password given for it, provisions where it was pointed.
+  for (const passwordSource of ['env', 'file', 'stdin', 'prompt', 'flag']) {
+    assert.deepStrictEqual(provisionTarget({ url, storedUrl, adminUserSource: 'flag', passwordSource }), { url, stored: false }, passwordSource);
+    assert.deepStrictEqual(provisionTarget({ url, storedUrl, adminUserSource: 'env', passwordSource }), { url, stored: false }, passwordSource);
+  }
+  // A stored credential with no stored house to send it to is refused, never sent to --url.
+  assert.ok(provisionTarget({ url, storedUrl: null, adminUserSource: 'member' }).error);
+  assert.ok(provisionTarget({ url, storedUrl: null, adminUserSource: 'flag', passwordSource: 'stored' }).error);
+});
+
+test('every skill finds the shared reference where the plugin installs it (G26)', () => {
+  // Installed as <config>/skills/mem/{reference/HOUSE.md, skills/<name>/SKILL.md} — the same
+  // shape as memhouse/delivery/plugin/, which plugins install copies verbatim.
+  const root = path.join(__dirname, '..', 'memhouse', 'delivery', 'plugin');
+  const skills = fs.readdirSync(path.join(root, 'skills')).filter((n) => fs.existsSync(path.join(root, 'skills', n, 'SKILL.md')));
+  assert.ok(skills.length >= 5, 'the five skills');
+  for (const n of skills) {
+    const dir = path.join(root, 'skills', n);
+    const refs = [...fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf-8').matchAll(/`((?:\.\.\/)+reference\/[A-Za-z]+\.md)`/g)].map((m) => m[1]);
+    assert.ok(refs.length > 0, `${n} points at the reference`);
+    for (const r of refs) assert.ok(fs.existsSync(path.join(dir, r)), `${n}: ${r} does not resolve from skills/${n}/`);
+  }
+});
+
+test('stats refresh when stale even if nothing shipped; readers re-resolve their rooms (G11)', () => {
+  const h = require('../memhouse/house/house');
+  const H = h.STATS_MAX_AGE_MS;
+  assert.strictEqual(h.statsNeedRefresh({ shipped: 3, ageMs: 0 }), true, 'a pass that shipped refreshes, as before');
+  assert.strictEqual(h.statsNeedRefresh({ shipped: 0, ageMs: H - 1 }), false, 'a fresh generation is left alone');
+  assert.strictEqual(h.statsNeedRefresh({ shipped: 0, ageMs: H + 1 }), true, 'an old one is refreshed though nothing shipped');
+  assert.strictEqual(h.statsNeedRefresh({ shipped: 0, ageMs: Infinity }), true, 'an emptied table (TTL) is refilled');
+  assert.strictEqual(h.statsNeedRefresh({ shipped: 0, ageMs: null }), false, 'unreadable: do not refresh on every idle pass');
+  assert.ok(H < 24 * 3600 * 1000, 'the age limit must undercut the one-day TTL, or the dashboard empties first');
+  const now = 1_000_000_000;
+  assert.strictEqual(h.roomsCacheStale(0, now), true, 'never resolved');
+  assert.strictEqual(h.roomsCacheStale(now - 1000, now), false, 'just resolved');
+  assert.strictEqual(h.roomsCacheStale(now - h.ROOMS_TTL_MS - 1, now), true, 'resolved too long ago');
+  // The dashboard's cache must use it — a process-lifetime cache is the bug.
+  const q = fs.readFileSync(path.join(__dirname, '..', 'memhouse', 'server', 'queries.js'), 'utf-8');
+  assert.match(q, /roomsCacheStale\(roomsAt\)/, 'queries.js rooms() must re-resolve when stale');
+  const ship = fs.readFileSync(path.join(__dirname, '..', 'memhouse', 'shipper', 'ship.js'), 'utf-8');
+  assert.ok(!/if \(sessions > 0\) await refreshStats/.test(ship), 'refresh must not be gated on shipping alone');
+  // …and the one call site that refreshes after a pass must ask statsNeedRefresh.
+  const site = ship.slice(ship.indexOf('for (const table of Object.keys(batches)) await flush(table);'));
+  assert.match(site.slice(0, 600), /if \(statsNeedRefresh\(\{ shipped: sessions,[^]*?\)\) \{\s*await refreshStats\(client, rooms\);/,
+    'the end-of-pass refresh must be decided by statsNeedRefresh');
+});
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

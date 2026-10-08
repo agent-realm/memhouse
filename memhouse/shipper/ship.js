@@ -66,7 +66,7 @@ const selfSnap = selfUpdate.snapshot(__filename);
 const {
   resolveRooms, READ_SETTINGS, ROOM_TYPES, META_TYPES, SCHEMA_VERSION, MEMBER_PIN, createStatement,
   SUPPORTED_SCHEMAS, keyProblem, legacyTextIndexDialect, isTextIndexGrammarRefusal, textIndexDialectFor,
-  statCreateStatements, statRefreshStatements, statTableNames,
+  statCreateStatements, statRefreshStatements, statTableNames, statsNeedRefresh,
 } = require('../house/house');
 // Rooms plus the house's own record of itself. Every table the template declares, which
 // is what the column healer and the drift warning have to cover — a column added to
@@ -1266,6 +1266,24 @@ async function loadStoredParse(client, rooms, id, uid, epoch) {
 }
 
 /**
+ * How old the newest stats generation is, in ms. Infinity when the table is empty (a TTL
+ * emptied it, or no refresh ever landed); null when it cannot be read at all, so a house
+ * without the tables is not refreshed on every idle pass. Cheap: count() is metadata and
+ * refreshed_at leads the sorting key.
+ */
+async function statsAgeMs(client, rooms) {
+  try {
+    const t = statTableNames(rooms.member).session_stats;
+    const rs = await client.query({
+      query: `SELECT count() AS n, dateDiff('second', max(refreshed_at), now64(3)) AS age FROM ${t}`,
+      format: 'JSONEachRow',
+    });
+    const [r] = await rs.json();
+    return Number(r.n) > 0 ? Number(r.age) * 1000 : Infinity;
+  } catch { return null; }
+}
+
+/**
  * Recompute the three stat tables — one generation, one INSERT each, all stamped with the
  * same refreshed_at. Runs at the end of every ship pass, which is exactly the cadence a
  * refreshable view would have had, and after --ensure-schema. Best effort: a house whose
@@ -1454,9 +1472,12 @@ async function runShip(client, opts = {}) {
     for (const r of send.toolRows) { r.epoch = epoch; await push('tool_calls', scrub(r)); toolRows++; }
   }
   for (const table of Object.keys(batches)) await flush(table);
-  // The dashboard's tables, recomputed from what this pass just wrote. Skipped on a pass
-  // that shipped nothing: the previous generation is still exact.
-  if (sessions > 0) await refreshStats(client, rooms);
+  // The dashboard's tables, recomputed from what this pass just wrote. A pass that shipped
+  // nothing leaves an exact generation alone — unless it is getting old: the tables carry a
+  // one-day TTL, and a quiet house used to age out of its dashboard entirely (G11).
+  if (statsNeedRefresh({ shipped: sessions, ageMs: sessions > 0 ? 0 : await statsAgeMs(client, rooms) })) {
+    await refreshStats(client, rooms);
+  }
   // Anything that only failed while reading messages — the sink is reset by the
   // next getAllChats(), so unreported here means never reported at all.
   reportAdapterErrors(warned);

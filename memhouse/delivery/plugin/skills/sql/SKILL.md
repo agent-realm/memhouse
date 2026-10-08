@@ -11,7 +11,7 @@ allowed-tools: Bash
 For **numbers**. When the answer is a passage from a past conversation, that is
 `/mem:recall` — this skill counts, groups and ranks.
 
-**Read `../reference/HOUSE.md` first.** Schema, connection, and the three traps. The epoch
+**Read `../../reference/HOUSE.md` first.** Schema, connection, and the three traps. The epoch
 filter in particular is not optional here: this is the skill most likely to produce a
 figure someone acts on, and omitting it over-counted a real house by **34%**.
 

@@ -18,7 +18,7 @@
 
 const { createClient, ClickHouseLogLevel } = require('@clickhouse/client');
 const { calculateCost, normalizeModelName } = require('../../pricing');
-const { resolveRooms, READ_SETTINGS } = require('../house/house');
+const { resolveRooms, READ_SETTINGS, roomsCacheStale } = require('../house/house');
 
 const config = {
   url: process.env.MEMHOUSE_URL || 'http://localhost:8123',
@@ -90,11 +90,16 @@ const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 // braces, no type.
 const ROOM_TOKEN = /\{\{([a-z_]+)\}\}/g;
 let roomsPromise = null;
+let roomsAt = 0;
 
 function rooms() {
-  // Resolved once per process. resolveRooms asks the server for currentUser(), so it is a
-  // round trip, and every dashboard request would otherwise pay for it.
-  if (!roomsPromise) {
+  // Cached, because resolveRooms asks the server for currentUser() and which stat tables
+  // are usable, and every dashboard request would otherwise pay that round trip. But not
+  // for the life of the process: whether the stat tables can answer changes — their TTL
+  // empties them on a quiet house, a refresh fills them again — and a dashboard that
+  // decided once kept reading an emptied table and showed nothing (G11).
+  if (!roomsPromise || roomsCacheStale(roomsAt)) {
+    roomsAt = Date.now();
     roomsPromise = resolveRooms(getClient()).catch((e) => { roomsPromise = null; throw e; });
   }
   return roomsPromise;

@@ -12,7 +12,7 @@ A member owns a house, or rooms in one. An **administrator** owns the ClickHouse
 account, every grant. This skill is the second one, and it is the only skill allowed to
 act outside the caller's own house.
 
-**Read `../reference/HOUSE.md` first** — connection, schema, and the traps every query
+**Read `../../reference/HOUSE.md` first** — connection, schema, and the traps every query
 here inherits.
 
 **An admin password must never enter this conversation.** memhouse ships this transcript
