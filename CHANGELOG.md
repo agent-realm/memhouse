@@ -4,6 +4,76 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **A session with subagents ships only its new rows, like any other.** 0.18.8's tail-only
+  shipping did not reach the sessions that grow the most: folded subagent rows were numbered
+  by position after the parent's turns, so one new parent turn moved every one of them, the
+  session forked to a new epoch and re-sent itself whole on every pass. Measured on a real
+  house: 1.07 M message rows written in 24 h against 10.2 M in total, most of them full
+  copies of five sessions, one 6,120-line session stored 60 times in a day. A subagent's
+  rows now sit in a block of their own — `seq = 1,000,000,000 + slot × 100,000 + turn`,
+  `tool_calls.idx` the same — where `slot` is the subagent's rank by start time, so neither
+  the parent growing, a running subagent growing, nor a new subagent appearing moves an
+  existing row. The session's own turns keep `0, 1, 2, …`, so a session without subagents
+  is numbered exactly as before. Readers that `ORDER BY seq` see the parent first, then each
+  subagent contiguous, in the order they started (they were in agent-id order, which is
+  random). `seq` is sparse now: count with `count()`, never `max(seq) + 1`.
+  **Upgrade cost, once:** every stored session with subagents forks exactly one time, the
+  first time it is re-shipped after the upgrade (it grows, or `ship --full`), and is
+  tail-only from then on. The superseded epoch is kept, as every epoch is. Sessions without
+  subagents are not affected. Two things widen that first pass:
+  - A session whose subagent files are newer than the house's record of it is read again on
+    the first pass even if it did not grow. `lastUpdatedAt` now counts subagent writes; see
+    the next entry. So the first pass after the upgrade forks and re-sends every such
+    session whole, once.
+  - Two installs that ship the SAME session files (two instances on one machine, or a
+    synced directory) must be upgraded together. A 0.18.10 and a 0.18.11 number the same
+    session differently, and each would fork it back on every pass.
+
+  **The first pass is a one-time bulk write into the house.** Schedule it, and do not
+  run it on a house whose storage is degraded. A parse that does not fit the blocks (a parent past 1e9
+  turns, a subagent past 100,000, more than 32,949 subagents) falls back to positional
+  numbering, which is correct and merely re-ships whole.
+- **A subagent that runs on after its parent goes quiet is shipped on the next pass.** The
+  incremental skip compared only the parent file's mtime (or the index's `modified`), and a
+  subagent writes only its own file, so a background agent's turns waited for the parent's
+  next write, or were never shipped. A session's `lastUpdatedAt` is now the newest mtime of
+  the parent and every subagent transcript, Workflow-run agents included — stat calls only,
+  and only for sessions that have a subagent directory. After upgrading, a session whose
+  subagents are newer than its parent is re-read once on the first pass, and ships the turns
+  it was missing.
+- **`memhouse update --no-install` restarts a tarball or nightly install.** It is the command
+  every nightly prints for itself, and on exactly those builds it stopped at "no automatic
+  update for this install" (a tarball is on no registry tag), exited 1, and left the old
+  shipper running the old code in memory. `--no-install` no longer needs a channel: the
+  files are already in place, and the restart, migrations and schema check run. Found while
+  upgrading testbed from 0.18.9 to a nightly of this release.
+
+- **A subagent caught before its first line is written holds its session for one pass.**
+  A subagent with no timestamped line ranked last. When its first line then landed with an
+  earlier time than a sibling's, it moved ahead of it, renumbered every sibling after it,
+  and the session forked and re-shipped whole. Now the shipper waits a pass (`held for one
+  pass` in the log) and ranks it by its real start time. A file that never gets a
+  timestamped line stops holding the session after 10 minutes. (GLM-F1)
+- **An option that takes no value no longer swallows the next word.**
+  - `memhouse update --no-install yes` set no-install to "yes", and ran the npm install it
+    was told to skip.
+  - `memhouse share --revoke bob` revoked nobody.
+  - Switches are now true when present, and the next word stays a positional.
+  (A6, review G34)
+- **`update --channel <name>` pins only a channel the registry has.** It compared the flag
+  with itself and never wrote the pin at all. A name that is not a tag is now refused, and
+  nothing is pinned. When the registry does not answer, the channel is not pinned. (A5)
+- **`update --no-install` no longer prints "files updated"** for files it did not touch.
+  It also now runs on a project-dependency install too; it installs nothing, so where the
+  files came from does not matter. (A6)
+- **The epoch log line counts rows, not the highest seq.** On a session with subagents it
+  read "1000000123 messages stored". (A4)
+- **Docs: the host id is derived from the machine's own id, not random,** since 0.18.6.
+  The guides, `HOUSE.md`, `host.js` and `uninstall --full-removal` said a reinstall mints a
+  new identity. It derives the same one again. (A8)
+
 ## 0.18.10 — 2026-10-08
 
 Release notes: [`docs/releases/v0.18.10.md`](docs/releases/v0.18.10.md), covering what

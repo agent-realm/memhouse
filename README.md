@@ -14,8 +14,8 @@ can search every past session, see what it cost, and reopen the one that solved 
 before.
 
 Every row says where it came from, in a way no client can fake. `user_id` is stamped by
-the server (`MATERIALIZED currentUser()`), and `host` is a fingerprint minted once per
-install. A team pointed at one house gets a shared memory with real attribution.
+the server (`MATERIALIZED currentUser()`), and `host` is a fingerprint derived from
+the machine's own id. A team pointed at one house gets a shared memory with real attribution.
 
 ## Install
 

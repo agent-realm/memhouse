@@ -14,13 +14,18 @@
 //   * One machine splits. Rename the box and every row shipped afterwards lands under a
 //     new host, so the machine's own history appears to end and a stranger's to begin.
 //
-// A random fingerprint, written once and kept, fixes both: nothing derives it, so nothing
-// can collide with it, and nothing about the machine changing can move it.
+// So the fingerprint comes from the OS's own machine id (IOPlatformUUID, /etc/machine-id,
+// MachineGuid), hashed with a fixed salt (machineFingerprint), never from the hostname: two
+// machines cannot share it and a rename cannot move it. Since 0.18.6. Before that it was
+// random, which fixed both of the above but split a machine whenever MEMHOUSE_HOME was
+// wiped: a re-imaged laptop came back as a stranger. Where no machine id can be read it is
+// still random.
 //
-// It lives in MEMHOUSE_HOME and is deliberately NOT removed by a plain `memhouse
-// uninstall` — reinstalling on the same machine should continue that machine's history,
-// not start a second one beside it. `uninstall --full-removal` drops it, and then the
-// machine genuinely is a new host next time; that is the honest meaning of full removal.
+// It is written once to MEMHOUSE_HOME/host.json and an existing file always wins, so no
+// install changes identity under it. `uninstall --full-removal` drops the file, and the
+// next install derives the same fingerprint again from the same machine. The id also
+// carries the hostname the machine had at first install, so it comes back the same unless
+// the machine was renamed in between, or has no readable machine id.
 
 const fs = require('fs');
 const os = require('os');

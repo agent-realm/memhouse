@@ -8,7 +8,7 @@
 //                                                  clients (async_insert is pinned to 0
 //                                                  on the user so the stamp cannot be
 //                                                  skipped)
-//   host     LowCardinality(String)              — the machine's fingerprint, minted once
+//   host     LowCardinality(String)              — the machine's fingerprint, derived from its OS machine id
 //                                                  per install (../host.js)
 //
 // That pair IS the provenance model.

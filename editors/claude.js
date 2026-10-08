@@ -74,13 +74,18 @@ function getChats() {
     } catch { /* no index */ }
 
     // Scan all .jsonl files on disk (some may not be in the index)
-    let files;
-    try { files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')); } catch { continue; }
+    let names;
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    const files = names.filter(f => f.endsWith('.jsonl'));
+    // A session with subagents also has a directory named for it; one without has none, so
+    // this listing is how the mtime check below stays free for the sessions it cannot help.
+    const sessionDirs = new Set(names.filter(f => !f.endsWith('.jsonl')));
 
     for (const file of files) {
       const sessionId = file.replace('.jsonl', '');
       const fullPath = path.join(dir, file);
       const entry = indexed.get(sessionId);
+      const subTouched = sessionDirs.has(sessionId) ? newestSubagentMtime(path.join(dir, sessionId, 'subagents')) : 0;
 
       if (entry) {
         // Use index metadata
@@ -89,7 +94,7 @@ function getChats() {
           composerId: sessionId,
           name: cleanPrompt(entry.firstPrompt),
           createdAt: entry.created ? new Date(entry.created).getTime() : null,
-          lastUpdatedAt: entry.modified ? new Date(entry.modified).getTime() : null,
+          lastUpdatedAt: latest(entry.modified ? new Date(entry.modified).getTime() : null, subTouched),
           mode: 'claude',
           folder: entry.projectPath || decodedFolder,
           encrypted: false,
@@ -107,7 +112,7 @@ function getChats() {
             composerId: sessionId,
             name: meta.firstPrompt ? cleanPrompt(meta.firstPrompt) : null,
             createdAt: meta.timestamp || stat.birthtime.getTime(),
-            lastUpdatedAt: stat.mtime.getTime(),
+            lastUpdatedAt: latest(stat.mtime.getTime(), subTouched),
             mode: 'claude',
             folder: meta.cwd || decodedFolder,
             encrypted: false,
@@ -195,7 +200,7 @@ function cleanPrompt(prompt) {
 // Parse one Claude session .jsonl into the adapter's message shape. When
 // `isSubagent` is set, each message is tagged `[subagent]` so folded subagent turns
 // are clearly attributed in the transcript.
-function parseSessionFile(filePath, isSubagent, agent = null) {
+function parseSessionFile(filePath, isSubagent, agent = null, info = null) {
   const messages = [];
   let lines;
   try { lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean); } catch { return messages; }
@@ -205,7 +210,9 @@ function parseSessionFile(filePath, isSubagent, agent = null) {
   // cited, or told apart from a sibling's. An agent looking for the fork as its own session
   // concluded it was never shipped. Every turn now carries the agent's id, the description
   // the parent gave it, and its position within that subagent — in `extra`, which is not
-  // part of the line hash, so nothing already shipped is re-shipped for this.
+  // part of the line hash. The position is not only a label any more: the shipper numbers
+  // a subagent's rows from it (seq = block + turn, see subagentSeq in ship.js), so `turn`
+  // must count exactly the turns this parse keeps, in order.
   let turn = 0;
   const stamp = (m) => { if (agent) { m._agent = { ...agent, turn: turn++ }; } return m; };
 
@@ -228,6 +235,7 @@ function parseSessionFile(filePath, isSubagent, agent = null) {
     // time simply omit it.
     const _ts = obj.timestamp ? Date.parse(obj.timestamp) : undefined;
     const at = Number.isFinite(_ts) ? _ts : undefined;
+    if (info && info.firstTs === undefined && at !== undefined) info.firstTs = at;
 
     if (obj.type === 'user' && obj.message) {
       const content = extractContent(obj.message.content);
@@ -249,6 +257,10 @@ function parseSessionFile(filePath, isSubagent, agent = null) {
   return messages;
 }
 
+// How long a subagent transcript without a single timestamped line may hold back its
+// session (see getMessages). A real one gets its first line within seconds.
+const SUBAGENT_STAMP_GRACE_MS = 10 * 60 * 1000;
+
 function getMessages(chat) {
   const filePath = chat._fullPath;
   if (!filePath || !fs.existsSync(filePath)) return [];
@@ -262,30 +274,76 @@ function getMessages(chat) {
   const subagentsDir = path.join(filePath.replace(/\.jsonl$/, ''), 'subagents');
   const subFiles = subagentFiles(subagentsDir);
   const named = subFiles.length ? subagentNames(filePath) : new Map();
+  const folded = [];
+  let unstamped = null;
   for (const { file, workflow } of subFiles) {
     const id = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
     const meta = named.get(id) || {};
     const agent = { id, description: meta.description || '', type: meta.type || (workflow ? 'workflow-subagent' : ''), file: path.basename(file) };
     if (workflow) agent.workflow = workflow;
-    const turns = parseSessionFile(file, true, agent);
+    const info = {};
+    const turns = parseSessionFile(file, true, agent, info);
     // A fork the parent never named (a Workflow-run agent, or a parent from before the
     // ids were reported) is described by its own first prompt — what it was told to do.
     if (!agent.description) {
       const first = turns.find((m) => m.role === 'user');
       if (first) { const d = String(first.content).replace(/^\[subagent\] /, '').replace(/\s+/g, ' ').trim().slice(0, 160); for (const m of turns) m._agent.description = d; }
     }
-    messages.push(...turns);
+    folded.push({ key: path.relative(subagentsDir, file), firstTs: info.firstTs, turns });
+    // A subagent caught before its first line is written has no start time, so it ranks
+    // last — and when its first line lands with an EARLIER timestamp than a sibling's, it
+    // moves, renumbers every sibling after it, and the session forks and re-ships whole
+    // (GLM-F1). So a fresh one defers the whole session to the next pass, when it has a
+    // time. Bounded by age: a file that never gets a timestamped line stops deferring after
+    // SUBAGENT_STAMP_GRACE_MS and ranks last, as before.
+    if (info.firstTs === undefined && !unstamped) {
+      let age = Infinity;
+      try { age = Date.now() - fs.statSync(file).mtimeMs; } catch { /* gone: nothing to wait for */ }
+      if (age < SUBAGENT_STAMP_GRACE_MS) unstamped = path.relative(subagentsDir, file);
+    }
+  }
+  // Each subagent gets a SLOT, and the shipper numbers its rows from that slot rather than
+  // from where they happen to land in this array (see subagentSeq in ship.js). The slot is
+  // the subagent's rank by when it started — the timestamp on its transcript's first line —
+  // because that is the one order a new subagent cannot disturb: it started after every
+  // subagent already on disk, so it ranks last. The file-name order this used to fold in
+  // does not have that property: agent ids are random, so a new fork sorted into the middle
+  // and pushed every later subagent's rows down, and a session with subagents re-shipped
+  // whole on every pass (one 6,120-line session was stored 60 times in a day). A file with
+  // no timestamp yet ranks after every one that has one; the path breaks ties.
+  folded.sort((a, b) => (a.firstTs === undefined) - (b.firstTs === undefined)
+    || (a.firstTs || 0) - (b.firstTs || 0) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  folded.forEach(({ turns }, slot) => { for (const m of turns) m._agent.slot = slot; messages.push(...turns); });
+  if (unstamped) {
+    Object.defineProperty(messages, '_defer', { value: `subagent ${unstamped} has no timestamped line yet`, enumerable: false });
   }
 
   return messages;
 }
 
 /**
+ * When a session was last written, counting its subagents. The shipper's incremental skip
+ * compares `lastUpdatedAt` with what the house recorded, and a subagent writes only its own
+ * file: a background agent that runs on after its parent goes quiet left the parent's mtime
+ * (and the index's `modified`) where they were, so its turns shipped at the parent's next
+ * write, or never. Stat calls only, and only for a session that has a directory.
+ */
+function newestSubagentMtime(subagentsDir) {
+  let newest = 0;
+  for (const { file } of subagentFiles(subagentsDir)) {
+    try { newest = Math.max(newest, fs.statSync(file).mtimeMs); } catch { /* vanished mid-pass */ }
+  }
+  return Math.floor(newest);
+}
+function latest(a, b) { return b && (!a || b > a) ? b : a; }
+
+/**
  * Every subagent transcript under a session, wherever Claude Code put it:
  *   <session>/subagents/agent-<id>.jsonl                       — Agent tool forks
  *   <session>/subagents/workflows/wf_<id>/agent-<id>.jsonl     — Workflow-run agents
- * journal.jsonl and *.meta.json are bookkeeping, not transcripts. Sorted for a stable
- * fold order. On real data the workflow layer held 100 of 165 forks and shipped none.
+ * journal.jsonl and *.meta.json are bookkeeping, not transcripts. Sorted so the listing is
+ * deterministic; the fold ORDER is set by start time in getMessages, not by this.
+ * On real data the workflow layer held 100 of 165 forks and shipped none.
  */
 function subagentFiles(subagentsDir) {
   const out = [];

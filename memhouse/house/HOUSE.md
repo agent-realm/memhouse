@@ -17,7 +17,7 @@ Two columns say where every row came from:
 | Column | Meaning | Comes from |
 |---|---|---|
 | `user_id` | who wrote it | `String MATERIALIZED currentUser()` — stamped by the server, unforgeable by clients. `async_insert = 0 CONST` is pinned on each user (`ADD SETTING`, which merges — a bare `SETTINGS` clause replaces the user's whole list) because an async flush stores the stamp as the empty string (measured on 25.11.9.34) |
-| `host` | which machine | the install's fingerprint (`../host.js`) — random, minted once, so two machines with the same hostname cannot collide and renaming one cannot split its history |
+| `host` | which machine | the machine's fingerprint (`../host.js`) — derived from the OS machine id (random only where none can be read), so two machines with the same hostname cannot collide and renaming one cannot split its history |
 
 `WHERE user_id = 'alice'` is one person. `WHERE host = 'macbook-4127a95b'` is one
 machine. No filter is the whole house — which is what a team dashboard wants.
