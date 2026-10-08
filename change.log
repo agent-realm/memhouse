@@ -1,0 +1,238 @@
+memhouse — tags and their changes
+==================================
+
+Generated 2026-10-08 from `git tag` and CHANGELOG.md. 47 tags: 45 releases, plus 2
+non-release tags. The 0.17.1 entry comes from the v0.17.1 tag, because that release shipped
+on the retired release/0.17 line and is not in main's CHANGELOG. For 0.3.x and 0.4.x, the
+CHANGELOG has one grouped section per series, so this file uses each tag's message.
+CHANGELOG.md has the full text; from 0.18.10 on, docs/releases/ has one document per
+release.
+
+
+Unreleased — 0.18.10 (PR #16, not yet tagged)
+---------------------------------------------
+- A scoped share now shares only what its scope filters.
+- `--revoke` withdraws the grant before it drops the filters.
+- `--only ""` is refused.
+- The permissive-server check before a scoped share actually runs.
+- An admin password never has to go on the command line. `--admin-password` is
+  deprecated, and removed in 0.19.0.
+- The admin credential is not saved unless `--keep-admin`.
+- Daemons never carry the admin credential.
+
+
+0.18.x — one layout, team channel
+---------------------------------
+
+v0.18.9   2026-09-22
+- The Sessions page no longer renders blank on a house with ~900+ sessions.
+- An error with no message now says something.
+
+v0.18.8   2026-09-22
+- A growing session re-ships only its tail.
+
+v0.18.7   2026-09-19
+- `status` and `doctor` say when an update is out.
+
+v0.18.6   2026-09-19
+- An upgrade no longer leaves a broken window.
+- A converted house is complete when `convert` finishes.
+- The dashboard adopts a moved house.
+- A machine keeps its host identity across reinstalls.
+
+v0.18.5   2026-09-18
+- One release line.
+- `memhouse convert`: an operator moves a pre-one-layout house to the one layout.
+- A member's env file repairs itself after the move.
+
+v0.18.4   2026-09-17
+- `memhouse update` never crosses release lines on its own.
+- `install --env` keeps the invite's channel, editors and roots.
+
+v0.18.3   2026-09-17
+- Folded subagent turns say which subagent they came from.
+- Workflow-run agents ship.
+- Bare `memhouse` beside an invite offers to process it.
+- A playbook is bound to the instance that installed its plugin.
+- The dashboard reads precomputed rollups.
+- Every endpoint issues its reads in one round trip.
+- `/api/chats` prices the page, not the house.
+
+v0.18.2   2026-09-11
+- The shipper spawned by `install --env` holds the rotated password.
+- `status` and `doctor` read the shipper log's last pass.
+
+v0.18.1   2026-09-08
+- `memhouse instance`: which memhouse this is, on one screen.
+- Playbook binding: `plugins install` stamps MEMHOUSE_HOME / MEMHOUSE_BIN into the
+  playbook's settings.
+- Bare `memhouse` beside an `invite-<name>.env` offers to join.
+
+v0.18.0   2026-09-08   (16 items; main ones)
+- One layout: rooms are `mem.<member>_*`, one grant per member.
+- One provisioning plan.
+- Standalone is a team of one.
+- The bookkeeping rooms are `<member>_meta` and `<member>_events`.
+- You can choose which sessions ship.
+- `memhouse update` follows the channel the install came from.
+- `invite` writes MEMHOUSE-INVITATION.md beside the credential.
+- Houses from before this layout are refused, loudly.
+
+
+0.17.x and earlier
+------------------
+
+v0.17.1   2026-09-15   (release/0.17 line)
+- The dashboard reads precomputed rollups.
+- Every endpoint issues its reads in one round trip.
+- `/api/chats` prices the page, not the house.
+- `install` and `update` create the rollups.
+
+v0.17.0   2026-08-25
+- `memhouse share`: partial sharing, by row policy.
+- The /mem:* skillset is five skills and one shared reference, down from ten.
+- The data model is written once, in reference/HOUSE.md.
+- /mem:recall restores a name the canon already carried.
+- The CLI no longer advertises a directory as a skill.
+
+v0.16.0   2026-08-24
+- An unknown option stops the run instead of being ignored.
+- `whoami --admin` says when it fell back.
+
+v0.15.0   2026-08-24
+- `memhouse whoami`: which credential is in play, and what it may actually do.
+- Capability detection is scope-aware, and shared.
+- /mem:admin stops inventing places to keep an admin password.
+
+v0.14.0   2026-08-24
+- An unreachable `--url` says so, instead of blaming your privileges.
+- `--admin-password` is prompted for when omitted.
+
+v0.13.0   2026-08-23
+- New skill: /mem:admin.
+- /mem:invite now finishes the handoff.
+- `memhouse invite` refuses a house that already holds someone's messages.
+- `memhouse relocate` needs GRANT REMOTE ON *.*, and no bootstrap granted it.
+
+v0.12.7   2026-08-20
+- A member fully owns their house: GRANT ALL ON <db>.* ... WITH GRANT OPTION.
+  The one layout in 0.18 replaced this.
+
+v0.12.6   2026-08-20
+- Members can see who else is on the ClickHouse (SHOW USERS).
+- The plugin nudges you when the client is behind.
+
+v0.12.5   2026-08-20
+- `memhouse update` refreshes the Claude plugin too.
+
+v0.12.4   2026-08-20
+- Inserts are gzip-compressed and capped by bytes, so the shipper stops choking slow
+  links.
+
+v0.12.3   2026-08-20
+- `install` no longer blocks on the first ship; it ships in the background.
+
+v0.12.2   2026-08-20
+- The Claude plugin reports the real version.
+
+v0.12.1   2026-08-20
+- The skills no longer fall back to a hardcoded `mem` house.
+
+v0.12.0   2026-08-20
+- `memhouse relocate --to <url>`: moves a whole house to a new ClickHouse,
+  server-to-server, with no re-ingest.
+
+v0.11.3   2026-08-20
+- Read a friend's shared memory by naming their house.
+
+v0.11.2   2026-08-20
+- /mem:hello leads with a what-is overview.
+- The tour separates the three retrieval skills.
+
+v0.11.1   2026-08-20
+- Upgrading from 0.9.x needs one manual step: `memhouse migrate`.
+
+v0.11.0   2026-08-20   (the invite plane)
+- `memhouse invite <name>`.
+- `memhouse install --env <file>`.
+- `memhouse passwd`, and self-service password rotation.
+- `memhouse invite` uses your own credential when it can.
+- /mem:invite and /mem:hello.
+
+v0.10.0   2026-08-20   (17 items; main ones)
+- DELETE FROM is gone from the shipper.
+- `epoch` joins `origin` in the sorting key, and reads show one parse per session.
+- `memhouse migrate`; `memhouse update` names, asks about, or runs pending migrations.
+- `memhouse uninstall` asks first.
+- `memhouse nightly [--out DIR]`.
+- /mem:share and /mem:users.
+
+v0.9.0    2026-08-16
+- `--allow-scripts=better-sqlite3` is retired: SQLite now comes from node:sqlite.
+- `engines` moves to node >=24.
+
+v0.8.0    2026-08-14
+- Provenance is two columns no client can fake: user_id and host.
+- Joining any ClickHouse takes two statements.
+
+v0.7.1    2026-08-13
+- A single per-user pin, `async_insert = 0 CONST`, replaces the shared settings
+  profile; the profile detached members on every provision.
+- `install` no longer reports a user it just created as "already exists".
+
+v0.7.0    2026-08-12
+- `uninstall` has three tiers: the default, `--credentials`, and `--full-removal`.
+- The host identity is a random per-install fingerprint, not a derived id.
+
+v0.6.0    2026-08-12
+- Every path that existed only for versions nobody ran is deleted.
+
+v0.5.0    2026-08-12
+- `memhouse resume <session-id>` prints the command that reopens a session.
+- `memhouse update` restarts daemons and checks the schema.
+- Daemons detect their own upgrade and hand over.
+- `plugins install claude` acts on every Claude Code config dir on the machine.
+
+v0.4.6    2026-08-11
+- Three acceptance rounds against the previous round's fixes.
+
+v0.4.5    2026-08-10
+- Twenty-one defects found by an end-to-end acceptance run.
+
+v0.4.4    2026-08-10
+- The shipper must not destroy rows it did not write: the `origin` guarantee.
+
+v0.4.3    2026-08-09
+- A rendered install prompt, and adapters that degrade one at a time.
+
+v0.4.2    2026-08-09
+- The first published release with per-member rooms.
+
+v0.4.1    2026-08-06
+- The 0.3.x upgrade path.
+
+v0.4.0    2026-08-06
+- Per-member rooms as the only layout. 0.8.0's shared house later superseded this.
+
+v0.3.2    2026-08-02
+- memhouse 0.3.2. The tag message is just the version; CHANGELOG.md has only the
+  grouped 0.3.x section.
+
+v0.3.1    2026-07-31
+- memhouse 0.3.1. The tag message is just the version; CHANGELOG.md has only the
+  grouped 0.3.x section.
+
+v0.3.0    2026-07-24
+- The first tagged release of the memhouse product line: the 17-adapter shipper, a
+  typed ClickHouse schema, the CLI, and the dashboard.
+
+
+Non-release tags
+----------------
+
+arena                         2026-10-04
+- A gentar arena trigger tag, at 963d3de: "the phase-1 dry-run proves
+  memhouse-install; memhouse-house is bench-only".
+
+archive/per-member-rooms-v1   2026-08-04
+- PR #5 as abandoned: 48 commits and 26 Codex review rounds. Superseded by PR #6.
