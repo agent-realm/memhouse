@@ -123,6 +123,10 @@ jobs:
         run: |
           set -euo pipefail
           tar tzf memhouse-*.tgz > /tmp/contents.txt
-          ! grep -iE '\.env$|npmrc|host\.json|credentials|per-member/' /tmp/contents.txt
+          # `! grep` cannot fail a step: bash's -e ignores a command negated with `!`, so this
+          # check passed whatever the tarball held. An explicit exit does fail it.
+          if grep -iE '\.env$|npmrc|host\.json|credentials|per-member/' /tmp/contents.txt; then
+            echo 'tarball holds a file it must not ship'; exit 1
+          fi
           grep -q 'package/public/index.html' /tmp/contents.txt   # built UI present
           grep -q 'package/LICENSE' /tmp/contents.txt
