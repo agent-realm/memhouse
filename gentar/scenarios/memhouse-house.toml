@@ -49,7 +49,26 @@ npm pack "$WORKSPACE_DIR" > pack.log 2>&1 || { tail -30 pack.log; exit 1; }
 npm install -g "$D"/memhouse-*.tgz > install.log 2>&1 || { tail -30 install.log; exit 1; }
 tail -3 install.log''',
   # Documented no-ClickHouse path: loopback house + install + wiring.
-  '''L=$(mktemp); memhouse deploy --local > "$L" 2>&1 || { tail -30 "$L"; exit 1; }; tail -15 "$L"''',
+  # Ownership first: deploy uses fixed names (memhouse-clickhouse, memhouse-data),
+  # and the teardown below removes whatever carries them. So prove neither exists
+  # under any engine that is installed, refuse if one does or an engine cannot
+  # answer, and only then leave the marker that says this suite owns the house.
+  # The marker is written before deploy, so a deploy that dies half-way is still
+  # cleaned up; after deploy it records which engine holds the house.
+  '''M="$HOME/.memhouse-house-suite-owns"; rm -f "$M"
+for e in docker podman; do
+  command -v "$e" >/dev/null 2>&1 || continue
+  n=$("$e" ps -a --format '{{.Names}}') && v=$("$e" volume ls -q) || { echo "$e does not answer; cannot prove no house exists here"; exit 1; }
+  if printf '%s\n' "$n" | grep -qx memhouse-clickhouse || printf '%s\n' "$v" | grep -qx memhouse-data; then
+    echo "a memhouse house already exists under $e; refusing to deploy over it or tear it down"; exit 1
+  fi
+done
+: > "$M"
+L=$(mktemp); memhouse deploy --local > "$L" 2>&1 || { tail -30 "$L"; exit 1; }; tail -15 "$L"
+for e in docker podman; do
+  command -v "$e" >/dev/null 2>&1 || continue
+  "$e" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx memhouse-clickhouse && { echo "$e" > "$M"; break; }
+done''',
   'memhouse status 2>&1 | tail -10',
 ]
 
@@ -94,9 +113,25 @@ command = 'memhouse stats 2>&1 | tail -5'
 # volume. Also this suite's teardown, so it stays LAST (every check above sees
 # the live house): a dry-run on a Docker host (gentar < 0.9.3, or
 # GENTAR_DRYRUN_BENCH_ONLY=run) must not leave a house running there.
-# memhouse-clickhouse and memhouse-data are deploy's fixed names.
-command = '''memhouse stop >/dev/null 2>&1; memhouse deploy --down --yes 2>&1 | tail -2
-c=$(docker ps -a --format '{{.Names}}' | grep -cx memhouse-clickhouse)
-v=$(docker volume ls -q | grep -cx memhouse-data)
-test "$c" = 0 && test "$v" = 0 && echo house-removed'''
+# Gated on the ownership marker the deploy step writes: without it this suite
+# did not create the house, and anything named memhouse-* belongs to someone
+# else. The --down exit status counts, and the engine that holds the house
+# (recorded at deploy; both when unknown) must answer: a check that cannot ask
+# never reports the house gone.
+command = '''M="$HOME/.memhouse-house-suite-owns"
+test -f "$M" || { echo "this suite did not create a house here; leaving any house alone"; exit 1; }
+memhouse stop >/dev/null 2>&1
+out=$(memhouse deploy --down --yes 2>&1); rc=$?; printf '%s\n' "$out" | tail -2
+test "$rc" = 0 || { echo "deploy --down failed (exit $rc)"; exit 1; }
+E=$(cat "$M"); left=0; asked=0
+for e in ${E:-docker podman}; do
+  command -v "$e" >/dev/null 2>&1 || continue
+  n=$("$e" ps -a --format '{{.Names}}') && v=$("$e" volume ls -q) || { echo "$e does not answer; cannot confirm the house is gone"; exit 1; }
+  asked=1
+  printf '%s\n' "$n" | grep -qx memhouse-clickhouse && left=1
+  printf '%s\n' "$v" | grep -qx memhouse-data && left=1
+done
+test "$asked" = 1 || { echo "no container engine answered to confirm with"; exit 1; }
+test "$left" = 0 || { echo "the container or the volume is still there"; exit 1; }
+rm -f "$M"; echo house-removed'''
 contains = "house-removed"
