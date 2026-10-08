@@ -6,11 +6,15 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## 0.18.10 — 2026-10-08
 
-Release notes: [`docs/releases/v0.18.10.md`](docs/releases/v0.18.10.md) — what changed, the
-upgrade steps, and the status of the 0.18.10 pre-tag list. A security release; everyone on
-0.18.x should upgrade. The subagent re-ship fix moves to 0.18.11. The repository now
-meets the documentation standard (#17): a short README, `docs/` tutorials and guides,
-`examples/`, and the `AGENTS.md` install section.
+Release notes: [`docs/releases/v0.18.10.md`](docs/releases/v0.18.10.md), covering what
+changed, the upgrade steps, and the status of the 0.18.10 pre-tag list.
+
+- **A security release; everyone on 0.18.x should upgrade.** It covers G23 (#20), the admin
+  password off argv (#14) and the scoped share boundary (#13).
+- **No drill was run for this release; waived by the pilot (2026-10-08). The drill runs before 0.19.0.**
+- **Moved to 0.18.11:** the subagent re-ship fix and the gentar kit v0.9.3 bump.
+- **Docs:** the repository now meets the documentation standard (#17): a short README,
+  `docs/` tutorials and guides, `examples/`, and the `AGENTS.md` install section.
 
 - **No command prints a member password (G23).**
   - `install --admin-user` used to show the generated password "once". It went into the
