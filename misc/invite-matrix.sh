@@ -43,6 +43,7 @@ envpw() { sed -n "s/^MEMHOUSE_PASSWORD='\(.*\)'$/\1/p" "$1" 2>/dev/null | head -
 # leak <label> <output> <secret>…: no secret may appear in the output, and none may be empty.
 leak() {
   local label=$1 out=$2; shift 2
+  [ -n "$out" ] || { bad "$label: no output to check (did it run?)"; return; }
   for sec in "$@"; do
     [ -n "$sec" ] || { bad "$label: a secret to check for was empty"; return; }
     printf '%s' "$out" | grep -qF -- "$sec" && { bad "LEAK: $label printed a password"; return; }
@@ -56,7 +57,7 @@ echo "invite matrix against $URL"
 q "DROP USER IF EXISTS im_member" >/dev/null
 q "DROP DATABASE IF EXISTS im_member SYNC" >/dev/null
 q "CREATE DATABASE im_member" >/dev/null
-q "CREATE USER im_member IDENTIFIED BY 'mpw'" >/dev/null
+q "CREATE USER im_member IDENTIFIED BY 'G23memberPW'" >/dev/null
 q "GRANT ALL ON im_member.* TO im_member WITH GRANT OPTION" >/dev/null
 q "GRANT SHOW USERS ON *.* TO im_member" >/dev/null   # the grant that fooled the old probe
 
@@ -64,7 +65,7 @@ export MEMHOUSE_HOME="$WORK/member"; mkdir -p "$MEMHOUSE_HOME"
 cat > "$MEMHOUSE_HOME/env" <<EOF
 MEMHOUSE_URL='$URL'
 MEMHOUSE_USER='im_member'
-MEMHOUSE_PASSWORD='mpw'
+MEMHOUSE_PASSWORD='G23memberPW'
 MEMHOUSE_DB='im_member'
 EOF
 
@@ -88,8 +89,7 @@ printf '%s' "$w" | grep -q '"canProvision": false' \
   && ok "whoami calls the member a member" || bad "whoami misjudged the member" "$w"
 printf '%s' "$w" | grep -q '"role": "member"' \
   && ok "whoami names the role" || bad "whoami role wrong" "$w"
-printf '%s' "$w" | grep -qi "$(printf 'mpw')" \
-  && bad "whoami leaked the password" || ok "whoami prints no password"
+leak "whoami" "$w" G23memberPW
 
 # ── --print-sql is the member's way out: offline, no credential ─────────────────────
 sql=$($CLI invite im_target --url "$URL" --allow-local --print-sql --member-password G23givenINVITEpw 2>&1 || true)
@@ -145,8 +145,9 @@ esac
 # The house needs ROOMS before it can hold a message, and the guard counts messages —
 # a bare CREATE DATABASE is not an occupied house. Build them the way a member would.
 export MEMHOUSE_HOME="$WORK/seed"; mkdir -p "$MEMHOUSE_HOME"
-$CLI install --url "$URL" --user im_member --password mpw --db im_member \
-  --yes --no-ship >/dev/null 2>&1 || true
+out=$(MEMHOUSE_PASSWORD=G23memberPW $CLI install --url "$URL" --user im_member --db im_member \
+  --yes --no-ship 2>&1 || true)
+leak "install as a member (password from the environment)" "$out" G23memberPW
 q "INSERT INTO im_member.im_member_messages (session_id, seq, source, host, ts, role, text, line_hash) VALUES ('s',0,'x','h',now(),'user','hi',1)" >/dev/null 2>&1 || true
 seeded=$(q "SELECT count() FROM im_member.im_member_messages" 2>/dev/null || echo 0)
 export MEMHOUSE_HOME="$WORK/admin"
@@ -212,9 +213,9 @@ else
   ( cd "$D" && MEMHOUSE_HOME="$H" $CLI stop >/dev/null 2>&1 || true )
   # passwd: the self-rotation writes the env file and prints neither password.
   out=$( MEMHOUSE_HOME="$H" $CLI passwd </dev/null 2>&1 || true )
-  npw=$(envpw "$H/env")
-  [ -n "$npw" ] && [ "$npw" != "$rpw" ] && ok "passwd rotates and rewrites the env file" || bad "passwd did not rotate" "$(printf '%s' "$out" | head -2)"
-  leak "passwd (old and new password)" "$out" "$rpw" "$npw"
+  ppw=$(envpw "$H/env")
+  [ -n "$ppw" ] && [ "$ppw" != "$rpw" ] && ok "passwd rotates and rewrites the env file" || bad "passwd did not rotate" "$(printf '%s' "$out" | head -2)"
+  leak "passwd (old and new password)" "$out" "$rpw" "$ppw"
   # no invite present: bare memhouse falls back to help, not an offer.
   E="$WORK/empty"; mkdir -p "$E"    # a clean dir — earlier cases dropped invite files in $WORK
   out=$( cd "$E" && MEMHOUSE_HOME="$WORK/nohome" $CLI </dev/null 2>&1 || true )
@@ -223,25 +224,28 @@ fi
 
 # ── the admin password never has to go on the command line (O rehearsal, finding 6) ──
 H="$WORK/adm-env"; mkdir -p "$H"
-out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_envadm --member-password epw --yes --no-ship </dev/null 2>&1 || true)
+out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_envadm --member-password G23envadmPW --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *installed*) ok "install --admin-user takes the password from MEMHOUSE_ADMIN_PASSWORD (no flag, no TTY)" ;; *) bad "the env admin password was ignored" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
 grep -q '^MEMHOUSE_ADMIN_PASSWORD' "$H/env" 2>/dev/null && bad "  the admin password was saved without --keep-admin" || ok "  and is not saved"
 printf '%s' "$out" | grep -qF -- "$ADMPW" && bad "  the admin password was printed" || ok "  and never printed"
+leak "install --admin-user (given member password)" "$out" G23envadmPW
 H="$WORK/adm-gen"; mkdir -p "$H"
 out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_genadm --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *installed*) ok "install --admin-user with a generated member password" ;; *) bad "the generated-password admin install failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
 leak "install --admin-user (generated member password; admin password)" "$out" "$(envpw "$H/env")" "$ADMPW"
 H="$WORK/adm-stdin"; mkdir -p "$H"
-out=$(printf '%s\n' "$ADMPW" | MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --admin-password-file - --member im_stdinadm --member-password spw --yes --no-ship 2>&1 || true)
+out=$(printf '%s\n' "$ADMPW" | MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --admin-password-file - --member im_stdinadm --member-password G23stdinadmPW --yes --no-ship 2>&1 || true)
 case "$out" in *installed*) ok "--admin-password-file - reads it from stdin" ;; *) bad "the stdin admin password failed" "$(printf '%s' "$out" | grep -E '✗' | head -2)" ;; esac
+leak "install --admin-password-file - (member and admin password)" "$out" G23stdinadmPW "$ADMPW"
 H="$WORK/adm-keep"; mkdir -p "$H"
-out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_keepadm --member-password kpw --keep-admin --yes --no-ship </dev/null 2>&1 || true)
+out=$(MEMHOUSE_HOME="$H" MEMHOUSE_ADMIN_PASSWORD="$ADMPW" $CLI install --url "$URL" --admin-user "$ADM" --member im_keepadm --member-password G23keepadmPW --keep-admin --yes --no-ship </dev/null 2>&1 || true)
 grep -q "^MEMHOUSE_ADMIN_USER='$ADM'" "$H/env" 2>/dev/null && ok "--keep-admin saves it — on request only" || bad "--keep-admin did not save it" "$(printf '%s' "$out" | tail -2)"
+leak "install --keep-admin (kept, but never printed)" "$out" G23keepadmPW "$ADMPW"
 H="$WORK/adm-none"; mkdir -p "$H"
 out=$(env -u MEMHOUSE_ADMIN_PASSWORD MEMHOUSE_HOME="$H" $CLI install --url "$URL" --admin-user "$ADM" --member im_noadm --member-password npw --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *"no TTY to prompt on"*with-secret*) ok "no password anywhere: refused, naming the off-argv ways" ;; *) bad "a missing admin password was not explained" "$(printf '%s' "$out" | head -3)" ;; esac
 H="$WORK/adm-stray"; mkdir -p "$H"
-out=$(MEMHOUSE_HOME="$H" $CLI install --url "$URL" --user im_member --password mpw --keep-admin --yes --no-ship </dev/null 2>&1 || true)
+out=$(MEMHOUSE_HOME="$H" $CLI install --url "$URL" --user im_member --password G23memberPW --keep-admin --yes --no-ship </dev/null 2>&1 || true)
 case "$out" in *"only read with --admin-user"*) ok "--keep-admin on a member install is refused, not ignored" ;; *) bad "--keep-admin without --admin-user was not refused" "$(printf '%s' "$out" | head -2)" ;; esac
 
 # ── cleanup ────────────────────────────────────────────────────────────────────────
