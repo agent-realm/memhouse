@@ -14,7 +14,7 @@ can hand to an agent to fix what failed.
 | trigger | `.github/workflows/gentar-arena.yml` (and/or a dispatch job into a central arena) | the kit's, unedited |
 | run policy | `policy.toml` — which suites run when (see "Run policy") | see file |
 | dry-run hooks | `hooks.py` — `prepare()`, `HIDE_FROM_PATH`, `SKIP_STEP_SUBSTR` | see file |
-| engine pin | `GENTAR_REF` in `run.sh` — a release tag, re-fetched every run | `v0.9.2` |
+| engine pin | `GENTAR_REF` in `run.sh` — a release tag, re-fetched every run | `v0.9.3` |
 
 ## Quickstart (local)
 
@@ -239,6 +239,15 @@ a private repo, say) cannot pass it. Declare the template in `hooks.py`'s
 the suite runs; not staged, it reports `UNVERIFIED (template …)` — named,
 never green by stub, never red by harness; a stager that raises is a
 failure. Undeclared templates run as before.
+
+**Suites only a bench can prove.** A suite that deploys a service through
+the bench's Docker (a database, say) cannot be dry-run on the host. Say so in
+the suite, with the reason: `bench_only = "<why>"` in `[scenario]`. The
+dry-run then reports `UNVERIFIED (bench only: <why>)` and does not run or
+prepare it; phase 1 (`--check`) accepts that, a plain dry-run does not, and
+the arena runs it like any other suite. `GENTAR_DRYRUN_BENCH_ONLY=run` runs it
+anyway on a host that has what the reason names. The reason is required:
+an unexplained skip is how checks rot.
 
 **Gating a release.** Make the first job of your release workflow
 

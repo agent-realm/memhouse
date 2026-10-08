@@ -422,7 +422,7 @@ ARENA=${GENTAR_DIR:-$HERE/.arena}
 # error they had not caused. Bump this deliberately: change the default,
 # run your suites, commit the bump as its own change. `main` stays
 # available for anyone tracking the engine on purpose.
-REF=${GENTAR_REF:-v0.9.2}
+REF=${GENTAR_REF:-v0.9.3}
 
 # --review: has this repo outgrown its suites?
 #
@@ -610,8 +610,8 @@ python3 "$HERE/plan.py" stage-git "$REPO" "subjects/$SUBJECT"
 # version HERE, where git works; scenarios read it instead of trusting
 # the bench's git.
 # --match 'v*': the workflow's keyword tags (`arena`, `arena-*`) are
-# floating triggers, and a bare `git describe --tags` returns whichever
-# tag is NEAREST — so moving `arena` onto a commit made the frozen version
+# floating triggers, and a describe without a --match pattern returns
+# whichever tag is NEAREST — so moving `arena` onto a commit made the frozen version
 # read "arena-3-g…" instead of the release it came from (claude-playbooks,
 # where the `arena` tag once shadowed a real v3.13.0).
 (cd "$REPO" && git describe --tags --always --dirty --match 'v*' 2>/dev/null || echo dev) \

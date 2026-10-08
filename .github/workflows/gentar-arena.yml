@@ -92,6 +92,14 @@ jobs:
       setup_node: ${{ steps.plan.outputs.setup_node }}
       setup_python: ${{ steps.plan.outputs.setup_python }}
     steps:
+      # Temp files go to this job's own temp dir, which the runner empties
+      # after every job. On a self-hosted runner /tmp is shared and never
+      # cleaned: a failing dry-run keeps its scratch homes there, and a
+      # suite's own mktemp steps add more (a runner LXC's tmpfs once filled
+      # 7.4 GB this way, 2026-10-07). Harmless on GitHub-hosted runners. The
+      # arena's lock and bench workspaces use fixed /tmp paths on purpose.
+      - name: temp files into the job's temp dir
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - id: plan
         # Event text reaches the planner through env, never pasted into
@@ -119,6 +127,14 @@ jobs:
         os: ${{ fromJSON(needs.plan.outputs.os) }}
     runs-on: ${{ vars.GENTAR_CI_RUNNER && fromJSON(vars.GENTAR_CI_RUNNER) || matrix.os }}
     steps:
+      # Temp files go to this job's own temp dir, which the runner empties
+      # after every job. On a self-hosted runner /tmp is shared and never
+      # cleaned: a failing dry-run keeps its scratch homes there, and a
+      # suite's own mktemp steps add more (a runner LXC's tmpfs once filled
+      # 7.4 GB this way, 2026-10-07). Harmless on GitHub-hosted runners. The
+      # arena's lock and bench workspaces use fixed /tmp paths on purpose.
+      - name: temp files into the job's temp dir
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       # Toolchains the dry-run's prepare() needs, declared in the policy
       # ([phase1] setup); anything else goes in gentar/phase1-setup.sh.
@@ -205,6 +221,14 @@ jobs:
       TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
       GENTAR_OTLP_KEY: ${{ secrets.GENTAR_OTLP_KEY }}
     steps:
+      # Temp files go to this job's own temp dir, which the runner empties
+      # after every job. On a self-hosted runner /tmp is shared and never
+      # cleaned: a failing dry-run keeps its scratch homes there, and a
+      # suite's own mktemp steps add more (a runner LXC's tmpfs once filled
+      # 7.4 GB this way, 2026-10-07). Harmless on GitHub-hosted runners. The
+      # arena's lock and bench workspaces use fixed /tmp paths on purpose.
+      - name: temp files into the job's temp dir
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # .gentar-version floats via git describe
