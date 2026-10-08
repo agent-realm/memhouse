@@ -140,8 +140,16 @@ out=$(cd "$WORK" && $CLI invite psql --url "$URL" --allow-local --admin-user "$A
 printf '%s' "$out" | grep -qE "GRANT .* ON mem\.\* " && bad "LEAK: --print-sql emits a database-wide grant" || ok "no database-wide grant in the printed plan"
 printf '%s' "$out" | grep -qE "^GRANT .* ON mem\.psql_\* TO psql WITH GRANT OPTION;" && ok "  one grant on psql_*" || bad "  the pattern grant is missing" "$(printf '%s' "$out" | grep -m1 '^GRANT')"
 printf '%s' "$out" | grep -q "^CREATE TABLE" && bad "  the plan pre-builds rooms — the member's shipper does that" || ok "  no DDL — the member builds their own rooms"
+# G23: the printed plan holds a placeholder, never the password — not even one given with
+# --member-password. Run verbatim, the CREATE USER must be refused by the server itself.
+printf '%s' "$out" | grep -qF "IDENTIFIED BY <member-password>" && ok "  the password is a placeholder" || bad "  no placeholder in the printed plan"
+cu=$(printf '%s' "$out" | grep '^CREATE USER' | sed 's/;[[:space:]]*$//')
+r=$(A "$cu" 2>&1 || true)
+case "$r" in *SYNTAX_ERROR*|*"Syntax error"*) ok "  run verbatim, the placeholder does not parse" ;; *) bad "  the placeholder line was not refused" "$r" ;; esac
+A "SELECT count() FROM system.users WHERE name = 'psql'" | grep -qx 0 && ok "  and no user was created from it" || bad "  a user was created from the placeholder"
+# Then as the DBA does it: their own password where the placeholder stands.
 printf '%s' "$out" | grep -v '^--' | grep -v '^$' | while IFS= read -r st; do
-  st=$(printf '%s' "$st" | sed 's/;[[:space:]]*$//'); [ -n "$st" ] && A "$st" >/dev/null
+  st=$(printf '%s' "$st" | sed -e 's/;[[:space:]]*$//' -e "s/<member-password>/'x'/"); [ -n "$st" ] && A "$st" >/dev/null
 done
 r=$(M psql x "CREATE TABLE mem.psql_messages (x UInt8) ENGINE=MergeTree ORDER BY x"); [ -z "$r" ] && ok "  a DBA-provisioned member builds their own rooms" || bad "  DBA-provisioned member cannot create their rooms" "$r"
 denied "$(M psql x "SELECT count() FROM mem.alice_messages")" && ok "  and isolates exactly like the live path" || bad "  LEAK: DBA-provisioned member reads a housemate"
