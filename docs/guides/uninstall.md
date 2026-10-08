@@ -12,8 +12,10 @@ npm uninstall -g memhouse            # then remove the package
 - **The default is the conservative one.** Stopping the shipper is routine: before an
   upgrade, while debugging, or when a laptop should go quiet for a week. It should not
   also mean "forget which house I use and who this machine is".
-- **`--full-removal` asks first.** A later reinstall mints a **new** machine identity, and
-  this machine then reads as two machines in your history.
+- **`--full-removal` asks first.** It deletes `host.json`. A later reinstall derives the
+  same identity again from the machine's own id, so your history stays one machine, unless
+  the machine was renamed in between or has no readable machine id. Then it comes back as
+  a new host.
 - **Your memory stays.** The rooms in ClickHouse are untouched by every tier. What the
   shipper wrote can be rebuilt from the local session stores with `memhouse ship --full`,
   for as long as the editors keep them.

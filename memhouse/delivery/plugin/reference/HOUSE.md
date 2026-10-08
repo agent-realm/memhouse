@@ -114,7 +114,7 @@ WHERE session_id = '<sid>' AND extra.agent.id = '<agent>' ORDER BY seq
 | `session_id` | `<source>:<adapter-local id>`, e.g. `claude-code:6b1f…` |
 | `seq` | order within the session. The session's own turns are `0, 1, 2, …`; a subagent's turns sit in their own block, `1,000,000,000 + slot × 100,000 + turn` (slot = the subagent's rank by start time), so `seq` is **sparse** — count rows with `count()`, never `max(seq) + 1` |
 | `source` | editor: `claude-code`, `codex`, `cursor`, … |
-| `host` | the machine, `<hostname>-<8 hex>` — random per install, not derived |
+| `host` | the machine, `<hostname>-<8 hex>` — the 8 hex are derived from the OS machine id (random only where none can be read), so a reinstall keeps it and same-named machines differ |
 | `ts` | when the turn happened (`DateTime64(3,'UTC')`) |
 | `role` | `user`, `assistant`, `system` |
 | `is_subagent` | 1 for a turn that a Claude Code **subagent** (a fork) produced; folded into the parent session after the parent's own turns, each subagent's turns contiguous and the subagents in the order they started. Subagents are never separate sessions. |

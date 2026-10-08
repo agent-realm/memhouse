@@ -34,11 +34,14 @@ with you. Naming a room you were not granted is an error, never a silent omissio
 - **`user_id`** is stamped by the server: `MATERIALIZED currentUser()`. Async inserts are
   pinned off for members, so the stamp cannot be skipped. `WHERE user_id = 'alice'` is one
   person.
-- **`host`** is the machine. Each install mints a random fingerprint once and keeps it in
-  `$MEMHOUSE_HOME/host.json`, and every row carries `<hostname>-<8 hex>`. It is random,
-  not derived from the machine:
-  - a derived id would merge two laptops that both answer to `MacBook-Pro`;
-  - a derived id would split one machine in two when it is renamed.
+- **`host`** is the machine. Every row carries `<hostname>-<8 hex>`, where the 8 hex come
+  from a fingerprint of the OS's own machine id (IOPlatformUUID on macOS,
+  `/etc/machine-id` on Linux), hashed so the raw id never leaves the machine. It is kept in
+  `$MEMHOUSE_HOME/host.json`. It is not taken from the hostname:
+  - two laptops that both answer to `MacBook-Pro` still get different ids;
+  - a renamed machine keeps its id, and `status` reports the new name beside it;
+  - reinstalling, even after `uninstall --full-removal`, brings the same machine back
+    under the same id. Where no machine id can be read, it falls back to a random one.
 
   `memhouse status` shows this machine's id. `memhouse doctor` names every host in your
   rooms.

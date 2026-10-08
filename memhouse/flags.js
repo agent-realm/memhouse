@@ -75,4 +75,31 @@ function allowedFlags(cmd) {
   return new Set([...GLOBAL_FLAGS, ...known]);
 }
 
-module.exports = { GLOBAL_FLAGS, COMMAND_FLAGS, unknownFlags, allowedFlags, suggestFlag, editDistance };
+// Options that never take a value. The parser used to read `--x y` as x = "y" for every
+// option, so a switch swallowed the word after it: `update --no-install yes` set
+// no-install to "yes" (not true) and ran the npm install it was asked to skip, and
+// `share --revoke bob` revoked nobody. A switch is true when present, and the next word
+// stays a positional.
+const BOOLEAN_FLAGS = new Set([
+  'json', 'yes', 'help', 'version', 'full', 'check', 'migrate', 'no-install', 'all-origins',
+  'dry-run', 'print-sql', 'no-ship', 'keep-admin', 'ensure-schema', 'rotate-password', 'force',
+  'adopt', 'allow-local', 'local', 'down', 'credentials', 'full-removal', 'insecure-native',
+  'keep-shipper', 'guides', 'revoke', 'list', 'admin', 'install', 'all',
+]);
+
+/** argv (after the command) -> { flags, positional }. */
+function parseArgv(rest) {
+  const flags = {}; const positional = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = rest[i + 1];
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) { flags[key] = next; i++; }
+      else flags[key] = true;
+    } else positional.push(a);
+  }
+  return { flags, positional };
+}
+
+module.exports = { GLOBAL_FLAGS, COMMAND_FLAGS, BOOLEAN_FLAGS, parseArgv, unknownFlags, allowedFlags, suggestFlag, editDistance };

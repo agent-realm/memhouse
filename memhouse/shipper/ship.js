@@ -109,7 +109,7 @@ function chTs(ms) {
 
 // Whether the adapter gave this message its own timestamp, or the shipper has to
 // interpolate one. The distinction matters beyond accuracy: an interpolated ts is a
-// function of `seq / (total - 1)`, so EVERY already-stored row's ts moves when the
+// function of `pos / (total - 1)` (position in the parse), so EVERY already-stored row's ts moves when the
 // session grows. That is what forces a session with no per-message timestamps to
 // re-ship whole rather than tail-only. See rowsForChat's `tsInterpolated` and tailSafe.
 function hasOwnTs(msg) {
@@ -127,7 +127,7 @@ function hasOwnTs(msg) {
 // and the search skill reported those to the user as fact.
 //
 // Fall back to interpolating across [createdAt, lastUpdatedAt] for the adapters that
-// genuinely have nothing per message — monotonic-by-seq, so sessions_v started/ended
+// genuinely have nothing per message — monotonic by position, so sessions_v started/ended
 // still line up with the session bounds (same approximation as agency/ingest.js;
 // documented in DESIGN.md). Real timestamps are NOT necessarily monotonic by seq — a
 // folded subagent transcript is appended after its parent's turns but ran during them.
@@ -929,6 +929,13 @@ function rowsForChat(chat, host) {
     adapterErrorSink.record(chat.source, e, chat.composerId);
     return null;
   }
+  // The adapter asked to wait a pass: what it read is not yet the session's settled shape
+  // (a subagent with no timestamped line — see editors/claude.js). Not an error; the next
+  // pass reads it again.
+  if (messages._defer) {
+    console.log(`[memhouse] ${chat.source}:${chat.composerId} held for one pass — ${messages._defer}`);
+    return null;
+  }
 
   const source = chat.source;
   // Canonical globally-unique session id: '<source>:<adapter-local id>'.
@@ -1119,7 +1126,9 @@ function decideEpoch(stored, incoming) {
     let missing = 0;
     for (const k of have.keys()) if (!want.has(k)) missing++;
     const inMax = rows.reduce((a, r) => Math.max(a, r[key]), -1);
-    return { missing, beyond: max > inMax, stored: Math.max(have.size, max + 1) };
+    // How many the house holds, for the log line. `max + 1` is a count only while keys are
+    // dense; with subagent blocks max is ~1e9, so it said "1000000123 messages stored".
+    return { missing, beyond: max > inMax, stored: have.size || max + 1 };
   };
   const mo = orphans(hashes, incoming.msgRows, 'seq', maxSeq);
   if (mo.missing || mo.beyond) {
@@ -1156,7 +1165,7 @@ function decideEpoch(stored, incoming) {
  * token counts, text. Three shipped columns sit outside it and are not derived from
  * anything inside it, so a row can be stale in a way no hash comparison can see:
  *
- *   ts. Interpolated across [createdAt, lastUpdatedAt] as `seq / (total - 1)` for the
+ *   ts. Interpolated across [createdAt, lastUpdatedAt] as `pos / (total - 1)` (position in the parse, not seq) for the
  *   adapters that record no per-message time. The denominator is the session's length,
  *   so every stored row's ts moves the moment the session grows. Adapters that DO supply
  *   `_ts` (Claude Code, opencode, goose, …) are exempt — their timestamps are facts, not

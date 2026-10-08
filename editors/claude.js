@@ -210,7 +210,9 @@ function parseSessionFile(filePath, isSubagent, agent = null, info = null) {
   // cited, or told apart from a sibling's. An agent looking for the fork as its own session
   // concluded it was never shipped. Every turn now carries the agent's id, the description
   // the parent gave it, and its position within that subagent — in `extra`, which is not
-  // part of the line hash, so nothing already shipped is re-shipped for this.
+  // part of the line hash. The position is not only a label any more: the shipper numbers
+  // a subagent's rows from it (seq = block + turn, see subagentSeq in ship.js), so `turn`
+  // must count exactly the turns this parse keeps, in order.
   let turn = 0;
   const stamp = (m) => { if (agent) { m._agent = { ...agent, turn: turn++ }; } return m; };
 
@@ -255,6 +257,10 @@ function parseSessionFile(filePath, isSubagent, agent = null, info = null) {
   return messages;
 }
 
+// How long a subagent transcript without a single timestamped line may hold back its
+// session (see getMessages). A real one gets its first line within seconds.
+const SUBAGENT_STAMP_GRACE_MS = 10 * 60 * 1000;
+
 function getMessages(chat) {
   const filePath = chat._fullPath;
   if (!filePath || !fs.existsSync(filePath)) return [];
@@ -269,6 +275,7 @@ function getMessages(chat) {
   const subFiles = subagentFiles(subagentsDir);
   const named = subFiles.length ? subagentNames(filePath) : new Map();
   const folded = [];
+  let unstamped = null;
   for (const { file, workflow } of subFiles) {
     const id = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
     const meta = named.get(id) || {};
@@ -283,6 +290,17 @@ function getMessages(chat) {
       if (first) { const d = String(first.content).replace(/^\[subagent\] /, '').replace(/\s+/g, ' ').trim().slice(0, 160); for (const m of turns) m._agent.description = d; }
     }
     folded.push({ key: path.relative(subagentsDir, file), firstTs: info.firstTs, turns });
+    // A subagent caught before its first line is written has no start time, so it ranks
+    // last — and when its first line lands with an EARLIER timestamp than a sibling's, it
+    // moves, renumbers every sibling after it, and the session forks and re-ships whole
+    // (GLM-F1). So a fresh one defers the whole session to the next pass, when it has a
+    // time. Bounded by age: a file that never gets a timestamped line stops deferring after
+    // SUBAGENT_STAMP_GRACE_MS and ranks last, as before.
+    if (info.firstTs === undefined && !unstamped) {
+      let age = Infinity;
+      try { age = Date.now() - fs.statSync(file).mtimeMs; } catch { /* gone: nothing to wait for */ }
+      if (age < SUBAGENT_STAMP_GRACE_MS) unstamped = path.relative(subagentsDir, file);
+    }
   }
   // Each subagent gets a SLOT, and the shipper numbers its rows from that slot rather than
   // from where they happen to land in this array (see subagentSeq in ship.js). The slot is
@@ -296,6 +314,9 @@ function getMessages(chat) {
   folded.sort((a, b) => (a.firstTs === undefined) - (b.firstTs === undefined)
     || (a.firstTs || 0) - (b.firstTs || 0) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   folded.forEach(({ turns }, slot) => { for (const m of turns) m._agent.slot = slot; messages.push(...turns); });
+  if (unstamped) {
+    Object.defineProperty(messages, '_defer', { value: `subagent ${unstamped} has no timestamped line yet`, enumerable: false });
+  }
 
   return messages;
 }

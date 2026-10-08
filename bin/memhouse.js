@@ -42,17 +42,7 @@ const LOG_DIR = path.join(HOME_DIR, 'logs');
 const argv = process.argv.slice(2);
 const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : null;
 const rest = cmd ? argv.slice(1) : argv;
-const flags = {};
-const positional = [];
-for (let i = 0; i < rest.length; i++) {
-  const a = rest[i];
-  if (a.startsWith('--')) {
-    const key = a.slice(2);
-    const next = rest[i + 1];
-    if (next !== undefined && !next.startsWith('--')) { flags[key] = next; i++; }
-    else flags[key] = true;
-  } else positional.push(a);
-}
+const { flags, positional } = require(path.join(REPO_ROOT, 'memhouse', 'flags')).parseArgv(rest);
 const JSON_OUT = flags.json === true;
 
 // Unknown flags stop the run — see memhouse/flags.js for why a shrug is not enough.
@@ -2248,15 +2238,31 @@ function installKind() {
 async function cmdUpdate() {
   const { kind, root } = installKind();
   const cfg0 = resolveConfig();
-  // --channel pins for this run AND every later one: the point of pinning is that the next
-  // person to type `memhouse update` does not have to remember it.
-  if (flags.channel && flags.channel !== true && String(flags.channel) !== cfg0.channel) {
-    writeEnvFile({ ...cfg0, channel: String(flags.channel) });
-    console.log(ok(`channel pinned in ${short(ENV_FILE)}: ${flags.channel}`));
-  }
-  const pinned = flags.channel && flags.channel !== true ? String(flags.channel) : (cfg0.channel || null);
+  const asked = flags.channel && flags.channel !== true ? String(flags.channel) : null;
+  // What is PINNED is what the env file says. resolveConfig folds --channel into cfg0, so
+  // comparing the flag with cfg0.channel compared it with itself, and the pin was never
+  // written at all.
+  const stored = readEnvFile().MEMHOUSE_CHANNEL || null;
+  const pinned = asked || cfg0.channel || null;
   const tags = await chan.fetchTags();
   const pick = chan.pickChannel({ version: PKG.version, pinned, tags });
+  // --channel pins for this run AND every later one: the point of pinning is that the next
+  // person to type `memhouse update` does not have to remember it. Only a channel the
+  // registry actually has is pinned. The pin used to be written before anything was
+  // checked, so `--channel tema` (or any typo) left every later `update` following a tag
+  // that does not exist, --no-install included, which checks no channel at all (A5).
+  if (asked && asked !== stored) {
+    if (!tags) {
+      console.log(warn(`the registry did not answer, so channel '${asked}' cannot be checked — not pinned`));
+    } else if (!tags[asked]) {
+      console.log(bad(`no channel '${asked}' on the registry — nothing pinned, nothing changed`));
+      console.log(`  channels: ${Object.keys(tags).join(', ')}`);
+      return 1;
+    } else {
+      writeEnvFile({ ...cfg0, channel: asked });
+      console.log(ok(`channel pinned in ${short(ENV_FILE)}: ${asked}`));
+    }
+  }
   const latest = pick.target;
   if (JSON_OUT && flags.check) return console.log(JSON.stringify({ kind, root, current: PKG.version, channel: pick.channel, target: pick.target, reason: pick.reason, tags }, null, 2));
   console.log(`  installed  ${PKG.version}  (${kind}: ${root})`);
@@ -2285,7 +2291,9 @@ async function cmdUpdate() {
     console.log('  to keep a version around: npm install -g memhouse');
     return 1;
   }
-  if (kind === 'local-dep') {
+  // --no-install installs nothing, so where the files came from does not matter: restart and
+  // check the house. The refusal used to come first and turned it away (A6).
+  if (kind === 'local-dep' && !noInstall) {
     console.log(warn('this is a project dependency, not a global install'));
     console.log(`  upgrade it where it lives: npm install memhouse@${pick.channel || 'latest'}`);
     return 1;
@@ -2298,7 +2306,7 @@ async function cmdUpdate() {
   try { svc = require(path.join(REPO_ROOT, 'memhouse', 'service.js')).status(); } catch { /* unsupported platform */ }
   const wasRunning = { shipper: !!pidOf('shipper'), dashboard: !!pidOf('dashboard') };
 
-  if (flags['no-install'] === true) {
+  if (noInstall) {
     // The files were already replaced by other means — a hand-typed `npm i -g`, a tarball,
     // a configuration manager. The npm/git half is exactly what such a pilot has already
     // done, and the half a bare install leaves undone (restart, migrations, schema heal)
@@ -2332,7 +2340,9 @@ async function cmdUpdate() {
       return 1;
     }
   }
-  console.log(ok('files updated'));
+  // Said only when something was installed. Under --no-install it claimed "files updated"
+  // for files nobody touched (A6).
+  if (!noInstall) console.log(ok('files updated'));
   // The house may have been converted to the one layout since this machine last ran:
   // the member's rooms moved from <name>.* to mem.<name>_*. Fix the env here, before the
   // shipper restarts, or its first pass refuses the old address forever.
@@ -4043,8 +4053,10 @@ async function cmdUninstall() {
   //
   //   (default)         daemons, service, runtime state. Config and identity KEPT.
   //   --credentials     also forget the house: the env file, with its password.
-  //   --full-removal    all of MEMHOUSE_HOME, fingerprint included. The next install is a
-  //                     NEW host whose rows do not join this machine's history.
+  //   --full-removal    all of MEMHOUSE_HOME, host.json included. The next install
+  //                     derives the same fingerprint from the OS machine id (0.18.6+), so it
+  //                     is the same host unless the machine was renamed meanwhile or has no
+  //                     readable machine id (then it falls back to random: a new host).
   //
   // No tier touches the house: transcripts live in ClickHouse and re-ship from the local
   // session stores regardless.
@@ -4065,8 +4077,9 @@ async function cmdUninstall() {
     if (flags.yes !== true && process.stdin.isTTY) {
       const id = hostjs.read(HOME_DIR);
       console.log(warn(`--full-removal also discards this machine's host identity${id ? ` (${id.id})` : ''}.`));
-      console.log('  Rows already shipped keep that name, a future install gets a new one, and');
-      console.log("  this machine then reads as two. Your transcripts themselves are safe.");
+      console.log('  A reinstall derives it again from this machine\'s own id, so it normally comes');
+      console.log('  back the same — unless the machine is renamed first, or has no readable machine');
+      console.log("  id, and then it reads as two machines. Your transcripts themselves are safe.");
       const a = (await ask('Remove everything, including the host identity? (yes/no)', 'no')).toLowerCase();
       if (a !== 'yes' && a !== 'y') { console.log('aborted — daemons are stopped, nothing was removed'); return; }
     }

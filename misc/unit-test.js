@@ -159,6 +159,21 @@ test('a re-parse that only grows reuses its epoch — the common case must stay 
   assert.deepStrictEqual(decideEpoch(null, grown), { epoch: 0, reason: null });
 });
 
+test('a bump on a sparse session counts rows, not the highest seq (A4)', () => {
+  const { decideEpoch } = require('../memhouse/shipper/ship');
+  // A subagent block puts seq near 1e9; the log once read "1000000002 messages stored".
+  const sub = 1000000000;
+  const stored = {
+    epoch: 3, maxSeq: sub + 1, maxIdx: -1,
+    hashes: new Map([[0, 'a'], [1, 'b'], [sub, 'c'], [sub + 1, 'd']]),
+    tools: new Map(),
+  };
+  const shrunk = { msgRows: [{ seq: 0, line_hash: 'a' }, { seq: 1, line_hash: 'b' }], toolRows: [] };
+  const d = decideEpoch(stored, shrunk);
+  assert.strictEqual(d.epoch, 4);
+  assert.match(d.reason, /^4 messages stored, 2 parsed, 2 of them not in the new parse$/, d.reason);
+});
+
 test('tailRows sends the tail, not the transcript, when nothing in the overlap moved', () => {
   const { tailRows } = require('../memhouse/shipper/ship');
   // The defect this fixes: a growing session re-parsed and re-sent WHOLE on every pass.
@@ -1679,6 +1694,59 @@ test('the print-leak guard sees every way a value reaches a print call', () => {
   assert.ok(!caught("console.log({ fix: ['memhouse install --password …'] })"), 'nor is a string in an array literal');
 });
 
+
+test('a switch never swallows the word after it (A6, G34)', () => {
+  const { parseArgv, BOOLEAN_FLAGS, COMMAND_FLAGS, GLOBAL_FLAGS } = require('../memhouse/flags');
+  // `update --no-install yes` set no-install to "yes" and ran the install it was told to skip.
+  assert.deepStrictEqual(parseArgv(['--no-install', 'yes']), { flags: { 'no-install': true }, positional: ['yes'] });
+  // `share --revoke bob` revoked nobody: revoke = "bob", no positional.
+  assert.deepStrictEqual(parseArgv(['--revoke', 'bob']), { flags: { revoke: true }, positional: ['bob'] });
+  // Options that take a value still take it.
+  assert.deepStrictEqual(parseArgv(['--channel', 'team', '--only', 'project=x']), { flags: { channel: 'team', only: 'project=x' }, positional: [] });
+  assert.deepStrictEqual(parseArgv(['--loop', '60']).flags, { loop: '60' });
+  assert.deepStrictEqual(parseArgv(['--loop']).flags, { loop: true });
+  // Every switch is an option some command (or every command) actually declares.
+  const declared = new Set([...GLOBAL_FLAGS, ...Object.values(COMMAND_FLAGS).flat()]);
+  for (const f of BOOLEAN_FLAGS) assert.ok(declared.has(f), `--${f} is a switch no command declares`);
+});
+
+test('a fresh subagent with no timestamped line holds its session for a pass (GLM-F1)', () => {
+  const os = require('os');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mh-glmf1-'));
+  try {
+    const proj = path.join(root, 'projects', '-x'); fs.mkdirSync(proj, { recursive: true });
+    const sid = '22222222-2222-2222-2222-222222222222';
+    const line = (o) => JSON.stringify({ sessionId: sid, cwd: '/x', ...o });
+    fs.writeFileSync(path.join(proj, `${sid}.jsonl`), [
+      line({ type: 'user', uuid: 'u1', timestamp: '2026-10-08T10:00:00Z', message: { role: 'user', content: 'go' } }),
+    ].join('\n') + '\n');
+    const sub = path.join(proj, sid, 'subagents'); fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'agent-aaaa.jsonl'), line({ type: 'user', uuid: 's1', isSidechain: true, timestamp: '2026-10-08T10:00:05Z', message: { role: 'user', content: 'task a' } }) + '\n');
+    const fresh = path.join(sub, 'agent-bbbb.jsonl');
+    fs.writeFileSync(fresh, '');   // created, first line not written yet
+    const claude = require('../editors/claude');
+    const chat = { _fullPath: path.join(proj, `${sid}.jsonl`) };
+    assert.match(String(claude.getMessages(chat)._defer), /agent-bbbb\.jsonl has no timestamped line yet/);
+    // The shipper withholds it this pass (null = retry), and says why.
+    const { rowsForChat } = require('../memhouse/shipper/ship');
+    if (rowsForChat) {
+      const logged = []; const orig = console.log; console.log = (m) => logged.push(String(m));
+      try { assert.strictEqual(rowsForChat({ source: 'claude-code', composerId: sid, _fullPath: chat._fullPath, folder: '/x', createdAt: 1, lastUpdatedAt: 1 }, 'h'), null); }
+      finally { console.log = orig; }
+      assert.ok(logged.some((l) => /held for one pass/.test(l)), logged.join('\n'));
+    }
+    // Once it has a time it is ranked by it — even ahead of a sibling that started later.
+    fs.writeFileSync(fresh, line({ type: 'user', uuid: 'b1', isSidechain: true, timestamp: '2026-10-08T10:00:03Z', message: { role: 'user', content: 'task b' } }) + '\n');
+    const ok1 = claude.getMessages(chat);
+    assert.strictEqual(ok1._defer, undefined);
+    assert.deepStrictEqual(ok1.filter((m) => m._agent).map((m) => [m._agent.id, m._agent.slot]), [['bbbb', 0], ['aaaa', 1]]);
+    // A file that never gets a timestamp stops holding the session after the grace period.
+    fs.writeFileSync(fresh, '');
+    const old = (Date.now() - 11 * 60 * 1000) / 1000; fs.utimesSync(fresh, old, old);
+    const ok2 = claude.getMessages(chat);
+    assert.strictEqual(ok2._defer, undefined, 'a stale unstamped file must not block forever');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);
