@@ -41,7 +41,10 @@ Never paste the admin password into an agent's conversation. memhouse ships that
 conversation into the house. See [Admin password](admin-password.md).
 
 Not the admin? `memhouse invite alice --url … --print-sql` prints the statements for
-whoever is.
+whoever is, plus the env-file lines to hand alice. The printed plan never holds a password:
+it says `IDENTIFIED BY <member-password>`, which does not parse until the administrator
+puts a quoted password they generate in its place, and the same password goes into the
+env file. `install --print-sql` works the same way.
 
 ## When the name is taken
 
@@ -56,9 +59,13 @@ history stay; the new credential takes them over.
 **Inviting a ClickHouse user who already exists is refused.** memhouse does not reset an
 existing member's password through an invite.
 
-- To change your own password: `memhouse passwd`.
-- An administrator resets someone else's: `memhouse passwd --member <name>` with the admin
-  credential.
+- To change your own password: `memhouse passwd`. Since 0.11 a member may alter their own
+  account, so no admin is needed. memhouse writes the new password to the env file and
+  never prints it.
+- There is no verb for resetting **someone else's** password. If a member is locked out,
+  an administrator runs `ALTER USER <name> IDENTIFIED BY '<new password>'` in a ClickHouse
+  client, then hands the member an env file holding it, the way an invite does. Keep the
+  new password out of any agent's conversation.
 
 Either way, every machine shipping under the old password fails authentication until its
 env file has the new one.

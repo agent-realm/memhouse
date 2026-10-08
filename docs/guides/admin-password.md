@@ -4,7 +4,7 @@ A few commands need the ClickHouse server's administrator:
 
 - `install --admin-user …`, which creates a member;
 - `invite`;
-- `passwd --member …`;
+- `passwd --admin-user …`, for a member whose account predates self-rotation (0.11);
 - `members`;
 - `convert`.
 

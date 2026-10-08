@@ -75,7 +75,6 @@ Trimmed from a run against ClickHouse 26.7.1.1315 with memhouse 0.18.9 (the test
   may create users:    yes
 
 == 2. install: build member 'polat' with the admin credential, then verify as the member
-  password for 'polat':  ••••••••  (shown once; it goes into the home's env file)
   ✓ created ClickHouse user 'polat'
   ✓ granted 'polat' mem.polat_* — their rooms and nothing else; async_insert pinned
   ✓ verified as 'polat' with the member credential
@@ -96,9 +95,8 @@ Trimmed from a run against ClickHouse 26.7.1.1315 with memhouse 0.18.9 (the test
   ✓ fleet: 1 active writer(s)
 ```
 
-Step 2 prints the generated member password once (masked above); it is already in the
-home's `env` file. Treat that output as a secret: do not run the script where its output
-is recorded, such as a CI log or an agent session that ships its transcript.
+Step 2 generates the member password and writes it only to the home's `env` file (mode
+600). From 0.18.10 no command prints it; earlier versions showed it once on this step.
 
 ## Teardown
 

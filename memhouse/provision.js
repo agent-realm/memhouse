@@ -54,13 +54,22 @@ function sqlString(v) {
  *
  * @returns {Array<{sql:string, why:string, optional:boolean}>}
  */
-function plan({ db, member, password = null }) {
+// What a PRINTED plan carries where the password goes. Deliberately not a quoted string:
+// run as printed, `IDENTIFIED BY <member-password>` does not parse, so nobody can create a
+// member whose password is the placeholder text. A printed plan never carries a real
+// password: printed output ends up in terminals, scrollback and agent transcripts, and
+// memhouse ships transcripts into the house (G23).
+const PASSWORD_PLACEHOLDER = '<member-password>';
+
+function plan({ db, member, password = null, placeholder = false }) {
   assertUsableName(db, 'house');
   assertUsableName(member, 'member');
   const steps = [
     { sql: `CREATE DATABASE IF NOT EXISTS ${db}`, why: 'the house', optional: false },
   ];
-  if (password !== null) {
+  if (placeholder) {
+    steps.push({ sql: `CREATE USER ${member} IDENTIFIED BY ${PASSWORD_PLACEHOLDER}`, why: `the member — replace ${PASSWORD_PLACEHOLDER} with a quoted password you generate, e.g. '…' from \`openssl rand -hex 16\`; as printed this line does not parse, on purpose`, optional: false });
+  } else if (password !== null) {
     // No IF NOT EXISTS. The live path checks first and refuses an existing user; the printed
     // plan used to no-op here, apply the grants, and hand out a password the server never saw —
     // found on a realm that mints its own users. Now it fails loudly on line one instead.
@@ -100,4 +109,4 @@ function render(steps, { db, member }) {
   return out.join('\n');
 }
 
-module.exports = { ROOM_PRIVILEGES, roomGrant, plan, render };
+module.exports = { ROOM_PRIVILEGES, PASSWORD_PLACEHOLDER, roomGrant, plan, render };

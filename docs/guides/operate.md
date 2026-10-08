@@ -31,8 +31,10 @@ SHOW GRANTS FOR alice;
 ## Adding and removing people
 
 - **Add:** [`memhouse invite`](invite.md).
-- **Reset a member's password:** `memhouse passwd --member <name>`. Every machine shipping
-  as them stops until its env file has the new password.
+- **Reset a member's password:** the member runs `memhouse passwd` themselves. For a
+  member who is locked out there is no verb: run `ALTER USER <name> IDENTIFIED BY '…'` as
+  the admin, and hand them an env file with the new password. Every machine shipping as
+  them stops until its env file has it.
 - **Remove:** there is no verb yet. `DROP USER <name>` stops every machine shipping as
   that member. Their rooms remain until you drop them as well.
 

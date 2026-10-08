@@ -1496,5 +1496,76 @@ test('no child process is given a password in its argv', () => {
   assert.deepStrictEqual(offenders, [], `a password reaches argv:\n  ${offenders.join('\n  ')}`);
 });
 
+test('a printed plan carries a placeholder, never a password (G23)', () => {
+  const p = provision.plan({ db: 'mem', member: 'alice', placeholder: true });
+  const create = p.find((s) => s.sql.startsWith('CREATE USER'));
+  assert.ok(create, 'the printed plan still creates the member');
+  assert.strictEqual(create.sql, `CREATE USER alice IDENTIFIED BY ${provision.PASSWORD_PLACEHOLDER}`);
+  // Unquoted on purpose: run as printed, it must FAIL to parse rather than create a member
+  // whose password is the placeholder text.
+  assert.ok(!/IDENTIFIED BY '/.test(provision.render(p, { db: 'mem', member: 'alice' })),
+    'a printed plan must not hold a quoted password literal');
+});
+
+// The code a print call evaluates, with strings understood: plain string contents are prose
+// and dropped, a template literal keeps only its ${…} expressions, and a parenthesis inside
+// a string does not end the call. Returns the end index and that code.
+function printedCode(src, open) {
+  let out = '';
+  const stack = [{ m: 'code', paren: 0, brace: 0 }];
+  for (let i = open; i < src.length; i++) {
+    const c = src[i]; const top = stack[stack.length - 1];
+    if (top.m === 'code') {
+      // A string used as a property key (`flags['member-password']`) is code, not prose: keep it.
+      if (c === "'" || c === '"' || c === '`') { stack.push({ m: c, keep: /[\w$\])]\s*\[\s*$/.test(out) }); out += ' '; continue; }
+      if (c === '(') top.paren++;
+      if (c === ')' && --top.paren === 0 && stack.length === 1) return { end: i, code: out };
+      if (c === '{') top.brace++;
+      if (c === '}') { if (stack.length > 1 && top.brace === 0) { stack.pop(); out += ' '; continue; } top.brace--; }
+      out += c; continue;
+    }
+    if (c === '\\') { i++; continue; }
+    if (top.keep && c !== top.m) { out += c; continue; }
+    if (top.m === '`' && c === '$' && src[i + 1] === '{') { stack.push({ m: 'code', paren: 0, brace: 0 }); i++; out += ' '; continue; }
+    if (c === top.m) stack.pop();
+  }
+  return { end: src.length, code: out };
+}
+const SECRET_EXPR = /\b(password|pw|memberPw|memberPassword|escPw|adminPass|adminPassword|ADMPW|next)\b|\.password\b|\[\s*(member-|admin-)?password\s*\]/;
+function printedSecrets(src) {
+  const offenders = [];
+  const re = /(console\.(log|error|warn|info)|process\.std(out|err)\.write)\s*\(/g;
+  let m;
+  while ((m = re.exec(src))) {
+    const { end, code } = printedCode(src, m.index + m[0].length - 1);
+    if (SECRET_EXPR.test(code)) offenders.push(`line ${src.slice(0, m.index).split('\n').length}: ${src.slice(m.index, end + 1).replace(/\s+/g, ' ').slice(0, 120)}`);
+  }
+  return offenders;
+}
+
+test('nothing in the CLI prints a password value (G23)', () => {
+  // Static half of the guarantee; misc/invite-matrix.sh runs every install, invite and
+  // passwd path against a real ClickHouse and greps their output for the real values.
+  // A print call that evaluates anything holding a password, as an argument, concatenated,
+  // or inside ${…}, is a leak into terminals, scrollback and agent transcripts, which
+  // memhouse ships into the house.
+  const offenders = printedSecrets(fs.readFileSync(path.join(__dirname, '..', 'bin', 'memhouse.js'), 'utf-8'));
+  assert.deepStrictEqual(offenders, [], `a password value is printed:\n  ${offenders.join('\n  ')}`);
+});
+
+test('the print-leak guard sees every way a value reaches a print call', () => {
+  const caught = (code) => printedSecrets(code).length === 1;
+  assert.ok(caught('console.log(`pw: ${password}`)'), 'interpolation');
+  assert.ok(caught('console.log(`pw: ${password.trim()}`)'), 'an expression inside ${}');
+  assert.ok(caught("console.log('pw:', password)"), 'a bare argument');
+  assert.ok(caught("console.log('pw: ' + cfg.password)"), 'concatenation and a property');
+  assert.ok(caught("process.stderr.write(flags['member-password'])"), 'a flag value on stderr');
+  assert.ok(caught("console.log(`failed (${e.code})`, adminPassword)"), 'a ) inside a string does not end the call');
+  assert.ok(!caught("console.log('rotate the password with memhouse passwd')"), 'prose about passwords is not a leak');
+  assert.ok(!caught('console.log(`password rotated for ${cfg.user}`)'), 'nor is prose beside a non-secret value');
+  assert.ok(!caught("console.log({ fix: ['memhouse install --password …'] })"), 'nor is a string in an array literal');
+});
+
+
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
 else console.log(`${passed}/${passed} unit checks pass`);

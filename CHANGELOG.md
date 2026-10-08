@@ -6,6 +6,23 @@ migration path is planned work, not a promise the old versions can cash.
 
 ## Unreleased
 
+- **No command prints a member password (G23).**
+  - `install --admin-user` used to show the generated password "once". It went into the
+    env file anyway, and the terminal copy landed in scrollback and, through `/mem:access`
+    and `/mem:admin`, in a transcript memhouse ships into the house. It is no longer shown.
+  - If the grant then fails, the user that run created is dropped, so no account is left
+    with a password nobody holds.
+  - `install --print-sql` and `invite --print-sql` print `IDENTIFIED BY <member-password>`
+    in place of a password. The placeholder does not parse until a quoted password replaces
+    it. They also print the env-file lines to hand over, with `MEMHOUSE_INVITE=1` from
+    `invite`, so the member's `install --env` offers rotation. A `--member-password` given
+    with `--print-sql` is not echoed.
+  - `misc/invite-matrix.sh` checks the output of every install, invite and passwd path
+    against the real passwords. A unit test fails on any print call that interpolates a
+    password variable.
+- **Docs:** `memhouse passwd --member` does not exist. `--member` was accepted and ignored
+  there; the guides said otherwise and are corrected.
+
 - **An admin password never has to go on the command line.** `install --member`, `invite`,
   `passwd`, `convert` and `members` take it from `--admin-password-file <file>` (or `-` for
   stdin), from `MEMHOUSE_ADMIN_PASSWORD` (so `with-secret` lends it to one command), from a
