@@ -65,7 +65,7 @@ sqlblock() { awk -v want="$2" '/^```sql/{n++; if (n==want) {on=1; next}} /^```/{
 # Fixtures: session s1 holds a superseded parse (epoch 0) beside the current one (epoch 1),
 # and a subagent block numbered far above the parent's turns, the way the shipper folds one.
 SID='claude-code:s1'
-A "INSERT INTO mem.carol_messages (session_id, seq, source, host, ts, role, text, line_hash, epoch, is_subagent, extra) VALUES
+r=$(A "INSERT INTO mem.carol_messages (session_id, seq, source, host, ts, role, text, line_hash, epoch, is_subagent, extra) VALUES
  ('$SID',0,'claude-code','h',now64(3)-60,'user','old parse: the needle',10,0,0,'{}'),
  ('$SID',1000000000,'claude-code','h',now64(3)-55,'assistant','old subagent turn',11,0,1,'{\"agent\":{\"id\":\"a1\",\"description\":\"look\"}}'),
  ('$SID',0,'claude-code','h',now64(3)-50,'user','start',20,1,0,'{}'),
@@ -73,8 +73,9 @@ A "INSERT INTO mem.carol_messages (session_id, seq, source, host, ts, role, text
  ('$SID',2,'claude-code','h',now64(3)-48,'user','here is the needle',22,1,0,'{}'),
  ('$SID',3,'claude-code','h',now64(3)-47,'assistant','fixed it',23,1,0,'{}'),
  ('$SID',1000000000,'claude-code','h',now64(3)-46,'user','subagent task',24,1,1,'{\"agent\":{\"id\":\"a1\",\"description\":\"look\"}}'),
- ('$SID',1000000001,'claude-code','h',now64(3)-45,'assistant','subagent answer',25,1,1,'{\"agent\":{\"id\":\"a1\",\"description\":\"look\"}}')" >/dev/null
-A "INSERT INTO mem.carol_sessions (session_id, source, host, name, project, created_at, last_updated_at, message_count, extra) VALUES ('$SID','claude-code','h','start','proj', now64(3)-60, now64(3)-45, 6, '{}')" >/dev/null
+ ('$SID',1000000001,'claude-code','h',now64(3)-45,'assistant','subagent answer',25,1,1,'{\"agent\":{\"id\":\"a1\",\"description\":\"look\"}}')" 2>&1)
+r2=$(A "INSERT INTO mem.carol_sessions (session_id, source, host, name, project, created_at, last_updated_at, message_count, extra) VALUES ('$SID','claude-code','h','start','proj', now64(3)-60, now64(3)-45, 6, '{}')" 2>&1)
+[ -z "$r$r2" ] && ok "fixtures inserted (superseded parse, current parse, subagent block)" || bad "fixture insert failed — the checks below would prove nothing" "$r $r2"
 sub() { sed -e "s/<sid>/$SID/g" -e "s/<uid>/$UID_/g" -e "s/<hit_seq>/$HIT/g" -e "s/<agent>/a1/g"; }
 
 # Step 1: the search. It must return the session's user_id and hit_seq — step 2 needs both.
@@ -90,7 +91,7 @@ UID_=$(row user_id); HIT=$(row hit_seq); HITS=$(row hits)
 r=$(run_recipe "$WORK/carol.env" "$(sqlblock "$SKILL" 2 | sub) FORMAT TSV")
 n=$(printf '%s\n' "$r" | grep -c . || true)
 [ "$n" = "6" ] && ok "recall step 2 returns the window by position (6 rows: 0,1,2,3 and the subagent's 2)" || bad "recall step 2 returned $n rows" "$r"
-printf '%s' "$r" | grep -q "old parse\|old subagent" && bad "  step 2 read a superseded parse" || ok "  and no superseded parse"
+printf '%s' "$r" | grep -qE "old parse|old subagent" && bad "  step 2 read a superseded parse" || ok "  and no superseded parse"
 printf '%s' "$r" | grep -q "subagent answer" && ok "  and crosses the gap into the subagent block" || bad "  the window stopped at the seq gap"
 
 # Recent sessions: the columns the room actually has.

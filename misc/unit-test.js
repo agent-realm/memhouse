@@ -1799,6 +1799,10 @@ test('stats refresh when stale even if nothing shipped; readers re-resolve their
   assert.match(q, /roomsCacheStale\(roomsAt\)/, 'queries.js rooms() must re-resolve when stale');
   const ship = fs.readFileSync(path.join(__dirname, '..', 'memhouse', 'shipper', 'ship.js'), 'utf-8');
   assert.ok(!/if \(sessions > 0\) await refreshStats/.test(ship), 'refresh must not be gated on shipping alone');
+  // …and the one call site that refreshes after a pass must ask statsNeedRefresh.
+  const site = ship.slice(ship.indexOf('for (const table of Object.keys(batches)) await flush(table);'));
+  assert.match(site.slice(0, 600), /if \(statsNeedRefresh\(\{ shipped: sessions,[^]*?\)\) \{\s*await refreshStats\(client, rooms\);/,
+    'the end-of-pass refresh must be decided by statsNeedRefresh');
 });
 
 if (process.exitCode) console.error(`\n${passed} passed, some failed`);
