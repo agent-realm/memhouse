@@ -11,7 +11,8 @@ migration path is planned work, not a promise the old versions can cash.
   remain MIT; that text is kept in `LICENSES/memhouse-MIT-until-0.18.11.txt`.
   - `LICENSE` is the Apache License 2.0, verbatim from apache.org.
   - `NOTICE` credits:
-    - agentlytics (Fatih Kadir Akın and contributors, MIT; `LICENSES/agentlytics-MIT.txt`).
+    - agentlytics (Fatih Kadir Akın, MIT as declared in its README;
+      `LICENSES/agentlytics-MIT.txt`).
       Every commit by an author other than Ramazan Polat predates the fork at `4cba3d8`
       (2026-06-21);
     - models.dev, the source of `pricing.json` (MIT; `LICENSES/models.dev-MIT.txt`);

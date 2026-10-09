@@ -8,17 +8,14 @@ apply to those releases.
 
 ------------------------------------------------------------------------------------
 This product includes software from agentlytics
-(https://github.com/f/agentlytics), Copyright (c) 2026 Fatih Kadir Akın and the
-agentlytics contributors, licensed under the MIT License. See
-LICENSES/agentlytics-MIT.txt.
+(https://github.com/f/agentlytics), MIT (declared in its README:
+https://github.com/f/agentlytics/blob/master/README.md#license), Copyright (c) 2026
+Fatih Kadir Akın. See LICENSES/agentlytics-MIT.txt.
 
 memhouse was forked from agentlytics at commit 4cba3d8 (2026-06-21); the editor
 adapters, the dashboard and the cost engine originate there, and this repository's
-history carries that lineage. agentlytics declares its license as MIT in its README
-and as ISC in its package.json, and ships no license file; both are permissive
-licenses whose condition, keeping the copyright and permission notice, is met here.
-Every commit in this repository by an author other than Ramazan Polat predates the
-fork.
+history carries that lineage. Every commit in this repository by an author other
+than Ramazan Polat predates the fork.
 
 ------------------------------------------------------------------------------------
 pricing.json is derived from the models.dev model catalog
