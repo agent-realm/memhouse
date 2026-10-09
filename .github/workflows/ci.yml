@@ -129,4 +129,11 @@ jobs:
             echo 'tarball holds a file it must not ship'; exit 1
           fi
           grep -q 'package/public/index.html' /tmp/contents.txt   # built UI present
+          # The bundle's third-party license texts travel with it (minification strips them
+          # from the code): the file is generated at build time by ui/third-party-notices.js.
+          grep -q 'package/public/THIRD_PARTY_NOTICES.txt' /tmp/contents.txt
+          tar xzf memhouse-*.tgz -O package/public/THIRD_PARTY_NOTICES.txt > /tmp/notices.txt
+          for p in react react-dom chart.js lucide-react tailwindcss react-markdown; do
+            grep -q "^$p [0-9]" /tmp/notices.txt || { echo "THIRD_PARTY_NOTICES.txt does not list $p"; exit 1; }
+          done
           grep -q 'package/LICENSE' /tmp/contents.txt
