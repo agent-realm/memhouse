@@ -10,8 +10,8 @@ the full text. Starting with 0.18.10, each release also gets its own document un
 docs/releases/.
 
 
-Unreleased — 0.18.11 (release PR, not yet tagged)
---------------------------------------------------
+v0.18.11  2026-10-10   (last MIT release)
+----------------------------------------
 - Sessions with subagents ship only their new rows. Subagent rows are numbered from a
   stable block, seq = 1e9 + slot × 1e5 + turn. The first pass after the upgrade re-sends
   each such session once.
