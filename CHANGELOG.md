@@ -4,18 +4,6 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## Unreleased
-
-- **The dashboard now ships the license notices of what it bundles.** The built dashboard
-  (`public/`) includes React, chart.js, lucide-react (ISC), react-markdown, the remark and
-  micromark family, tailwindcss and others: 79 packages. Their licenses require the
-  notice to travel with every copy, and Vite's minifier strips the license comments, so
-  every published package so far carried those copies without one.
-  - `ui/third-party-notices.js`, a Vite plugin with no dependencies of its own, now writes
-    `public/THIRD_PARTY_NOTICES.txt` at build time from the bundle's module graph. It
-    lists each package with its version, declared license, and the license text it ships.
-  - CI's tarball audit fails if the file is missing or does not list the main packages.
-
 ## 0.18.11 — 2026-10-08
 
 Release notes: [`docs/releases/v0.18.11.md`](docs/releases/v0.18.11.md). Read its upgrade
@@ -25,8 +13,18 @@ subagents once.
 - Sessions with subagents ship only their new rows.
 - **Security:** `invite` no longer sends a stored credential to `--url` (G4).
 - The 0.18.10 pre-tag list is finished, and the gentar kit is v0.9.3.
+- The dashboard ships the license notices of every package it bundles (`public/THIRD_PARTY_NOTICES.txt`).
 - **No drill was run for this release; waived (2026-10-08) under the pilot's 0.18.10 ruling. The drill runs before 0.19.0.**
 
+- **The dashboard now ships the license notices of what it bundles.** The built dashboard
+  (`public/`) includes React, chart.js, lucide-react (ISC), react-markdown, the remark and
+  micromark family, tailwindcss and others: every bundled package. Their licenses require the
+  notice to travel with every copy, and Vite's minifier strips the license comments, so
+  every published package so far carried those copies without one.
+  - `ui/third-party-notices.js`, a Vite plugin with no dependencies of its own, now writes
+    `public/THIRD_PARTY_NOTICES.txt` at build time from the bundle's module graph. It
+    lists each package with its version, declared license, and the license text it ships.
+  - CI's tarball audit fails if the file is missing or does not list the main packages.
 - **A session with subagents ships only its new rows, like any other.** 0.18.8's tail-only
   shipping did not reach the sessions that grow the most: folded subagent rows were numbered
   by position after the parent's turns, so one new parent turn moved every one of them, the
