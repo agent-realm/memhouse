@@ -137,3 +137,11 @@ jobs:
             grep -q "^$p [0-9]" /tmp/notices.txt || { echo "THIRD_PARTY_NOTICES.txt does not list $p"; exit 1; }
           done
           grep -q 'package/LICENSE' /tmp/contents.txt
+          # Apache-2.0 from 0.19.0: the license text, its NOTICE and the kept MIT texts ship.
+          # Byte for byte: apache.org's LICENSE-2.0.txt (11358 bytes). A header grep would pass a
+          # truncated or edited license.
+          test "$(tar xzf memhouse-*.tgz -O package/LICENSE | sha256sum | cut -d' ' -f1)" = cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+          grep -q 'package/NOTICE' /tmp/contents.txt
+          for f in agentlytics-MIT.txt models.dev-MIT.txt memhouse-MIT-until-0.18.11.txt; do
+            grep -q "package/LICENSES/$f" /tmp/contents.txt || { echo "tarball lacks LICENSES/$f"; exit 1; }
+          done

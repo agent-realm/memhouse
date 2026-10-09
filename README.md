@@ -76,8 +76,18 @@ See [`AGENTS.md`](AGENTS.md) before your first change. Deeper reading:
 `memhouse/DESIGN.md` (the design and why), `memhouse/house/HOUSE.md` (layout and schema),
 `SECURITY.md` (what holds, and what does not).
 
-## Heritage and license
+## License
 
-Built on [agentlytics](https://github.com/f/agentlytics) by Fatih Kadir Akın (MIT). The
-adapters, dashboard and cost engine come from there, and this repository's history carries
-the full lineage. MIT.
+memhouse is licensed under the [Apache License 2.0](LICENSE): the CLI, the shipper, the
+dashboard, the tools and the docs alike. See [`NOTICE`](NOTICE).
+
+**Relicensed from MIT to Apache-2.0 from 0.19.0; releases up to and including 0.18.11
+remain MIT** (the text is kept in
+[`LICENSES/memhouse-MIT-until-0.18.11.txt`](LICENSES/memhouse-MIT-until-0.18.11.txt)).
+
+Built on [agentlytics](https://github.com/f/agentlytics) by Fatih Kadir Akın (MIT; see
+[`LICENSES/agentlytics-MIT.txt`](LICENSES/agentlytics-MIT.txt)). The adapters, dashboard
+and cost engine come from there, and this repository's history carries the full lineage.
+Model prices come from [models.dev](https://github.com/anomalyco/models.dev) (MIT). The
+built dashboard's bundled packages are listed with their licenses in
+`public/THIRD_PARTY_NOTICES.txt`.

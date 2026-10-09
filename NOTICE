@@ -1,0 +1,28 @@
+memhouse
+Copyright 2026 Ramazan Polat
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE), from
+version 0.19.0. Releases up to and including 0.18.11 were published under the MIT
+License; that text is kept in LICENSES/memhouse-MIT-until-0.18.11.txt and continues to
+apply to those releases.
+
+------------------------------------------------------------------------------------
+This product includes software from agentlytics
+(https://github.com/f/agentlytics), MIT (declared in its README:
+https://github.com/f/agentlytics/blob/master/README.md#license), Copyright (c) 2026
+Fatih Kadir Akın. See LICENSES/agentlytics-MIT.txt.
+
+memhouse was forked from agentlytics at commit 4cba3d8 (2026-06-21); the editor
+adapters, the dashboard and the cost engine originate there, and this repository's
+history carries that lineage. Every commit on main by an author other than Ramazan
+Polat predates the fork.
+
+------------------------------------------------------------------------------------
+pricing.json is derived from the models.dev model catalog
+(https://github.com/anomalyco/models.dev), Copyright (c) 2025 models.dev, licensed
+under the MIT License. See LICENSES/models.dev-MIT.txt.
+
+------------------------------------------------------------------------------------
+The built dashboard (public/) bundles third-party packages (React, chart.js,
+lucide-react, react-markdown, tailwindcss and others) under their own licenses. Their
+notices are in public/THIRD_PARTY_NOTICES.txt, generated at build time.
