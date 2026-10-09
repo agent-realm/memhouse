@@ -4,6 +4,21 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **memhouse is relicensed from MIT to Apache-2.0, from 0.19.0.** That covers the whole
+  repository: CLI, shipper, dashboard, tools and docs. Releases up to and including 0.18.11
+  remain MIT; that text is kept in `LICENSES/memhouse-MIT-until-0.18.11.txt`.
+  - `LICENSE` is the Apache License 2.0, verbatim from apache.org.
+  - `NOTICE` credits:
+    - agentlytics (Fatih Kadir Akın and contributors, MIT; `LICENSES/agentlytics-MIT.txt`).
+      Every commit by an author other than Ramazan Polat predates the fork at `4cba3d8`
+      (2026-06-21);
+    - models.dev, the source of `pricing.json` (MIT; `LICENSES/models.dev-MIT.txt`);
+    - the dashboard's bundled packages, via `public/THIRD_PARTY_NOTICES.txt`.
+  - `package.json` and `ui/package.json` declare `Apache-2.0`. The npm package now also
+    ships `NOTICE` and `LICENSES/`, and CI's tarball audit checks for both.
+
 ## 0.18.11 — 2026-10-10
 
 Release notes: [`docs/releases/v0.18.11.md`](docs/releases/v0.18.11.md). Read its upgrade

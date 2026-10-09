@@ -61,7 +61,7 @@ Design choices people will ask about:
   house is as sensitive as your shell history — place it accordingly. SECURITY.md
   states the whole model without varnish.
 
-MIT, built on the adapter and dashboard heritage of agentlytics (credited in the
+Apache-2.0, built on the adapter and dashboard heritage of agentlytics (MIT) (credited in the
 repo). macOS and Linux are real today; Windows is freshly tested (see the support
 matrix). Everything — including the acceptance suite an agent drives against a
 throwaway ClickHouse, and the git-history secret scan we ran before opening the

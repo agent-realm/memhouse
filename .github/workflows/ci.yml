@@ -137,3 +137,9 @@ jobs:
             grep -q "^$p [0-9]" /tmp/notices.txt || { echo "THIRD_PARTY_NOTICES.txt does not list $p"; exit 1; }
           done
           grep -q 'package/LICENSE' /tmp/contents.txt
+          # Apache-2.0 from 0.19.0: the license text, its NOTICE and the kept MIT texts ship.
+          tar xzf memhouse-*.tgz -O package/LICENSE | head -2 | grep -q 'Apache License'
+          grep -q 'package/NOTICE' /tmp/contents.txt
+          for f in agentlytics-MIT.txt models.dev-MIT.txt memhouse-MIT-until-0.18.11.txt; do
+            grep -q "package/LICENSES/$f" /tmp/contents.txt || { echo "tarball lacks LICENSES/$f"; exit 1; }
+          done

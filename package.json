@@ -21,6 +21,8 @@
     "ui/eslint.config.js",
     "public/",
     "README.md",
+    "NOTICE",
+    "LICENSES/",
     "docs/README.md",
     "docs/tutorials/",
     "docs/guides/",
@@ -51,7 +53,7 @@
     "memhouse"
   ],
   "author": "Ramazan Polat <ramazanpolat@gmail.com> (built on agentlytics by fkadev)",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=24.0.0"
   },
