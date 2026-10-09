@@ -15,6 +15,12 @@ import path from 'node:path'
 
 const LICENSE_FILE = /^(licen[sc]e|copying|notice)([.-].*)?$/i
 
+// Bundled packages that genuinely ship no license file, each with its declared license
+// and why it may be listed without a text. Any other package without one fails the build.
+// Empty today: every bundled package ships its license file.
+//   'name': { license: 'MIT', reason: 'one line: why there is no file, and what was checked' },
+export const NO_LICENSE_FILE = {}
+
 // '/abs/ui/node_modules/react-dom/cjs/x.js' -> { name: 'react-dom', dir: '/abs/ui/node_modules/react-dom' }
 // The LAST node_modules segment wins, so a nested copy is attributed to itself.
 export function packageOf(id) {
@@ -55,30 +61,47 @@ export default function thirdPartyNotices({ fileName = 'THIRD_PARTY_NOTICES.txt'
     name: 'memhouse-third-party-notices',
     apply: 'build',
     generateBundle(_options, bundle) {
-      const found = new Map()
+      // Keyed by INSTALL DIRECTORY, not by name: two versions of one package can both be
+      // bundled (a nested copy beside the top-level one), and each carries its own license.
+      const found = new Map() // dir -> name
       for (const out of Object.values(bundle)) {
         if (out.type !== 'chunk') continue
         for (const id of Object.keys(out.modules || {})) {
           const p = packageOf(id)
-          if (p && !found.has(p.name)) found.set(p.name, p.dir)
+          if (p && !found.has(p.dir)) found.set(p.dir, p.name)
         }
       }
       for (const name of extra) {
-        const dir = path.join(root, 'node_modules', name)
-        if (!found.has(name) && fs.existsSync(dir)) found.set(name, dir)
+        const dir = path.join(root, 'node_modules', name).split(path.sep).join('/')
+        if (!found.has(dir) && fs.existsSync(dir)) found.set(dir, name)
       }
-      const names = [...found.keys()].sort()
-      const missing = []
-      const blocks = names.map((name) => {
-        const info = readPackage(found.get(name))
-        if (!info.texts.length) missing.push(name)
-        const head = `${name}${info.version ? ` ${info.version}` : ''} — ${info.license}${info.repo ? `\n${info.repo}` : ''}`
-        const body = info.texts.length
-          ? info.texts.map((t) => (info.texts.length > 1 ? `[${t.file}]\n${t.text}` : t.text)).join('\n\n')
-          : `(this package ships no license file; its package.json declares: ${info.license})`
+      // One entry per name@version; two install dirs holding the same version are one notice.
+      const entries = new Map()
+      for (const [dir, name] of found) {
+        const info = readPackage(dir)
+        const key = `${name}@${info.version}`
+        if (!entries.has(key)) entries.set(key, { name, ...info })
+      }
+      const list = [...entries.values()].sort((a, b) => (a.name === b.name
+        ? a.version.localeCompare(b.version, undefined, { numeric: true })
+        : (a.name < b.name ? -1 : 1)))
+      // A bundled package whose license text cannot be shipped fails the build. A notice
+      // file that silently omits one is the defect this plugin exists to prevent. The only
+      // exceptions are packages that genuinely ship no license file, named in
+      // NO_LICENSE_FILE with their declared license and the reason.
+      const missing = list.filter((e) => !e.texts.length && !NO_LICENSE_FILE[e.name])
+      if (missing.length) {
+        this.error(`bundled without a license text: ${missing.map((e) => `${e.name}@${e.version} (declares ${e.license})`).join(', ')}. `
+          + 'Add the license text, or list the package in NO_LICENSE_FILE (ui/third-party-notices.js) with its declared license and why.')
+      }
+      const blocks = list.map((e) => {
+        const allowed = NO_LICENSE_FILE[e.name]
+        const head = `${e.name}${e.version ? ` ${e.version}` : ''} — ${e.license}${e.repo ? `\n${e.repo}` : ''}`
+        const body = e.texts.length
+          ? e.texts.map((t) => (e.texts.length > 1 ? `[${t.file}]\n${t.text}` : t.text)).join('\n\n')
+          : `(this package ships no license file; declared license: ${allowed.license}. ${allowed.reason})`
         return `${'='.repeat(72)}\n${head}\n${'-'.repeat(72)}\n${body}\n`
       })
-      if (missing.length) this.warn(`no license file in: ${missing.join(', ')} — listed with their declared license only`)
       const source = [
         'memhouse dashboard — third-party software included in this directory (public/)',
         '',
@@ -86,7 +109,7 @@ export default function thirdPartyNotices({ fileName = 'THIRD_PARTY_NOTICES.txt'
         'its declared license, and the license text it ships. Generated at build time by',
         'ui/third-party-notices.js from the bundle\'s module graph.',
         '',
-        `${names.length} packages.`,
+        `${list.length} packages.`,
         '',
         ...blocks,
       ].join('\n')

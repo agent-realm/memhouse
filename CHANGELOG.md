@@ -24,7 +24,11 @@ subagents once.
   - `ui/third-party-notices.js`, a Vite plugin with no dependencies of its own, now writes
     `public/THIRD_PARTY_NOTICES.txt` at build time from the bundle's module graph. It
     lists each package with its version, declared license, and the license text it ships.
-  - CI's tarball audit fails if the file is missing or does not list the main packages.
+  - A bundled package with no license text fails the build. The only exception is an
+    explicit, reasoned list of packages that truly ship none; it is empty today. Each
+    `name@version` is listed once, so a second bundled version keeps its own text.
+  - CI's tarball audit also fails if the file is missing or does not list the main
+    packages.
 - **A session with subagents ships only its new rows, like any other.** 0.18.8's tail-only
   shipping did not reach the sessions that grow the most: folded subagent rows were numbered
   by position after the parent's turns, so one new parent turn moved every one of them, the
