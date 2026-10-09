@@ -14,8 +14,8 @@ Fatih Kadir Akın. See LICENSES/agentlytics-MIT.txt.
 
 memhouse was forked from agentlytics at commit 4cba3d8 (2026-06-21); the editor
 adapters, the dashboard and the cost engine originate there, and this repository's
-history carries that lineage. Every commit in this repository by an author other
-than Ramazan Polat predates the fork.
+history carries that lineage. Every commit on main by an author other than Ramazan
+Polat predates the fork.
 
 ------------------------------------------------------------------------------------
 pricing.json is derived from the models.dev model catalog
