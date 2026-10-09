@@ -4,7 +4,7 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
-## 0.18.11 — 2026-10-08
+## 0.18.11 — 2026-10-10
 
 Release notes: [`docs/releases/v0.18.11.md`](docs/releases/v0.18.11.md). Read its upgrade
 section first: the first pass after the upgrade re-sends every stored session with
