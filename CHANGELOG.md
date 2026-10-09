@@ -4,6 +4,18 @@ Versions before 0.8.0 were beta-only. Beta installs of 0.7.x and earlier should
 uninstall and reinstall — the 0.8.0 layout is new, and an in-place `update` +
 migration path is planned work, not a promise the old versions can cash.
 
+## Unreleased
+
+- **The dashboard now ships the license notices of what it bundles.** The built dashboard
+  (`public/`) includes React, chart.js, lucide-react (ISC), react-markdown, the remark and
+  micromark family, tailwindcss and others: 79 packages. Their licenses require the
+  notice to travel with every copy, and Vite's minifier strips the license comments, so
+  every published package so far carried those copies without one.
+  - `ui/third-party-notices.js`, a Vite plugin with no dependencies of its own, now writes
+    `public/THIRD_PARTY_NOTICES.txt` at build time from the bundle's module graph. It
+    lists each package with its version, declared license, and the license text it ships.
+  - CI's tarball audit fails if the file is missing or does not list the main packages.
+
 ## 0.18.11 — 2026-10-08
 
 Release notes: [`docs/releases/v0.18.11.md`](docs/releases/v0.18.11.md). Read its upgrade

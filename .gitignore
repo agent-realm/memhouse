@@ -153,6 +153,7 @@ vite.config.ts.timestamp-*
 # UI build output (built from ui/ source)
 public/assets/
 public/index.html
+public/THIRD_PARTY_NOTICES.txt
 
 .DS_Store
 # gauntlet run transcripts (sandbox/vm-e2e/run.sh writes here by default)
